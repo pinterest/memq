@@ -1,0 +1,32 @@
+logging:
+  level: INFO
+  appenders:
+    - type: file
+      currentLogFilename: /var/log/memq/memq.log
+      archivedLogFilenamePattern: /var/log/memq/memq-%i.log.gz
+      archivedFileCount: 10
+      maxFileSize: 100MiB
+defaultBufferSize: 2097152
+defaultSlotTimeout: 300000
+cluster: false
+openTsdbConfig:
+   host: 127.0.0.1
+   port: 18126
+   frequencyInSeconds: 60
+awsUploadRatePerStreamInMB: 10
+topicConfig:
+    - topic: TestTopic
+      ringBufferSize: 1024
+      outputParallelism: 50
+      batchSizeMB: 1
+      batchMilliSeconds: 1000
+      outputHandler: s3v2
+      outputHandlerConfig:
+        retryTimeoutMillis: 5000
+        maxAttempts: 2
+        disableNotifications: false
+        bucket: <mybucket-name>
+        path: test/TestTopic
+        region: us-east-1
+        notificationServerset: /tmp/serverset/notification.serverset
+        notificationTopic: TestTopicNotifications
