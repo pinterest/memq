@@ -1,0 +1,19 @@
+                                                                                                        
+MMMMMMMM               MMMMMMMMEEEEEEEEEEEEEEEEEEEEEEMMMMMMMM               MMMMMMMM     QQQQQQQQQ      
+M:::::::M             M:::::::ME::::::::::::::::::::EM:::::::M             M:::::::M   QQ:::::::::QQ    
+M::::::::M           M::::::::ME::::::::::::::::::::EM::::::::M           M::::::::M QQ:::::::::::::QQ  
+M:::::::::M         M:::::::::MEE::::::EEEEEEEEE::::EM:::::::::M         M:::::::::MQ:::::::QQQ:::::::Q 
+M::::::::::M       M::::::::::M  E:::::E       EEEEEEM::::::::::M       M::::::::::MQ::::::O   Q::::::Q 
+M:::::::::::M     M:::::::::::M  E:::::E             M:::::::::::M     M:::::::::::MQ:::::O     Q:::::Q 
+M:::::::M::::M   M::::M:::::::M  E::::::EEEEEEEEEE   M:::::::M::::M   M::::M:::::::MQ:::::O     Q:::::Q 
+M::::::M M::::M M::::M M::::::M  E:::::::::::::::E   M::::::M M::::M M::::M M::::::MQ:::::O     Q:::::Q 
+M::::::M  M::::M::::M  M::::::M  E:::::::::::::::E   M::::::M  M::::M::::M  M::::::MQ:::::O     Q:::::Q 
+M::::::M   M:::::::M   M::::::M  E::::::EEEEEEEEEE   M::::::M   M:::::::M   M::::::MQ:::::O     Q:::::Q 
+M::::::M    M:::::M    M::::::M  E:::::E             M::::::M    M:::::M    M::::::MQ:::::O  QQQQ:::::Q 
+M::::::M     MMMMM     M::::::M  E:::::E       EEEEEEM::::::M     MMMMM     M::::::MQ::::::O Q::::::::Q 
+M::::::M               M::::::MEE::::::EEEEEEEE:::::EM::::::M               M::::::MQ:::::::QQ::::::::Q 
+M::::::M               M::::::ME::::::::::::::::::::EM::::::M               M::::::M QQ::::::::::::::Q  
+M::::::M               M::::::ME::::::::::::::::::::EM::::::M               M::::::M   QQ:::::::::::Q   
+MMMMMMMM               MMMMMMMMEEEEEEEEEEEEEEEEEEEEEEMMMMMMMM               MMMMMMMM     QQQQQQQQ::::QQ 
+                                                                                                 Q:::::Q
+                                                                                                 

@@ -1,0 +1,28 @@
+{
+	"topicOrder": 1612218199565,
+	"bufferSize": 2097152,
+	"ringBufferSize": 512,
+	"batchMilliSeconds": 20000,
+	"batchSizeMB": 15,
+	"outputParallelism": 60,
+	"maxDispatchCount": 200,
+	"topic": "test_topic",
+	"outputHandlerConfig": {
+		"delay.max.millis": "10000",
+		"notificationServerset": "/var/serverset/discovery.testkafka.prod",
+		"bucket": "abracadabra",
+		"delay.min.millis": "200",
+		"disableNotifications": "false",
+		"notificationBrokerset": "Capacity_B9_P180_0",
+		"retryTimeoutMillis": "3000",
+		"notificationTopic": "memq_test_topic",
+		"retries": "3",
+		"region": "us-east-1",
+		"path": "topics/test_topic"
+	},
+	"tickFrequencyMillis": 1000,
+	"enableBucketing2Processor": true,
+	"outputHandler": "customs3aync2",
+	"inputTrafficMB": 100.0,
+	"enableServerHeaderValidation": true
+}

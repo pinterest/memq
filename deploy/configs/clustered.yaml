@@ -1,0 +1,17 @@
+logging:
+  level: INFO
+  appenders:
+    - type: file
+      threshold: INFO
+      currentLogFilename: /var/log/memq/memq.log
+      archivedLogFilenamePattern: /var/log/memq/memq-%i.log.gz
+      archivedFileCount: 10
+      maxFileSize: 100MiB
+defaultBufferSize: 2097152
+defaultSlotTimeout: 300000
+clusteringConfig:
+  enableExpiration: true
+  zookeeperConnectionString: localhost:2181/memq
+cluster: true
+resetEnabled: false
+awsUploadRatePerStreamInMB: 10
