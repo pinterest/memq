@@ -32,6 +32,7 @@ import org.slf4j.LoggerFactory;
 import com.google.common.annotations.VisibleForTesting;
 import com.pinterest.memq.client.commons.Compression;
 import com.pinterest.memq.client.commons2.MemqCommonClient;
+import com.pinterest.memq.client.commons2.network.NetworkClient;
 import com.pinterest.memq.client.producer.MemqWriteResult;
 import com.pinterest.memq.client.producer.TaskRequest;
 import com.pinterest.memq.commons.protocol.RequestPacket;
@@ -135,7 +136,7 @@ public class MemqNettyRequest extends TaskRequest {
         if (attempt > 1) {
           throw new Exception("Write request failed after multiple attempts");
         }
-        networkClient.reconnect(getTopicName(), false);
+        networkClient.drainAndReconnect(getTopicName(), false, responsePacket.attr(NetworkClient.PACKET_CHANNEL_ID_ATTR_KEY).get());
         shouldRelease = false;
         return dispatchRequestAndReturnResponse(networkClient, writeTs, requestPacket, ++attempt);
       case ResponseCodes.BAD_REQUEST:

@@ -16,6 +16,7 @@
 package com.pinterest.memq.core.clustering;
 
 import java.util.Set;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import org.apache.curator.framework.CuratorFramework;
@@ -89,6 +90,7 @@ public final class TopicAssignmentWatcher implements Runnable {
         }
       } catch (Exception e) {
         // TODO Auto-generated catch block
+        logger.log(Level.SEVERE, "Failed to update topic assignments");
         e.printStackTrace();
       }
       try {

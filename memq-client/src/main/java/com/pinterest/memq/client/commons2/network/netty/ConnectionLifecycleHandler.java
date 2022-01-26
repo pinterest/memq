@@ -20,6 +20,7 @@ import com.pinterest.memq.client.commons2.network.ResponseHandler;
 
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelId;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.timeout.IdleState;
 import io.netty.handler.timeout.IdleStateEvent;
@@ -56,18 +57,22 @@ final class ConnectionLifecycleHandler extends ChannelDuplexHandler {
     logger.info("[" + ctx.channel().id() + "] Closing connection to server: " + ctx.channel()
         .remoteAddress());
     handler.cleanAndRejectInflightRequests(
-        new ClosedConnectionException("Connection " + ctx.channel().id() + " closed"));
+        ctx.channel().id(),
+        new ClosedConnectionException("Connection " + ctx.channel().id() + " closed")
+    );
     super.channelInactive(ctx);
   }
 
   @Override
   public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-    logger.error("[" + ctx.channel().id() + "] Exception caught in inbound pipeline: ", cause);
+    ChannelId channelId = ctx.channel().id();
+    logger.error("[" + channelId + "] Exception caught in inbound pipeline: ", cause);
     if (cause instanceof IOException && (cause).getMessage().equals("Connection reset by peer")) {
       handler.cleanAndRejectInflightRequests(
-          new ClosedConnectionException("Connection " + ctx.channel().id() + " closed by server"));
+          channelId,
+          new ClosedConnectionException("Connection " + channelId + " closed by server"));
     } else {
-      handler.cleanAndRejectInflightRequests(cause);
+      handler.cleanAndRejectInflightRequests(channelId, cause);
     }
     ctx.close();
   }

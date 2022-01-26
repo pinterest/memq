@@ -27,8 +27,6 @@ import com.pinterest.memq.client.commons2.retry.RetryStrategy;
 import com.pinterest.memq.client.producer.MemqWriteResult;
 import com.pinterest.memq.commons.MessageId;
 import com.pinterest.memq.commons.config.SSLConfig;
-import com.pinterest.memq.commons.protocol.Broker;
-import com.pinterest.memq.commons.protocol.TopicMetadata;
 
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Histogram;
@@ -45,7 +43,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.Set;
 import java.util.concurrent.Future;
 
 public class MemqProducer<K, V> implements Closeable {
@@ -125,10 +122,8 @@ public class MemqProducer<K, V> implements Closeable {
 
   private void initializeTopicConnection(List<Endpoint> bootstrapEndpoints, String topic) throws Exception {
     client.initialize(bootstrapEndpoints);
-    TopicMetadata topicMetadata = client.getTopicMetadata(topic);
-    Set<Broker> brokers = topicMetadata.getWriteBrokers();
-    logger.debug("Fetched topic metadata, now reconnecting to one of the serving brokers:" + brokers);
-    client.resetEndpoints(MemqCommonClient.generateEndpointsFromBrokers(brokers));
+    client.resetTopicConnection(topic, false);
+    logger.debug("Fetched topic metadata, now reconnecting to one of the serving brokers");
   }
 
   /**

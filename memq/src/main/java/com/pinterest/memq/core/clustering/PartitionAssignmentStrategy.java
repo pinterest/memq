@@ -47,14 +47,14 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
  * 1 partition for a topic 2. Allocation is performed on a node with most capacity
  * available 3. Minimum no.of partitions = no.of racks in the cluster
  */
-public class PartitionBalanceStrategy extends BalanceStrategy {
+public class PartitionAssignmentStrategy extends AssignmentStrategy {
 
   private static final int DEFAULT_CAPACITY = 150;
-  static final Logger logger = Logger.getLogger(PartitionBalanceStrategy.class.getCanonicalName());
+  static final Logger logger = Logger.getLogger(PartitionAssignmentStrategy.class.getCanonicalName());
   private Map<String, Integer> instanceTypeThroughputMap = new HashMap<>();
 
   @Override
-  public Set<Broker> balance(Set<TopicConfig> topics, Set<Broker> brokers) {
+  public Set<Broker> assign(Set<TopicConfig> topics, Set<Broker> brokers) {
     List<Broker> brokerList = new ArrayList<>(brokers);
     Map<Broker, Set<TopicAssignment>> newAssignments = new HashMap<>();
     Collections.sort(brokerList);

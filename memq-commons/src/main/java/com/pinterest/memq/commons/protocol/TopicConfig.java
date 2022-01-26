@@ -18,6 +18,7 @@ package com.pinterest.memq.commons.protocol;
 import java.util.Objects;
 import java.util.Properties;
 
+import com.google.gson.Gson;
 import com.google.gson.annotations.SerializedName;
 
 public class TopicConfig implements Comparable<TopicConfig> {
@@ -58,6 +59,8 @@ public class TopicConfig implements Comparable<TopicConfig> {
   @SerializedName(value = "storageHandlerConfig", alternate = "outputHandlerConfig")
   private Properties storageHandlerConfig = new Properties();
 
+  private Properties loadBalancerConfig = new Properties();
+
   private volatile double inputTrafficMB = 0.0;
 
   public TopicConfig() {
@@ -79,6 +82,7 @@ public class TopicConfig implements Comparable<TopicConfig> {
     this.enableBucketing2Processor = config.enableBucketing2Processor;
     this.enableServerHeaderValidation = config.enableServerHeaderValidation;
     this.clusteringMultiplier = config.clusteringMultiplier;
+    this.loadBalancerConfig = config.loadBalancerConfig;
   }
 
   public TopicConfig(int topicOrder,
@@ -277,6 +281,14 @@ public class TopicConfig implements Comparable<TopicConfig> {
     this.clusteringMultiplier = clusteringMultiplier;
   }
 
+  public void setLoadBalancerConfig(Properties loadBalancerConfig) {
+    this.loadBalancerConfig = loadBalancerConfig;
+  }
+
+  public Properties getLoadBalancerConfig() {
+    return loadBalancerConfig;
+  }
+
   @Override
   public boolean equals(Object obj) {
     if (obj instanceof TopicConfig) {
@@ -326,6 +338,9 @@ public class TopicConfig implements Comparable<TopicConfig> {
       return true;
     }
     if (Double.compare(that.inputTrafficMB, inputTrafficMB) != 0) {
+      return true;
+    }
+    if (!Objects.equals(loadBalancerConfig, that.loadBalancerConfig)) {
       return true;
     }
     if (!Objects.equals(storageHandlerConfig, that.storageHandlerConfig)) {

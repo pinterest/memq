@@ -135,7 +135,9 @@ public class TestBucketingTopicProcessor {
   }
 
   @Test
-  public void testTimeBasedBatch() throws InterruptedException {
+  public void testTimeBasedBatch()
+      throws InterruptedException, ClassNotFoundException, InstantiationException,
+             IllegalAccessException {
     MetricRegistry registry = new MetricRegistry();
     TopicConfig topicConfig = new TopicConfig();
     topicConfig.setTopic("test");
@@ -175,7 +177,7 @@ public class TestBucketingTopicProcessor {
     ScheduledExecutorService timerService = Executors.newScheduledThreadPool(1,
         new DaemonThreadFactory());
     BucketingTopicProcessor processor = new BucketingTopicProcessor(registry, topicConfig,
-        outputHandler, timerService, null);
+        outputHandler, timerService, null, null);
     int bytesWritten = 0;
     try {
       for (int i = 0; i < 20; i++) {
@@ -202,7 +204,9 @@ public class TestBucketingTopicProcessor {
   }
 
   @Test
-  public void testCountBasedBatch() throws InterruptedException {
+  public void testCountBasedBatch()
+      throws InterruptedException, ClassNotFoundException, InstantiationException,
+             IllegalAccessException {
     MetricRegistry registry = new MetricRegistry();
     TopicConfig topicConfig = new TopicConfig();
     topicConfig.setTopic("test");
@@ -245,7 +249,7 @@ public class TestBucketingTopicProcessor {
     ScheduledExecutorService timerService = Executors.newScheduledThreadPool(1,
         new DaemonThreadFactory());
     BucketingTopicProcessor processor = new BucketingTopicProcessor(registry, topicConfig,
-        outputHandler, timerService, null);
+        outputHandler, timerService, null, null);
     int bytesWritten = 0;
     try {
       for (int i = 0; i < 20; i++) {
@@ -281,7 +285,9 @@ public class TestBucketingTopicProcessor {
   }
 
   @Test
-  public void testWriteCompleteness() throws InterruptedException {
+  public void testWriteCompleteness()
+      throws InterruptedException, ClassNotFoundException, InstantiationException,
+             IllegalAccessException {
     MetricRegistry registry = new MetricRegistry();
     TopicConfig topicConfig = new TopicConfig();
     topicConfig.setTopic("test");
@@ -321,7 +327,7 @@ public class TestBucketingTopicProcessor {
     ScheduledExecutorService timerService = Executors.newScheduledThreadPool(1,
         new DaemonThreadFactory());
     BucketingTopicProcessor processor = new BucketingTopicProcessor(registry, topicConfig,
-        outputHandler, timerService, null);
+        outputHandler, timerService, null, null);
     int bytesWritten = 0;
     try {
       for (int i = 0; i < 20; i++) {
@@ -345,7 +351,9 @@ public class TestBucketingTopicProcessor {
   }
 
   @Test
-  public void testHeaderValidation() throws InterruptedException {
+  public void testHeaderValidation()
+      throws InterruptedException, ClassNotFoundException, InstantiationException,
+             IllegalAccessException {
     MetricRegistry registry = new MetricRegistry();
     TopicConfig topicConfig = new TopicConfig();
     topicConfig.setTopic("test");
@@ -386,7 +394,7 @@ public class TestBucketingTopicProcessor {
     ScheduledExecutorService timerService = Executors.newScheduledThreadPool(1,
         new DaemonThreadFactory());
     BucketingTopicProcessor processor = new BucketingTopicProcessor(registry, topicConfig,
-        outputHandler, timerService, null);
+        outputHandler, timerService, null, null);
     int bytesWritten = 0;
     try {
       for (int i = 0; i < 20; i++) {

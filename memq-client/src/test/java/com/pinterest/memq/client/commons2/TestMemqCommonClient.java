@@ -346,7 +346,7 @@ public class TestMemqCommonClient {
     assertEquals(1, md.getWriteBrokers().size());
     assertEquals("dev", md.getStorageHandlerName());
 
-    client.reconnect("test", false);
+    client.resetTopicConnection("test", false);
     List<Endpoint> endpoints = client.getEndpointsToTry();
     assertEquals(2, endpoints.size());
     assertNotEquals(endpoints.get(0), endpoints.get(1));

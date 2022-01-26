@@ -20,6 +20,7 @@ import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons.audit.Auditor;
 import com.pinterest.memq.client.commons2.MemqCommonClient;
 import com.pinterest.memq.client.commons2.network.ClosedConnectionException;
+import com.pinterest.memq.client.commons2.network.NetworkClient;
 import com.pinterest.memq.client.commons2.retry.RetryStrategy;
 import com.pinterest.memq.client.producer.MemqWriteResult;
 import com.pinterest.memq.commons.protocol.RequestPacket;
@@ -36,6 +37,8 @@ import com.codahale.metrics.Timer;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufOutputStream;
 import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.channel.ChannelId;
+import io.netty.util.AttributeKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -424,6 +427,7 @@ public class Request {
 
     protected void handleResponse(ResponsePacket responsePacket) {
       short responseCode = responsePacket.getResponseCode();
+      metricRegistry.counter("responses.code." + responseCode).inc();
       switch (responseCode) {
         case ResponseCodes.OK:
           ackedBytesCounter.inc(payloadSizeBytes);
@@ -438,7 +442,7 @@ public class Request {
             return;
           }
           try {
-            client.reconnect(topic, false);
+            client.resetTopicConnection(topic, false);
           } catch (Exception e) {
             resolve(e);
             return;
@@ -450,6 +454,28 @@ public class Request {
                     payloadSizeBytes,
                     attempts,
                     redirects + 1,
+                    dispatchTimeoutMs + dispatchTimestamp
+                )
+            );
+          } catch (Exception e) {
+            logger.error("Error: ", e);
+          }
+          break;
+        case ResponseCodes.RECONNECT:
+          logger.debug("Retransmitting message due to server side rebalance");
+          try {
+            client.drainAndReconnect(topic, false, responsePacket.attr(NetworkClient.PACKET_CHANNEL_ID_ATTR_KEY).get());
+          } catch (Exception e) {
+            resolve(e);
+            return;
+          }
+          try {
+            dispatcher.submit(
+                new Dispatch(
+                    payload.retainedDuplicate(),
+                    payloadSizeBytes,
+                    attempts,
+                    redirects,
                     dispatchTimeoutMs + dispatchTimestamp
                 )
             );
