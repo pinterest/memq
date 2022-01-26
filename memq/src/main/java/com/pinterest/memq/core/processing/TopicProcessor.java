@@ -22,6 +22,8 @@ import com.pinterest.memq.commons.protocol.ReadRequestPacket;
 import com.pinterest.memq.commons.protocol.RequestPacket;
 import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
+import com.pinterest.memq.core.MemqManager;
+import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.utils.MiscUtils;
 
 import io.netty.channel.Channel;
@@ -41,6 +43,11 @@ public abstract class TopicProcessor {
   protected Counter failedCounter;
   protected Counter pendingCounter;
   protected Counter slotCheckCounter;
+  protected MemqManager manager;
+
+  protected TopicProcessor(MemqManager manager) {
+    this.manager = manager;
+  }
 
   protected void initializeMetrics(MetricRegistry registry) {
     totalWriteLatency = MiscUtils.oneMinuteWindowTimer(registry, "tp.totalWriteLatency");
@@ -79,6 +86,10 @@ public abstract class TopicProcessor {
   public abstract float getAvailableCapacity();
 
   public abstract TopicConfig getTopicConfig();
+
+  public MemqManager getManager() {
+    return manager;
+  }
 
   public void registerChannel(Channel channel) {
 

@@ -30,31 +30,31 @@ import com.pinterest.memq.commons.protocol.Broker.BrokerType;
 import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.core.config.MemqConfig;
 
-public class Balancer implements Runnable {
+public class TopicAssigner implements Runnable {
 
-  static final Logger logger = Logger.getLogger(Balancer.class.getCanonicalName());
+  static final Logger logger = Logger.getLogger(TopicAssigner.class.getCanonicalName());
   private static final Gson GSON = new Gson();
   private CuratorFramework client;
   private LeaderSelector leaderSelector;
-  private BalanceStrategy writeBalanceStrategy;
-  private BalanceStrategy readBalanceStrategy;
+  private AssignmentStrategy writeAssignmentStrategy;
+  private AssignmentStrategy readAssignmentStrategy;
   private MemqGovernor governor;
   private MemqConfig config;
 
-  public Balancer(MemqConfig config,
-                  MemqGovernor governor,
-                  CuratorFramework client,
-                  LeaderSelector leaderSelector) {
+  public TopicAssigner(MemqConfig config,
+                       MemqGovernor governor,
+                       CuratorFramework client,
+                       LeaderSelector leaderSelector) {
     this.config = config;
     this.governor = governor;
     this.client = client;
     this.leaderSelector = leaderSelector;
-    this.writeBalanceStrategy = config.getClusteringConfig().isEnableExpiration()
-        ? new ExpirationPartitionBalanceStrategy()
-        : new PartitionBalanceStrategy();
-    this.readBalanceStrategy = config.getClusteringConfig().isEnableExpiration()
-        ? new ExpirationPartitionBalanceStrategy()
-        : new PartitionBalanceStrategy();
+    this.writeAssignmentStrategy = config.getClusteringConfig().isEnableExpiration()
+        ? new ExpirationPartitionAssignmentStrategy()
+        : new PartitionAssignmentStrategy();
+    this.readAssignmentStrategy = config.getClusteringConfig().isEnableExpiration()
+        ? new ExpirationPartitionAssignmentStrategy()
+        : new PartitionAssignmentStrategy();
   }
 
   @Override
@@ -76,7 +76,7 @@ public class Balancer implements Runnable {
         }
 
         // run topic provisioning and balancing
-        logger.info("Running topic balancer");
+        logger.info("Running topic assigner");
         try {
           // get current cluster capacity
           Set<Broker> brokers = new HashSet<>();
@@ -100,28 +100,28 @@ public class Balancer implements Runnable {
             TopicConfig topic = GSON.fromJson(topicConfig, TopicConfig.class);
             topics.add(topic);
           }
-          balanceAndUpdateWriteBrokers(brokers, topics);
+          assignAndUpdateWriteBrokers(brokers, topics);
 //          balanceAndUpdateReadBrokers(brokers, topics);
           logger.info("Updated brokers with topic assignments:" + brokers);
         } catch (Exception e) {
-          logger.log(Level.SEVERE, "Exception during balancing", e);
+          logger.log(Level.SEVERE, "Exception during assignment", e);
         }
       }
       try {
         Thread.sleep(10000);
       } catch (InterruptedException e) {
-        logger.log(Level.SEVERE, "Balancer interrupted, exiting", e);
+        logger.log(Level.SEVERE, "Assigner interrupted, exiting", e);
         break;
       }
     }
   }
 
-  private void balanceAndUpdateWriteBrokers(Set<Broker> brokers,
-                                            Set<TopicConfig> topics) throws Exception {
+  private void assignAndUpdateWriteBrokers(Set<Broker> brokers,
+                                           Set<TopicConfig> topics) throws Exception {
     Set<Broker> writeBrokers = brokers.stream().filter(
         v -> v.getBrokerType() == BrokerType.WRITE || v.getBrokerType() == BrokerType.READ_WRITE)
         .collect(Collectors.toSet());
-    Set<Broker> newBrokers = writeBalanceStrategy.balance(topics, writeBrokers);
+    Set<Broker> newBrokers = writeAssignmentStrategy.assign(topics, writeBrokers);
     // update brokers
     for (Broker broker : newBrokers) {
       client.setData().forPath("/brokers/" + broker.getBrokerIP(), GSON.toJson(broker).getBytes());
@@ -134,7 +134,7 @@ public class Balancer implements Runnable {
         .filter(
             v -> v.getBrokerType() == BrokerType.READ || v.getBrokerType() == BrokerType.READ_WRITE)
         .collect(Collectors.toSet());
-    Set<Broker> newBrokers = readBalanceStrategy.balance(topics, writeBrokers);
+    Set<Broker> newBrokers = readAssignmentStrategy.assign(topics, writeBrokers);
     // update brokers
     for (Broker broker : newBrokers) {
       client.setData().forPath("/brokers/" + broker.getBrokerIP(), GSON.toJson(broker).getBytes());

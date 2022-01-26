@@ -70,7 +70,7 @@ public abstract class ReadBrokerStorageHandler implements StorageHandler {
       setClient(client);
       getClient().initialize(endpoints);
       // use topic metadata to find the read brokers for this topic and then reconnect
-      getClient().reconnect(topic, true);
+      getClient().resetTopicConnection(topic, true);
     }
   }
 
@@ -147,7 +147,7 @@ public abstract class ReadBrokerStorageHandler implements StorageHandler {
       if (attempts > maxReadAttempts) {
         throw new Exception("Retries exhausted for reading: " + notification);
       }
-      client.reconnect(topic, true);
+      client.resetTopicConnection(topic, true);
       return readBatch(topic, notification, readHeaderOnly, entry, timeoutMillis, attempts + 1);
     } else {
       throw new ExecutionException("Request failed, code:" + responsePacket.getResponseCode()

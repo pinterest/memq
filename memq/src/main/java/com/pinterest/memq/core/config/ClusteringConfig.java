@@ -20,7 +20,7 @@ public class ClusteringConfig {
   private String zookeeperConnectionString;
   private int batchMultiplier = 3;
   private boolean enableLeaderSelector = true;
-  private boolean enableBalancer = true;
+  private boolean enableAssigner = true;
   private boolean enableLocalAssigner = true;
   private boolean addBootstrapTopics = true;
   private boolean enableExpiration = true;
@@ -57,12 +57,12 @@ public class ClusteringConfig {
     this.enableLeaderSelector = enableLeaderSelector;
   }
 
-  public boolean isEnableBalancer() {
-    return enableBalancer;
+  public boolean isEnableAssigner() {
+    return enableAssigner;
   }
 
-  public void setEnableBalancer(boolean enableBalancer) {
-    this.enableBalancer = enableBalancer;
+  public void setEnableAssigner(boolean enableAssigner) {
+    this.enableAssigner = enableAssigner;
   }
 
   public boolean isEnableLocalAssigner() {

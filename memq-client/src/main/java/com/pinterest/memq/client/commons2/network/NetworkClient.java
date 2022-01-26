@@ -21,6 +21,8 @@ import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -29,7 +31,10 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
+import io.netty.channel.ChannelId;
+import io.netty.util.AttributeKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,6 +71,9 @@ public class NetworkClient implements Closeable {
   public static final String CONFIG_IDLE_TIMEOUT_MS = "idleTimeoutMs";
   public static final String CONFIG_CONNECT_TIMEOUT_MS = "connectTimeoutMs";
   public static final String CONFIG_IRRESPONSIVE_TIMEOUT_MS = "irresponsiveTimeoutMs";
+  public static final AttributeKey<AtomicLong> INFLIGHT_REQUESTS_ATTR_KEY = AttributeKey.valueOf("activeRequests");
+  public static final AttributeKey<Boolean> DRAIN_CONNECTION_ATTR_KEY = AttributeKey.valueOf("drainConnection");
+  public static final AttributeKey<ChannelId> PACKET_CHANNEL_ID_ATTR_KEY = AttributeKey.valueOf("channelId");
 
   private ExponentialBackoffRetryStrategy retryStrategy = new ExponentialBackoffRetryStrategy();
   private int idleTimeoutMs = 60000;
@@ -77,8 +85,9 @@ public class NetworkClient implements Closeable {
   private final Bootstrap bootstrap;
   private final EventLoopGroup eventLoopGroup;
   private final AtomicBoolean closed = new AtomicBoolean(false);
+  private final ConcurrentMap<ChannelId, ConnectionStatus> connectionMap = new ConcurrentHashMap<>();
 
-  private volatile ChannelFuture connectFuture;
+  private volatile ChannelFuture activeConnection;
 
   public NetworkClient() {
     this(null, null);
@@ -139,10 +148,11 @@ public class NetworkClient implements Closeable {
     acquireChannel(socketAddress).addListener((ChannelFutureListener) channelFuture -> {
       if (channelFuture.isSuccess()) {
         long elapsedMs = System.currentTimeMillis() - startMs;
-        responseHandler.addRequest(identifier, returnFuture);
+        ChannelId channelId = channelFuture.channel().id();
+        responseHandler.addRequest(channelId, identifier, returnFuture);
         try {
           final ScheduledFuture<?> scheduledCleanup = scheduler.schedule(() -> {
-            responseHandler.cancelRequest(identifier, new TimeoutException("Failed to receive response after " + timeout.toMillis() + " ms"));
+            responseHandler.cancelRequest(channelId, identifier, new TimeoutException("Failed to receive response after " + timeout.toMillis() + " ms"));
           }, timeout.toMillis() - elapsedMs, TimeUnit.MILLISECONDS);
           returnFuture.handleAsync((responsePacket, throwable) -> {
             if (!scheduledCleanup.isDone()) {
@@ -163,10 +173,10 @@ public class NetworkClient implements Closeable {
         } catch (Exception e) {
           logger.warn("Failed to write request " + request.getClientRequestId(), e);
           ReferenceCountUtil.release(buffer);
-          responseHandler.cancelRequest(identifier, e);
+          responseHandler.cancelRequest(channelId, identifier, e);
         }
       } else {
-        responseHandler.cancelRequest(identifier, channelFuture.cause());
+        responseHandler.cancelRequest(channelFuture.channel().id(), identifier, channelFuture.cause());
       }
     });
     return returnFuture;
@@ -176,22 +186,22 @@ public class NetworkClient implements Closeable {
     if (isChannelUnavailable(socketAddress)) {
       synchronized (this) {
         if (isChannelUnavailable(socketAddress)) {
-          if (connectFuture != null && connectFuture.channel() != null) {
+          if (activeConnection != null && activeConnection.channel() != null) {
             // destination address is different from current connection's remote address
-            connectFuture.channel().close().await();
+            activeConnection.channel().close().await();
           }
           CompletableFuture<ChannelFuture> connectReadyFuture = new CompletableFuture<>();
           doConnect(socketAddress, connectReadyFuture, 0);
-          connectFuture = connectReadyFuture.get();
+          activeConnection = connectReadyFuture.get();
         }
       }
     }
-    return connectFuture;
+    return activeConnection;
   }
 
   private boolean isChannelUnavailable(InetSocketAddress socketAddress) {
-    if (connectFuture == null || !connectFuture.channel().isActive()) return true;
-    InetSocketAddress currentAddr = (InetSocketAddress) (connectFuture.channel().remoteAddress());
+    if (activeConnection == null || !activeConnection.channel().isActive()) return true;
+    InetSocketAddress currentAddr = (InetSocketAddress) (activeConnection.channel().remoteAddress());
 
     return !currentAddr.getHostString().equals(socketAddress.getHostString()) || !(currentAddr.getPort() == socketAddress.getPort());
   }
@@ -206,7 +216,7 @@ public class NetworkClient implements Closeable {
   public void close() throws IOException {
     logger.debug("Closing network client");
     closed.set(true);
-    connectFuture = null;
+    activeConnection = null;
     responseHandler.close();
     scheduler.shutdown();
     eventLoopGroup.shutdownGracefully();
@@ -218,10 +228,37 @@ public class NetworkClient implements Closeable {
 
   // blocking
   public void reset() throws IOException, InterruptedException {
-    if (connectFuture != null && connectFuture.channel() != null) {
-      connectFuture.channel().close().await(); // should reset the response map after channel is closed
-      connectFuture = null;
+    if (activeConnection != null && activeConnection.channel() != null) {
+      activeConnection.channel().close().await(); // should reset the response map after channel is closed
+      activeConnection = null;
     }
+  }
+
+  public void drain() {
+    if (activeConnection != null && activeConnection.channel() != null) {
+      // let the old connection drain and create a new connection
+      ChannelFuture oldConnectFuture = activeConnection;
+      activeConnection = null;
+      ChannelId oldChannelId = oldConnectFuture.channel().id();
+      oldConnectFuture.channel().attr(DRAIN_CONNECTION_ATTR_KEY).set(true);
+      logger.debug("Draining connection " + oldChannelId);
+
+      // to handle the case where there are no inflight requests (the reconnect signal was the only inflight request)
+      if ((oldConnectFuture.channel().attr(INFLIGHT_REQUESTS_ATTR_KEY).get()).get() == 0) {
+        logger.debug("[" + oldChannelId + "] All requests of this connection have been drained. Closing connection");
+        oldConnectFuture.channel().close();
+      }
+    }
+  }
+
+  public ConnectionStatus swapConnectionStatus(ChannelId channelId, ConnectionStatus status) {
+    return connectionMap.replace(channelId, status);
+  }
+
+  public enum ConnectionStatus {
+    ACTIVE,
+    CLOSING,
+    CLOSED
   }
 
   private final class RetryListener implements ChannelFutureListener {
@@ -262,6 +299,10 @@ public class NetworkClient implements Closeable {
           future.channel().close().await();
         }
       } else {
+        ChannelId channelId = future.channel().id();
+        future.channel().attr(INFLIGHT_REQUESTS_ATTR_KEY).set(new AtomicLong(0));
+        connectionMap.put(channelId, ConnectionStatus.ACTIVE);
+        future.channel().closeFuture().addListener(closeFuture -> connectionMap.remove(channelId));
         connectReadyFuture.complete(future);
       }
     }
@@ -272,7 +313,7 @@ public class NetworkClient implements Closeable {
   }
 
   @VisibleForTesting
-  protected ChannelFuture getConnectFuture() {
-    return connectFuture;
+  protected ChannelFuture getActiveConnection() {
+    return activeConnection;
   }
 }

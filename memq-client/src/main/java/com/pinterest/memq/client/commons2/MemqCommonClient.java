@@ -38,11 +38,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
+import io.netty.channel.ChannelId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
+
 import com.pinterest.memq.client.commons2.network.NetworkClient;
 import com.pinterest.memq.commons.config.SSLConfig;
 import com.pinterest.memq.commons.protocol.Broker;
@@ -154,7 +156,15 @@ public class MemqCommonClient implements Closeable {
     return endpointsToTry;
   }
 
-  public TopicMetadata getTopicMetadata(String topic,
+  public TopicMetadata getTopicMetadata(String topic) throws TopicNotFoundException,ExecutionException, InterruptedException, TimeoutException {
+    return getTopicMetadata(topic, connectTimeout);
+  }
+
+  public TopicMetadata getTopicMetadata(String topic, long timeoutMillis) throws TopicNotFoundException,ExecutionException, InterruptedException, TimeoutException {
+    return extractTopicMetadata(getTopicMetadataWrappingResponsePacket(topic, timeoutMillis));
+  }
+
+  public ResponsePacket getTopicMetadataWrappingResponsePacket(String topic,
                                         long timeoutMillis) throws TopicNotFoundException,
                                                             ExecutionException,
                                                             InterruptedException, TimeoutException {
@@ -166,29 +176,33 @@ public class MemqCommonClient implements Closeable {
     if (responsePacket.getResponseCode() == ResponseCodes.NOT_FOUND) {
       throw new TopicNotFoundException("Topic " + topic + " not found");
     }
+    return responsePacket;
+  }
+
+  private TopicMetadata extractTopicMetadata(ResponsePacket responsePacket) {
     TopicMetadataResponsePacket resp = ((TopicMetadataResponsePacket) responsePacket.getPacket());
     return resp.getMetadata();
   }
 
-  public TopicMetadata getTopicMetadata(String topic) throws TopicNotFoundException,
-                                                      ExecutionException, InterruptedException,
-                                                      TimeoutException {
-    return getTopicMetadata(topic, connectTimeout);
+  public synchronized void resetTopicConnection(String topic, boolean isConsumer) throws Exception {
+    logger.debug("Reconnecting topic " + topic);
+    ResponsePacket rp = getTopicMetadataWrappingResponsePacket(topic, connectTimeout);
+    TopicMetadata md = extractTopicMetadata(rp);
+    Set<Broker> brokers = isConsumer ? md.getReadBrokers() : md.getWriteBrokers();
+    resetEndpoints(brokers.stream().map(Endpoint::fromBroker).collect(Collectors.toList()));
+    networkClient.reset();
   }
 
-  public synchronized void reconnect(String topic, boolean isConsumer) throws Exception {
-    logger.debug("Reconnecting topic " + topic);
-    TopicMetadata md = getTopicMetadata(topic, connectTimeout);
-    networkClient.reset();
-    Set<Broker> brokers = null;
-    if (isConsumer) {
-      brokers = md.getReadBrokers();
-    } else {
-      brokers = md.getWriteBrokers();
+  public synchronized void drainAndReconnect(String topic, boolean isConsumer, ChannelId channelId) throws Exception {
+    NetworkClient.ConnectionStatus
+        oldStatus = networkClient.swapConnectionStatus(channelId, NetworkClient.ConnectionStatus.CLOSING);
+    if (NetworkClient.ConnectionStatus.ACTIVE.equals(oldStatus)) {
+      logger.debug("Draining and reconnecting to topic " + topic);
+      TopicMetadata md = getTopicMetadata(topic, connectTimeout);
+      Set<Broker> brokers = isConsumer ? md.getReadBrokers() : md.getWriteBrokers();
+      resetEndpoints(brokers.stream().map(Endpoint::fromBroker).collect(Collectors.toList()));
+      networkClient.drain();
     }
-    currentEndpoint = null;
-    endpoints = getPreferredEndpoints(
-        brokers.stream().map(Endpoint::fromBroker).collect(Collectors.toList()));
   }
 
   protected List<Endpoint> randomizedEndpoints(List<Endpoint> servers) {

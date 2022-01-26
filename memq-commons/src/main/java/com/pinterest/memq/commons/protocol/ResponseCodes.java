@@ -26,6 +26,7 @@ public class ResponseCodes {
   public static final short REQUEST_FAILED = 502;
   public static final short REDIRECT = 302;
   public static final short NO_DATA = 204;
+  public static final short RECONNECT = 303;
   
   private ResponseCodes() {
   }

@@ -58,6 +58,8 @@ public class TopicConfig implements Comparable<TopicConfig> {
   @SerializedName(value = "storageHandlerConfig", alternate = "outputHandlerConfig")
   private Properties storageHandlerConfig = new Properties();
 
+  private Properties loadBalancerConfig = new Properties();
+
   private volatile double inputTrafficMB = 0.0;
 
   public TopicConfig() {
@@ -79,6 +81,7 @@ public class TopicConfig implements Comparable<TopicConfig> {
     this.enableBucketing2Processor = config.enableBucketing2Processor;
     this.enableServerHeaderValidation = config.enableServerHeaderValidation;
     this.clusteringMultiplier = config.clusteringMultiplier;
+    this.loadBalancerConfig = config.loadBalancerConfig;
   }
 
   public TopicConfig(int topicOrder,
@@ -275,6 +278,14 @@ public class TopicConfig implements Comparable<TopicConfig> {
 
   public void setClusteringMultiplier(int clusteringMultiplier) {
     this.clusteringMultiplier = clusteringMultiplier;
+  }
+
+  public void setLoadBalancerConfig(Properties loadBalancerConfig) {
+    this.loadBalancerConfig = loadBalancerConfig;
+  }
+
+  public Properties getLoadBalancerConfig() {
+    return loadBalancerConfig;
   }
 
   @Override

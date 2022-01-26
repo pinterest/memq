@@ -20,7 +20,7 @@ import java.util.Set;
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicConfig;
 
-public abstract class BalanceStrategy {
+public abstract class AssignmentStrategy {
 
-  public abstract Set<Broker> balance(Set<TopicConfig> topics, Set<Broker> brokers);
+  public abstract Set<Broker> assign(Set<TopicConfig> topics, Set<Broker> brokers);
 }

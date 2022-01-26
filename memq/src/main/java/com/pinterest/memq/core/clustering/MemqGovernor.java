@@ -46,7 +46,7 @@ import com.pinterest.memq.core.config.MemqConfig;
 
 public class MemqGovernor {
 
-  private static final String ZNODE_BROKERS_BASE = "/brokers/";
+  public static final String ZNODE_BROKERS_BASE = "/brokers/";
   private static final String ZNODE_GOVERNOR = "/governor";
   private static final String ZNODE_BROKERS = "/brokers";
   private static final String ZNODE_TOPICS_BASE = "/topics";
@@ -124,12 +124,14 @@ public class MemqGovernor {
       }
     });
 
-    if (clusteringConfig.isEnableBalancer()) {
-      Balancer balancer = new Balancer(config, this, client, leaderSelector);
-      Thread thBalancer = new Thread(balancer);
-      thBalancer.setName("BalancerThread");
-      thBalancer.setDaemon(true);
-      thBalancer.start();
+    mgr.setGovernor(this);
+
+    if (clusteringConfig.isEnableAssigner()) {
+      TopicAssigner topicAssigner = new TopicAssigner(config, this, client, leaderSelector);
+      Thread assignerThread = new Thread(topicAssigner);
+      assignerThread.setName("AssignerThread");
+      assignerThread.setDaemon(true);
+      assignerThread.start();
     }
 
     Thread th = new Thread(new MetadataPoller(client, topicMetadataMap));
@@ -202,6 +204,10 @@ public class MemqGovernor {
 
   public void createTopic(TopicConfig topipConfig) throws Exception {
     createTopic(client, topipConfig);
+  }
+
+  public CuratorFramework getClient() {
+    return client;
   }
 
 }

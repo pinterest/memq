@@ -495,7 +495,7 @@ public class TestNetworkClient {
     }
     client.close();
     Thread.sleep(100); // wait some time for the connection to close
-    assertNull(client.getConnectFuture());
+    assertNull(client.getActiveConnection());
 
     RequestPacket mdPkt = new RequestPacket(RequestType.PROTOCOL_VERSION, 1,
         RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));

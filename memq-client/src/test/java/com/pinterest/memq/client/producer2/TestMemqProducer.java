@@ -405,12 +405,17 @@ public class TestMemqProducer extends TestMemqProducerBase {
 
     AtomicInteger metadataCount1 = new AtomicInteger();
     map1.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
-      metadataCount1.incrementAndGet();
       TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
       TopicConfig topicConfig = new TopicConfig("test", "dev");
       TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
-      Set<Broker> brokers = Collections.singleton(new Broker(LOCALHOST_STRING, (short) (port + 1),
-          "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      Set<Broker> brokers;
+      if (metadataCount1.getAndIncrement() >= 1) {
+        brokers = Collections.singleton(new Broker(LOCALHOST_STRING, (short) (port + 1),
+            "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      } else {
+        brokers = Collections.singleton(new Broker(LOCALHOST_STRING, port,
+            "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      }
       ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
           req.getRequestType(), ResponseCodes.OK,
           new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
@@ -419,10 +424,14 @@ public class TestMemqProducer extends TestMemqProducerBase {
     });
     AtomicInteger writeCount1 = new AtomicInteger();
     map1.put(RequestType.WRITE, (ctx, req) -> {
-      writeCount1.getAndIncrement();
+      if (writeCount1.getAndIncrement() >= 1) {
+        ctx.writeAndFlush(new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+            req.getRequestType(), ResponseCodes.REDIRECT, new WriteResponsePacket()));
+      } else {
+        ctx.writeAndFlush(new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+            req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket()));
+      }
 
-      ctx.writeAndFlush(new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.REDIRECT, new WriteResponsePacket()));
     });
 
     Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map2 = new HashMap<>();
@@ -464,9 +473,11 @@ public class TestMemqProducer extends TestMemqProducerBase {
     Future<MemqWriteResult> r0 = producer.write(null,
         "test message that has 32 bytes 1".getBytes());
 
+    Thread.sleep(500);
     Future<MemqWriteResult> r1 = producer.write(null,
         "test message that has 32 bytes 2".getBytes());
 
+    Thread.sleep(500);
     Future<MemqWriteResult> r2 = producer.write(null,
         "test message that has 32 bytes 3".getBytes());
 
@@ -481,9 +492,171 @@ public class TestMemqProducer extends TestMemqProducerBase {
     }
     producer.close();
 
-    assertEquals(1, metadataCount1.get());
-    assertEquals(0, writeCount1.get());
-    assertEquals(3, writeCount2.get());
+    assertEquals(2, metadataCount1.get());
+    assertEquals(2, writeCount1.get());
+    assertEquals(2, writeCount2.get());
+    assertEquals(producer.getAvailablePermits(), 30);
+    mockserver1.stop();
+    mockserver2.stop();
+  }
+
+
+  @Test
+  public void testSimpleReconnect() throws Exception {
+    AtomicInteger writeCount = new AtomicInteger(0);
+    AtomicInteger reconnectCount = new AtomicInteger(0);
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
+
+    setupSimpleTestServerTopicMetadataHandler(map);
+    map.put(RequestType.WRITE, (ctx, req) -> {
+      ResponsePacket resp;
+      int currentCount = writeCount.getAndIncrement();
+      if (currentCount == 2) { // redirect first request
+        reconnectCount.getAndIncrement();
+        resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+            req.getRequestType(), ResponseCodes.RECONNECT, new WriteResponsePacket());
+      } else {
+        resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+            req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
+      }
+      ctx.writeAndFlush(resp);
+    });
+
+    MockMemqServer mockServer = new MockMemqServer(port, map);
+    mockServer.start();
+
+    Properties networkProperties = new Properties();
+    MetricRegistry registry = new MetricRegistry();
+    MemqProducer<byte[], byte[]> producer = new MemqProducer.Builder<byte[], byte[]>()
+        .cluster("prototype").topic("test").bootstrapServers(LOCALHOST_STRING + ":" + port)
+        .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
+        .maxPayloadBytes(MemqMessageHeader.getHeaderLength() + RawRecord
+            .newInstance(null, null, null, new byte["test message that has 32 bytes 1".length()], 0)
+            .calculateEncodedLogMessageLength())
+        .metricRegistry(registry)
+        .compression(Compression.NONE).networkProperties(networkProperties).build();
+
+    Future<MemqWriteResult> r0 = producer.write(null,
+        "test message that has 32 bytes 1".getBytes());
+    r0.get();
+
+    Future<MemqWriteResult> r1 = producer.write(null,
+        "test message that has 32 bytes 2".getBytes());
+    r1.get();
+
+    Future<MemqWriteResult> r2 = producer.write(null,
+        "test message that has 32 bytes 3".getBytes());
+
+    producer.flush();
+
+    r0.get();
+    r1.get();
+    r2.get();
+    producer.close();
+
+    assertEquals(2 + 1 + 1, writeCount.get());
+    assertEquals(1, reconnectCount.get());
+    assertEquals(3, producer.getMetricRegistry().counter("responses.code.200").getCount());
+    assertEquals(1, producer.getMetricRegistry().counter("responses.code.303").getCount());
+    assertEquals(producer.getAvailablePermits(), 30);
+    mockServer.stop();
+  }
+
+  @Test
+  public void testReconnectToDifferentServer() throws Exception {
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map1 = new HashMap<>();
+
+    AtomicInteger metadataCount1 = new AtomicInteger();
+    map1.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+      TopicConfig topicConfig = new TopicConfig("test", "dev");
+      TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
+      Set<Broker> brokers;
+      if (metadataCount1.getAndIncrement() >= 1) {
+        brokers = Collections.singleton(new Broker(LOCALHOST_STRING, (short) (port + 1),
+            "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      } else {
+        brokers = Collections.singleton(new Broker(LOCALHOST_STRING, (short) (port),
+            "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      }
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK,
+          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+              ImmutableSet.of(), "dev", new Properties())));
+      ctx.writeAndFlush(resp);
+    });
+    AtomicInteger writeCount1 = new AtomicInteger();
+    map1.put(RequestType.WRITE, (ctx, req) -> {
+      if (writeCount1.getAndIncrement() >= 1) {
+        ctx.writeAndFlush(new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+            req.getRequestType(), ResponseCodes.RECONNECT, new WriteResponsePacket()));
+      } else {
+        ctx.writeAndFlush(new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+            req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket()));
+      }
+    });
+
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map2 = new HashMap<>();
+
+    map2.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+      TopicConfig topicConfig = new TopicConfig("test", "dev");
+      TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
+      Set<Broker> brokers = Collections.singleton(new Broker(LOCALHOST_STRING, (short) (port + 1),
+          "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK,
+          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+              ImmutableSet.of(), "dev", new Properties())));
+      ctx.writeAndFlush(resp);
+    });
+    AtomicInteger writeCount2 = new AtomicInteger();
+    map2.put(RequestType.WRITE, (ctx, req) -> {
+      writeCount2.getAndIncrement();
+
+      ctx.writeAndFlush(new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket()));
+    });
+
+    MockMemqServer mockserver1 = new MockMemqServer(port, map1);
+    mockserver1.start();
+    MockMemqServer mockserver2 = new MockMemqServer(port + 1, map2);
+    mockserver2.start();
+
+    Properties networkProperties = new Properties();
+    MemqProducer<byte[], byte[]> producer = new MemqProducer.Builder<byte[], byte[]>()
+        .cluster("prototype").topic("test").bootstrapServers(LOCALHOST_STRING + ":" + port)
+        .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
+        .maxPayloadBytes(MemqMessageHeader.getHeaderLength() + RawRecord
+            .newInstance(null, null, null, new byte["test message that has 32 bytes 1".length()], 0)
+            .calculateEncodedLogMessageLength())
+        .compression(Compression.NONE).networkProperties(networkProperties).build();
+
+    Future<MemqWriteResult> r0 = producer.write(null,
+        "test message that has 32 bytes 1".getBytes());
+
+    Thread.sleep(500);
+    Future<MemqWriteResult> r1 = producer.write(null,
+        "test message that has 32 bytes 2".getBytes());
+
+    Thread.sleep(500);
+    Future<MemqWriteResult> r2 = producer.write(null,
+        "test message that has 32 bytes 3".getBytes());
+
+    producer.flush();
+
+    try {
+      r0.get();
+      r1.get();
+      r2.get();
+    } catch (Exception e) {
+      fail("should all pass");
+    }
+    producer.close();
+
+    assertEquals(2, metadataCount1.get());
+    assertEquals(2, writeCount1.get());
+    assertEquals(2, writeCount2.get());
     assertEquals(producer.getAvailablePermits(), 30);
     mockserver1.stop();
     mockserver2.stop();
@@ -662,7 +835,10 @@ public class TestMemqProducer extends TestMemqProducerBase {
     map.put(RequestType.WRITE, (ctx, req) -> {
       ResponsePacket resp;
       int current = requestCount.getAndIncrement();
-      if (current % 1000 == 999) {
+      if (current % 1000 == 499){
+        resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+            req.getRequestType(), ResponseCodes.RECONNECT, new WriteResponsePacket());
+      } else if (current % 1000 == 999) {
         closeCount.getAndIncrement();
         ctx.close();
         return;
