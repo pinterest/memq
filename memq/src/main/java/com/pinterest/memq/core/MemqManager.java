@@ -47,6 +47,7 @@ import com.pinterest.memq.commons.protocol.TopicAssignment;
 import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.commons.storage.StorageHandler;
 import com.pinterest.memq.commons.storage.StorageHandlerTable;
+import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.config.MemqConfig;
 import com.pinterest.memq.core.processing.TopicProcessor;
 import com.pinterest.memq.core.processing.TopicProcessorState;
@@ -69,6 +70,7 @@ public class MemqManager implements Managed {
   private AtomicBoolean disabled;
   private String topicCacheFile;
   private OpenTSDBClient client;
+  private MemqGovernor governor = null;
 
   public MemqManager(OpenTSDBClient client,
                      MemqConfig configuration,
@@ -144,11 +146,15 @@ public class MemqManager implements Managed {
     if (topicConfig.getRingBufferSize() == 0) {
       topicConfig.setRingBufferSize(configuration.getDefaultRingBufferSize());
     }
-    TopicProcessor tp = new BucketingTopicProcessor(registry, topicConfig, storageHandler, timerService, reporter);
+    try {
+      TopicProcessor tp = new BucketingTopicProcessor(registry, topicConfig, storageHandler, timerService, reporter, this);
+      processorMap.put(topicConfig.getTopic(), tp);
+      topicMap.put(topicConfig.getTopic(), topicConfig);
+      logger.info("Configured and started TopicProcessor for:" + topicConfig.getTopic());
+    } catch (ClassNotFoundException | InstantiationException | IllegalAccessException e) {
+      throw new BadRequestException("Failed to initialize TopicProcessor for: " + topicConfig.getTopic(), e);
+    }
 
-    processorMap.put(topicConfig.getTopic(), tp);
-    topicMap.put(topicConfig.getTopic(), topicConfig);
-    logger.info("Configured and started TopicProcessor for:" + topicConfig.getTopic());
   }
 
   public void updateTopicCache() {
@@ -243,6 +249,18 @@ public class MemqManager implements Managed {
 
   public void setDisabled(boolean disabled) {
     this.disabled.set(disabled);
+  }
+
+  public void setGovernor(MemqGovernor governor) {
+    this.governor = governor;
+  }
+
+  public MemqGovernor getGovernor() {
+    return this.governor;
+  }
+
+  public boolean isGovernorEnabled() {
+    return this.governor != null;
   }
 
   public void loadStorageHandlers(MemqConfig configuration) {

@@ -25,7 +25,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import javax.annotation.Nullable;
 import javax.ws.rs.BadRequestException;
 import javax.ws.rs.InternalServerErrorException;
 import javax.ws.rs.core.Response;
@@ -49,6 +48,9 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
 import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.commons.storage.StorageHandler;
+import com.pinterest.memq.core.MemqManager;
+import com.pinterest.memq.core.clustering.MemqGovernor;
+import com.pinterest.memq.core.load.LoadBalancer;
 import com.pinterest.memq.core.processing.Ackable;
 import com.pinterest.memq.core.processing.TopicProcessor;
 
@@ -57,6 +59,8 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.DefaultFileRegion;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.DefaultChannelGroup;
+import io.netty.util.Attribute;
+import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.GlobalEventExecutor;
 
 public class BucketingTopicProcessor extends TopicProcessor {
@@ -78,11 +82,16 @@ public class BucketingTopicProcessor extends TopicProcessor {
   private Counter invalidHeaderExceptionCounter;
   private Counter emptyDataCounter;
 
+  private LoadBalancer balancer;
+
   public BucketingTopicProcessor(MetricRegistry registry,
                                  TopicConfig topicConfig,
                                  StorageHandler storageHandler,
                                  ScheduledExecutorService timerService,
-                                 ScheduledReporter reporter) {
+                                 ScheduledReporter reporter,
+                                 MemqManager manager)
+      throws ClassNotFoundException, InstantiationException, IllegalAccessException {
+    super(manager);
     this.sizeDispatchThreshold = topicConfig.getBatchSizeBytes();
     this.enableHeaderValidation = topicConfig.isEnableServerHeaderValidation();
     this.reporter = reporter;
@@ -92,6 +101,7 @@ public class BucketingTopicProcessor extends TopicProcessor {
     this.batchManager = new BatchManager(sizeDispatchThreshold, topicConfig.getMaxDispatchCount(),
         Duration.ofMillis(topicConfig.getBatchMilliSeconds()), timerService, storageHandler,
         topicConfig.getOutputParallelism(), registry);
+    this.balancer = new LoadBalancer(topicConfig.getLoadBalancerConfig(), this);
     initializeMetrics(registry);
   }
 
@@ -115,6 +125,14 @@ public class BucketingTopicProcessor extends TopicProcessor {
   public long write(RequestPacket basePacket,
                     WriteRequestPacket writePacket,
                     ChannelHandlerContext ctx) {
+    LoadBalancer.Action balancerAction = balancer.evaluate(basePacket, ctx);
+
+    if (balancerAction.equals(LoadBalancer.Action.DROP)) {
+      ctx.writeAndFlush(new ResponsePacket(basePacket.getProtocolVersion(),
+          basePacket.getClientRequestId(), basePacket.getRequestType(), ResponseCodes.RECONNECT,
+          new WriteResponsePacket()));
+      return -1;
+    }
     if (writePacket.isDisableAcks()) {
       // send an OK to producer even if ack is disabled
       ctx.writeAndFlush(new ResponsePacket(basePacket.getProtocolVersion(),

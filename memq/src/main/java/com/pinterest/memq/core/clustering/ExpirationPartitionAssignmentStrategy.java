@@ -31,15 +31,15 @@ import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicAssignment;
 import com.pinterest.memq.commons.protocol.TopicConfig;
 
-public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
+public class ExpirationPartitionAssignmentStrategy extends AssignmentStrategy {
 
   private long defaultExpirationTime = 300_000;
   private static final int DEFAULT_CAPACITY = 200;
-  private static final Logger logger = Logger.getLogger(ExpirationPartitionBalanceStrategy.class.getName());
+  private static final Logger logger = Logger.getLogger(ExpirationPartitionAssignmentStrategy.class.getName());
   private Map<String, Integer> instanceTypeThroughputMap = new HashMap<>();
 
   @Override
-  public Set<Broker> balance(Set<TopicConfig> topics, Set<Broker> brokers) {
+  public Set<Broker> assign(Set<TopicConfig> topics, Set<Broker> brokers) {
     List<Broker> oldBrokerList = new ArrayList<>(brokers);
     Collections.sort(oldBrokerList);
 

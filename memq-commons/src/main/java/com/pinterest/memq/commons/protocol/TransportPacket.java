@@ -15,7 +15,9 @@
  */
 package com.pinterest.memq.commons.protocol;
 
-public abstract class TransportPacket implements Packet {
+import io.netty.util.DefaultAttributeMap;
+
+public abstract class TransportPacket extends DefaultAttributeMap implements Packet {
   protected short protocolVersion;
   protected long clientRequestId;
   protected RequestType requestType;
