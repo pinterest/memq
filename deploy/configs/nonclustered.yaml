@@ -1,30 +1,19 @@
-logging:
-  level: INFO
-  appenders:
-    - type: file
-      currentLogFilename: /var/log/memq/memq.log
-      archivedLogFilenamePattern: /var/log/memq/memq-%i.log.gz
-      archivedFileCount: 10
-      maxFileSize: 100MiB
 defaultBufferSize: 2097152
 defaultSlotTimeout: 300000
 cluster: false
-openTsdbConfig:
-   host: 127.0.0.1
-   port: 18126
-   frequencyInSeconds: 60
 awsUploadRatePerStreamInMB: 10
+environmentProvider: com.pinterest.memq.core.config.LocalEnvironmentProvider
 topicConfig:
-    - topic: TestTopic
+    - topic: test
       ringBufferSize: 1024
-      outputParallelism: 50
+      outputParallelism: 4
       batchSizeMB: 1
-      batchMilliSeconds: 1000
-      outputHandler: s3v2
-      outputHandlerConfig:
+      batchMilliSeconds: 50
+      storageHandlerName: devnull
+      storageHandlerConfig:
         retryTimeoutMillis: 5000
         maxAttempts: 2
-        disableNotifications: false
+        disableNotifications: true
         bucket: <mybucket-name>
         path: test/TestTopic
         region: us-east-1

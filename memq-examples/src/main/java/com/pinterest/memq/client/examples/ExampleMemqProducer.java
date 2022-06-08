@@ -64,10 +64,10 @@ public class ExampleMemqProducer {
           MemqProducer<byte[], byte[]> instance = new MemqProducer.Builder<byte[], byte[]>()
               .disableAcks(false).keySerializer(new ByteArraySerializer())
               .valueSerializer(new ByteArraySerializer()).topic(topicName).cluster("local")
-              .compression(Compression.ZSTD)
-              .bootstrapServers("127.0.0.1:9094").build();
+              .compression(Compression.ZSTD).maxPayloadBytes(1024 * 150)
+              .bootstrapServers("127.0.0.1:9092").build();
           StringBuilder builder = new StringBuilder();
-          while (builder.length() < 1024 * 512) {
+          while (builder.length() < 1024 * 100) {
             builder.append(UUID.randomUUID().toString());
           }
 
