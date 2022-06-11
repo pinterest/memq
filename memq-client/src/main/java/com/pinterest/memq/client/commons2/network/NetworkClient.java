@@ -169,7 +169,7 @@ public class NetworkClient implements Closeable {
           channelFuture.channel().writeAndFlush(buffer);
           ts = System.currentTimeMillis() - ts;
           if (ts>2) {
-            System.out.println(ts+"ms size:"+request.getSize(RequestType.PROTOCOL_VERSION));
+            System.out.println("Network dispatch delay:"+ts+"ms size:"+request.getSize(RequestType.PROTOCOL_VERSION));
           }
         } catch (Exception e) {
           logger.warn("Failed to write request " + request.getClientRequestId(), e);
