@@ -62,17 +62,19 @@ public class ExampleMemqProducer {
         try {
           String topicName = "test";
           MemqProducer<byte[], byte[]> instance = new MemqProducer.Builder<byte[], byte[]>()
-              .disableAcks(false).keySerializer(new ByteArraySerializer())
+              .disableAcks(true).keySerializer(new ByteArraySerializer())
               .valueSerializer(new ByteArraySerializer()).topic(topicName).cluster("local")
-              .compression(Compression.ZSTD).maxPayloadBytes(1024 * 150)
+              .compression(Compression.NONE).maxPayloadBytes(1024 * 10).maxInflightRequests(60)
               .bootstrapServers("127.0.0.1:9092").build();
           StringBuilder builder = new StringBuilder();
-          while (builder.length() < 1024 * 100) {
+          while (builder.length() < 1024 * 5) {
             builder.append(UUID.randomUUID().toString());
           }
 
           byte[] bytes = builder.toString().getBytes("utf-8");
-          for (int i = 0; i < 5000; i++) {
+          for (int i = 0; i < 500000; i++) {
+            long min = Long.MAX_VALUE;
+            long max = Long.MIN_VALUE;
             long ts = System.currentTimeMillis();
             List<Future<MemqWriteResult>> result = new ArrayList<>();
             for (int k = 0; k < 30; k++) {
@@ -81,10 +83,17 @@ public class ExampleMemqProducer {
             }
             instance.flush();
             for (Future<MemqWriteResult> future : result) {
-              future.get();
+              MemqWriteResult memqWriteResult = future.get();
+              int ackLatency = memqWriteResult.getAckLatency();
+              if (min > ackLatency) {
+                min = ackLatency;
+              }
+              if (max < ackLatency) {
+                max = ackLatency;
+              }
             }
             ts = System.currentTimeMillis() - ts;
-            System.out.println(ts + "ms");
+            System.out.println(ts + "ms " + min + "ms " + max + "ms");
           }
         } catch (Exception e) {
           e.printStackTrace();

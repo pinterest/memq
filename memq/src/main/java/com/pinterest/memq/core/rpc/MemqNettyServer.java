@@ -18,6 +18,7 @@ package com.pinterest.memq.core.rpc;
 import java.net.UnknownHostException;
 import java.nio.ByteOrder;
 import java.util.Map;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -61,6 +62,8 @@ import io.netty.handler.ssl.ClientAuth;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
+import net.openhft.affinity.AffinityStrategies;
+import net.openhft.affinity.AffinityThreadFactory;
 
 public class MemqNettyServer {
 
@@ -186,11 +189,12 @@ public class MemqNettyServer {
   }
 
   private EventLoopGroup getEventLoopGroup(int nThreads) {
+    ThreadFactory threadFactory = new AffinityThreadFactory("atf_wrk", true, AffinityStrategies.DIFFERENT_CORE);
     if (useEpoll) {
       logger.info("Epoll is available and will be used");
-      return new EpollEventLoopGroup(nThreads, new DaemonThreadFactory());
+      return new EpollEventLoopGroup(nThreads, threadFactory);
     } else {
-      return new NioEventLoopGroup(nThreads, new DaemonThreadFactory());
+      return new NioEventLoopGroup(nThreads, threadFactory);
     }
   }
 

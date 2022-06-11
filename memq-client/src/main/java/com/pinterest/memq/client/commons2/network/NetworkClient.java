@@ -26,6 +26,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -57,9 +58,12 @@ import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.ReferenceCountUtil;
+import net.openhft.affinity.AffinityStrategies;
+import net.openhft.affinity.AffinityThreadFactory;
 
 // No thread-safety guarantees
 public class NetworkClient implements Closeable {
+  private static final int DEFAULT_EVENT_LOOP_THREADS = 2;
   private static final Logger logger = LoggerFactory.getLogger(NetworkClient.class);
   public static final String CONFIG_INITIAL_RETRY_INTERVAL_MS = "initialRetryIntervalMs";
   public static final String CONFIG_MAX_RETRY_COUNT = "maxRetryCount";
@@ -107,15 +111,17 @@ public class NetworkClient implements Closeable {
     }
     this.responseHandler = new ResponseHandler();
     bootstrap = new Bootstrap();
+    ThreadFactory threadFactory = new AffinityThreadFactory("atf_wrk", true, AffinityStrategies.DIFFERENT_CORE);
     if (Epoll.isAvailable()) {
-      eventLoopGroup = new EpollEventLoopGroup(1, new DaemonThreadFactory("MemqCommonClientNettyGroup"));
+      eventLoopGroup = new EpollEventLoopGroup(DEFAULT_EVENT_LOOP_THREADS, threadFactory);
       bootstrap.channel(EpollSocketChannel.class);
     } else {
-      eventLoopGroup = new NioEventLoopGroup(1, new DaemonThreadFactory("MemqCommonClientNettyGroup"));
+      eventLoopGroup = new NioEventLoopGroup(DEFAULT_EVENT_LOOP_THREADS, threadFactory);
       bootstrap.channel(NioSocketChannel.class);
     }
     bootstrap.group(eventLoopGroup);
     bootstrap.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMs);
+    bootstrap.option(ChannelOption.TCP_NODELAY, true);
     bootstrap.handler(new ClientChannelInitializer(responseHandler, sslConfig, idleTimeoutMs));
     ScheduledThreadPoolExecutor tmpScheduler = new ScheduledThreadPoolExecutor(1);
     tmpScheduler.setRemoveOnCancelPolicy(true);
@@ -159,7 +165,12 @@ public class NetworkClient implements Closeable {
         try {
           buffer = PooledByteBufAllocator.DEFAULT.buffer(request.getSize(RequestType.PROTOCOL_VERSION));
           request.write(buffer, RequestType.PROTOCOL_VERSION);
+          long ts = System.currentTimeMillis();
           channelFuture.channel().writeAndFlush(buffer);
+          ts = System.currentTimeMillis() - ts;
+          if (ts>2) {
+            System.out.println(ts+"ms size:"+request.getSize(RequestType.PROTOCOL_VERSION));
+          }
         } catch (Exception e) {
           logger.warn("Failed to write request " + request.getClientRequestId(), e);
           ReferenceCountUtil.release(buffer);
