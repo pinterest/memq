@@ -64,9 +64,9 @@ public class ExampleMemqProducer {
     };
     ExecutorService es = Executors.newFixedThreadPool(nThreads, tf);
     ScheduledExecutorService bg = Executors.newScheduledThreadPool(1, tf);
-    bg.schedule(() -> System.out.print("\r" + messageLatency.getSnapshot().getMax() / 1000_000 + " "
+    bg.schedule(() -> System.out.println("" + messageLatency.getSnapshot().getMax() / 1000_000 + " "
         + messageLatency.getSnapshot().get99thPercentile() / 1000_000 + " "
-        + messageLatency.getSnapshot().getMean() / 1000_000), 10, TimeUnit.MILLISECONDS);
+        + messageLatency.getSnapshot().getMean() / 1000_000), 1, TimeUnit.SECONDS);
 
     String pathname = "/tmp/memq_serverset";
     PrintWriter pr = new PrintWriter(new File(pathname));
