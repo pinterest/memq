@@ -63,7 +63,7 @@ import net.openhft.affinity.AffinityThreadFactory;
 
 // No thread-safety guarantees
 public class NetworkClient implements Closeable {
-  private static final int DEFAULT_EVENT_LOOP_THREADS = 2;
+  private static final int DEFAULT_EVENT_LOOP_THREADS = 1;
   private static final Logger logger = LoggerFactory.getLogger(NetworkClient.class);
   public static final String CONFIG_INITIAL_RETRY_INTERVAL_MS = "initialRetryIntervalMs";
   public static final String CONFIG_MAX_RETRY_COUNT = "maxRetryCount";
