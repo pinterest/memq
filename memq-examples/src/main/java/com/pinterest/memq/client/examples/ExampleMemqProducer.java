@@ -41,6 +41,11 @@ public class ExampleMemqProducer {
     if (args.length > 0) {
       nThreads = Integer.parseInt(args[0]);
     }
+    String hostport = "127.0.0.1:9092";
+    if (args.length > 1) {
+      hostport = args[1];
+    }
+    final String conn = hostport;
     ExecutorService es = Executors.newFixedThreadPool(nThreads, new ThreadFactory() {
 
       @Override
@@ -65,7 +70,7 @@ public class ExampleMemqProducer {
               .disableAcks(true).keySerializer(new ByteArraySerializer())
               .valueSerializer(new ByteArraySerializer()).topic(topicName).cluster("local")
               .compression(Compression.NONE).maxPayloadBytes(1024 * 10).maxInflightRequests(60)
-              .bootstrapServers("127.0.0.1:9092").build();
+              .bootstrapServers(conn).build();
           StringBuilder builder = new StringBuilder();
           while (builder.length() < 1024 * 5) {
             builder.append(UUID.randomUUID().toString());
