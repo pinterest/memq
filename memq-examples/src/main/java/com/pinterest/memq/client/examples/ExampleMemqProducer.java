@@ -58,7 +58,7 @@ public class ExampleMemqProducer {
 
     String pathname = "/tmp/memq_serverset";
     PrintWriter pr = new PrintWriter(new File(pathname));
-    String s = "{\"az\": \"us-east-1a\", \"ip\": \"127.0.0.1\", \"port\": \"8080\", \"stage_name\": \"prototype\", \"version\": \"none\", \"weight\": 1}";
+    String s = "{\"az\": \"us-east-1a\", \"ip\": \""+hostport.split(":")[0]+"\", \"port\": \"8080\", \"stage_name\": \"prototype\", \"version\": \"none\", \"weight\": 1}";
     pr.println(s);
     pr.close();
     for (int x = 0; x < nThreads; x++) {
