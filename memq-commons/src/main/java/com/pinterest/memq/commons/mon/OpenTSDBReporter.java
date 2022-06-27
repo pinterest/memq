@@ -20,6 +20,8 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.SortedMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -34,10 +36,12 @@ import com.codahale.metrics.ScheduledReporter;
 import com.codahale.metrics.Snapshot;
 import com.codahale.metrics.Timer;
 import com.pinterest.memq.commons.mon.OpenTSDBClient.MetricsBuffer;
+import com.pinterest.memq.core.utils.DaemonThreadFactory;
 
 public class OpenTSDBReporter extends ScheduledReporter {
 
   private static final Logger logger = Logger.getLogger(OpenTSDBClient.class.getName());
+  private static ScheduledExecutorService ES = Executors.newScheduledThreadPool(1, new DaemonThreadFactory());
   private OpenTSDBClient client;
   private String[] tags;
   private String baseName;
@@ -52,7 +56,7 @@ public class OpenTSDBReporter extends ScheduledReporter {
                              OpenTSDBClient client,
                              String localHostAddress,
                              Map<String, Object> tags) throws UnknownHostException {
-    super(registry, registryName, filter, rateUnit, durationUnit);
+    super(registry, registryName, filter, rateUnit, durationUnit, ES);
     if (baseName == null || baseName.isEmpty()) {
       this.baseName = "";
     } else {

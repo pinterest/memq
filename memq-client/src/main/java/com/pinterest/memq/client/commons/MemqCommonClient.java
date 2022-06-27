@@ -41,7 +41,6 @@ import javax.net.ssl.TrustManagerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.pinterest.memq.client.producer.http.DaemonThreadFactory;
 import com.pinterest.memq.client.producer.netty.MemqNettyProducer;
 import com.pinterest.memq.commons.config.SSLConfig;
 import com.pinterest.memq.commons.protocol.Broker;
@@ -53,6 +52,7 @@ import com.pinterest.memq.commons.protocol.ResponsePacket;
 import com.pinterest.memq.commons.protocol.TopicMetadata;
 import com.pinterest.memq.commons.protocol.TopicMetadataRequestPacket;
 import com.pinterest.memq.commons.protocol.TopicMetadataResponsePacket;
+import com.pinterest.memq.core.utils.DaemonThreadFactory;
 import com.pinterest.memq.core.utils.MemqUtils;
 
 import io.netty.bootstrap.Bootstrap;

@@ -39,7 +39,6 @@ import com.pinterest.memq.client.commons2.TransportPacketIdentifier;
 import com.pinterest.memq.client.commons2.network.netty.ClientChannelInitializer;
 import com.pinterest.memq.client.commons2.retry.ExponentialBackoffRetryStrategy;
 import com.pinterest.memq.client.commons2.retry.RetryStrategy;
-import com.pinterest.memq.client.producer.http.DaemonThreadFactory;
 import com.pinterest.memq.commons.config.SSLConfig;
 import com.pinterest.memq.commons.protocol.RequestPacket;
 import com.pinterest.memq.commons.protocol.RequestType;

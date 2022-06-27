@@ -52,8 +52,8 @@ import org.apache.kafka.common.TopicPartition;
 import com.google.common.collect.ImmutableList;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
-import com.pinterest.memq.client.producer.http.DaemonThreadFactory;
 import com.pinterest.memq.commons.MemqLogMessage;
+import com.pinterest.memq.core.utils.DaemonThreadFactory;
 
 public class KafkaNotificationSource {
 
