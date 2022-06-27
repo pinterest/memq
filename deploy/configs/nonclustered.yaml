@@ -8,10 +8,11 @@ topicConfig:
       ringBufferSize: 1024
       outputParallelism: 4
       batchSizeMB: 1
-      batchMilliSeconds: 50
-      storageHandlerName: devnull
+      batchMilliSeconds: 1
+      storageHandlerName: filesystem
       storageHandlerConfig:
         retryTimeoutMillis: 5000
+        storageDirs: /Volumes/RAMDisk/val
         maxAttempts: 2
         disableNotifications: true
         bucket: <mybucket-name>

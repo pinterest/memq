@@ -18,13 +18,9 @@ package com.pinterest.memq.core.rpc;
 import java.security.Principal;
 import java.util.logging.Logger;
 
-import javax.ws.rs.InternalServerErrorException;
-import javax.ws.rs.NotAuthorizedException;
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.RedirectionException;
-
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.MetricRegistry;
+import com.pinterest.memq.commons.protocol.Broker.BrokerType;
 import com.pinterest.memq.commons.protocol.ReadRequestPacket;
 import com.pinterest.memq.commons.protocol.RequestPacket;
 import com.pinterest.memq.commons.protocol.ResponseCodes;
@@ -33,11 +29,13 @@ import com.pinterest.memq.commons.protocol.TopicMetadata;
 import com.pinterest.memq.commons.protocol.TopicMetadataRequestPacket;
 import com.pinterest.memq.commons.protocol.TopicMetadataResponsePacket;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
-import com.pinterest.memq.commons.protocol.WriteResponsePacket;
-import com.pinterest.memq.commons.protocol.Broker.BrokerType;
 import com.pinterest.memq.core.MemqManager;
 import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.processing.TopicProcessor;
+import com.pinterest.memq.core.rpc.exceptions.InternalServerErrorException;
+import com.pinterest.memq.core.rpc.exceptions.NotAuthorizedException;
+import com.pinterest.memq.core.rpc.exceptions.NotFoundException;
+import com.pinterest.memq.core.rpc.exceptions.RedirectionException;
 import com.pinterest.memq.core.security.Authorizer;
 
 import io.netty.channel.ChannelHandlerContext;
@@ -149,7 +147,7 @@ public class PacketSwitchingHandler {
       topicProcessor.registerChannel(ctx.channel());
       topicProcessor.write(requestPacket, writePacket, ctx);
     } else if (governor.getTopicMetadataMap().containsKey(writePacket.getTopicName())) {
-      throw new RedirectionException(301, null);
+      throw new RedirectionException();
     } else {
       logger.severe("Topic not found:" + writePacket.getTopicName());
       throw TOPIC_NOT_FOUND;

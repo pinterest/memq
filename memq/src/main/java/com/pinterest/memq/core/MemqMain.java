@@ -15,6 +15,7 @@
  */
 package com.pinterest.memq.core;
 
+import java.io.FileInputStream;
 import java.net.UnknownHostException;
 import java.util.Collections;
 import java.util.HashMap;
@@ -28,41 +29,34 @@ import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Metric;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.ScheduledReporter;
-import com.codahale.metrics.jvm.CachedThreadStatesGaugeSet;
-import com.codahale.metrics.jvm.GarbageCollectorMetricSet;
-import com.codahale.metrics.jvm.MemoryUsageGaugeSet;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+//import com.codahale.metrics.jvm.CachedThreadStatesGaugeSet;
+//import com.codahale.metrics.jvm.GarbageCollectorMetricSet;
+//import com.codahale.metrics.jvm.MemoryUsageGaugeSet;
 import com.pinterest.memq.commons.mon.OpenTSDBClient;
 import com.pinterest.memq.commons.mon.OpenTSDBReporter;
 import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.config.EnvironmentProvider;
 import com.pinterest.memq.core.config.MemqConfig;
-import com.pinterest.memq.core.mon.MemqMgrHealthCheck;
-import com.pinterest.memq.core.mon.MonitorEndpoint;
 import com.pinterest.memq.core.rpc.MemqNettyServer;
 import com.pinterest.memq.core.utils.DaemonThreadFactory;
 import com.pinterest.memq.core.utils.MiscUtils;
 
-import io.dropwizard.Application;
-import io.dropwizard.setup.Environment;
-
-public class MemqMain extends Application<MemqConfig> {
+public class MemqMain {
 
   private static final Logger logger = Logger.getLogger(MemqMain.class.getName());
 
-  @Override
-  public void run(MemqConfig configuration, Environment environment) throws Exception {
+  public void run(MemqConfig configuration) throws Exception {
     MiscUtils.printAllLines(ClassLoader.getSystemResourceAsStream("logo.txt"));
     Map<String, MetricRegistry> metricsRegistryMap = new HashMap<>();
     enableJVMMetrics(metricsRegistryMap);
     MetricRegistry misc = new MetricRegistry();
     emitStartMetrics(misc);
     metricsRegistryMap.put("_misc", misc);
-    OpenTSDBClient client = initializeMetricsTransmitter(configuration, environment,
-        metricsRegistryMap);
+    OpenTSDBClient client = initializeMetricsTransmitter(configuration, metricsRegistryMap);
     MemqManager memqManager = new MemqManager(client, configuration, metricsRegistryMap);
     memqManager.init();
-    environment.lifecycle().manage(memqManager);
-    addAPIs(environment, memqManager);
 
     if (configuration.isResetEnabled()) {
       Executors.newScheduledThreadPool(1, new DaemonThreadFactory()).schedule(() -> {
@@ -72,7 +66,7 @@ public class MemqMain extends Application<MemqConfig> {
       }, 1, TimeUnit.HOURS);
     }
 
-    environment.healthChecks().register("base", new MemqMgrHealthCheck(memqManager));
+//    environment.healthChecks().register("base", new MemqMgrHealthCheck(memqManager));
 
     MemqGovernor memqGovernor = initializeGovernor(configuration, memqManager);
     MemqNettyServer nettyServer = initializeNettyServer(configuration, memqManager, memqGovernor,
@@ -80,6 +74,8 @@ public class MemqMain extends Application<MemqConfig> {
     logger.info("Memq started");
 
     initializeShutdownHooks(memqManager, memqGovernor, nettyServer);
+    // block until server is stopped
+    nettyServer.getServerChannelFuture().channel().closeFuture().sync();
   }
 
   private void initializeShutdownHooks(MemqManager memqManager,
@@ -100,11 +96,11 @@ public class MemqMain extends Application<MemqConfig> {
   }
 
   private void enableJVMMetrics(Map<String, MetricRegistry> metricsRegistryMap) {
-    MetricRegistry registry = new MetricRegistry();
-    registry.register("gc", new GarbageCollectorMetricSet());
-    registry.register("threads", new CachedThreadStatesGaugeSet(10, TimeUnit.SECONDS));
-    registry.register("memory", new MemoryUsageGaugeSet());
-    metricsRegistryMap.put("_jvm", registry);
+//    MetricRegistry registry = new MetricRegistry();
+//    registry.register("gc", new GarbageCollectorMetricSet());
+//    registry.register("threads", new CachedThreadStatesGaugeSet(10, TimeUnit.SECONDS));
+//    registry.register("memory", new MemoryUsageGaugeSet());
+//    metricsRegistryMap.put("_jvm", registry);
   }
 
   public MemqGovernor initializeGovernor(MemqConfig configuration,
@@ -135,7 +131,6 @@ public class MemqMain extends Application<MemqConfig> {
   }
 
   private OpenTSDBClient initializeMetricsTransmitter(MemqConfig configuration,
-                                                      Environment environment,
                                                       Map<String, MetricRegistry> metricsRegistryMap) throws UnknownHostException {
     if (configuration.getOpenTsdbConfig() != null) {
       OpenTSDBClient client = new OpenTSDBClient(configuration.getOpenTsdbConfig().getHost(),
@@ -159,18 +154,16 @@ public class MemqMain extends Application<MemqConfig> {
     return null;
   }
 
-  private void addAPIs(Environment environment, MemqManager memqManager) {
-    environment.jersey().setUrlPattern("/api/*");
-    environment.jersey().register(new MonitorEndpoint(memqManager.getRegistry()));
-  }
-
   private void emitStartMetrics(MetricRegistry registry) {
     final long startTs = System.currentTimeMillis();
-    registry.gauge("start", () -> (Gauge<Integer>) () -> System.currentTimeMillis() - startTs < 3 * 60_000 ? 1 : 0);
+    registry.gauge("start",
+        () -> (Gauge<Integer>) () -> System.currentTimeMillis() - startTs < 3 * 60_000 ? 1 : 0);
   }
 
   public static void main(String[] args) throws Exception {
-    new MemqMain().run(args);
+    ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
+    MemqConfig config = mapper.readValue(new FileInputStream(args[1]), MemqConfig.class);
+    new MemqMain().run(config);
   }
 
 }

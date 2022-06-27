@@ -20,12 +20,6 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import javax.net.ssl.SSLSession;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.InternalServerErrorException;
-import javax.ws.rs.NotAuthorizedException;
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.RedirectionException;
-import javax.ws.rs.ServiceUnavailableException;
 
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.MetricRegistry;
@@ -34,6 +28,12 @@ import com.pinterest.memq.commons.protocol.ResponseCodes;
 import com.pinterest.memq.commons.protocol.ResponsePacket;
 import com.pinterest.memq.core.MemqManager;
 import com.pinterest.memq.core.clustering.MemqGovernor;
+import com.pinterest.memq.core.rpc.exceptions.BadRequestException;
+import com.pinterest.memq.core.rpc.exceptions.InternalServerErrorException;
+import com.pinterest.memq.core.rpc.exceptions.NotAuthorizedException;
+import com.pinterest.memq.core.rpc.exceptions.NotFoundException;
+import com.pinterest.memq.core.rpc.exceptions.RedirectionException;
+import com.pinterest.memq.core.rpc.exceptions.ServiceUnavailableException;
 import com.pinterest.memq.core.security.Authorizer;
 
 import io.netty.buffer.ByteBuf;

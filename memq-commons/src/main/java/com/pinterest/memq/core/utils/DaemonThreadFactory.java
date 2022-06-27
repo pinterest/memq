@@ -16,15 +16,29 @@
 package com.pinterest.memq.core.utils;
 
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class DaemonThreadFactory implements ThreadFactory {
 
   public static DaemonThreadFactory INSTANCE = new DaemonThreadFactory();
 
+  private String basename;
+  private AtomicInteger counter;
+
+  public DaemonThreadFactory() {
+    this("common");
+  }
+
+  public DaemonThreadFactory(String basename) {
+    this.basename = basename;
+    this.counter = new AtomicInteger();
+  }
+
   @Override
   public Thread newThread(Runnable r) {
     Thread th = new Thread(r);
     th.setDaemon(true);
+    th.setName(basename + "-" + counter.getAndIncrement());
     return th;
   }
 }

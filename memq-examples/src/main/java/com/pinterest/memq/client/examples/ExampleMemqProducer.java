@@ -25,9 +25,13 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
+import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.Timer;
+import com.codahale.metrics.Timer.Context;
 import com.pinterest.memq.client.commons.Compression;
 import com.pinterest.memq.client.commons.serde.ByteArraySerializer;
 import com.pinterest.memq.client.producer.MemqWriteResult;
@@ -37,11 +41,19 @@ public class ExampleMemqProducer {
 
   public static void main(String[] args) throws IOException, InterruptedException,
                                          ExecutionException {
+    MetricRegistry reg = new MetricRegistry();
+    Timer totalLatency = reg.timer("totalLatency");
+    Timer messageLatency = reg.timer("messageLatency");
     int nThreads = 1;
     if (args.length > 0) {
       nThreads = Integer.parseInt(args[0]);
     }
-    ExecutorService es = Executors.newFixedThreadPool(nThreads, new ThreadFactory() {
+    String hostport = "127.0.0.1:9092";
+    if (args.length > 1) {
+      hostport = args[1];
+    }
+    final String conn = hostport;
+    ThreadFactory tf = new ThreadFactory() {
 
       @Override
       public Thread newThread(Runnable r) {
@@ -49,11 +61,19 @@ public class ExampleMemqProducer {
         th.setDaemon(true);
         return th;
       }
-    });
+    };
+    ExecutorService es = Executors.newFixedThreadPool(nThreads, tf);
+    ScheduledExecutorService bg = Executors.newScheduledThreadPool(1, tf);
+    bg.scheduleAtFixedRate(() -> {
+      System.out.print("\r" + messageLatency.getSnapshot().getMax() / 1000_000 + " "
+          + messageLatency.getSnapshot().get99thPercentile() / 1000_000 + " "
+          + messageLatency.getSnapshot().getMean() / 1000_000);
+    }, 1, 1, TimeUnit.SECONDS);
 
     String pathname = "/tmp/memq_serverset";
     PrintWriter pr = new PrintWriter(new File(pathname));
-    String s = "{\"az\": \"us-east-1a\", \"ip\": \"127.0.0.1\", \"port\": \"8080\", \"stage_name\": \"prototype\", \"version\": \"none\", \"weight\": 1}";
+    String s = "{\"az\": \"us-east-1a\", \"ip\": \"" + hostport.split(":")[0]
+        + "\", \"port\": \"8080\", \"stage_name\": \"prototype\", \"version\": \"none\", \"weight\": 1}";
     pr.println(s);
     pr.close();
     for (int x = 0; x < nThreads; x++) {
@@ -64,16 +84,16 @@ public class ExampleMemqProducer {
           MemqProducer<byte[], byte[]> instance = new MemqProducer.Builder<byte[], byte[]>()
               .disableAcks(false).keySerializer(new ByteArraySerializer())
               .valueSerializer(new ByteArraySerializer()).topic(topicName).cluster("local")
-              .compression(Compression.ZSTD).maxPayloadBytes(1024 * 150)
-              .bootstrapServers("127.0.0.1:9092").build();
+              .compression(Compression.NONE).maxPayloadBytes(1024 * 10).maxInflightRequests(60)
+              .bootstrapServers(conn).build();
           StringBuilder builder = new StringBuilder();
-          while (builder.length() < 1024 * 100) {
+          while (builder.length() < 1024 * 5) {
             builder.append(UUID.randomUUID().toString());
           }
 
           byte[] bytes = builder.toString().getBytes("utf-8");
-          for (int i = 0; i < 5000; i++) {
-            long ts = System.currentTimeMillis();
+          for (int i = 0; i < 500000; i++) {
+            Context time = totalLatency.time();
             List<Future<MemqWriteResult>> result = new ArrayList<>();
             for (int k = 0; k < 30; k++) {
               Future<MemqWriteResult> writeToTopic = instance.write(null, bytes, System.nanoTime());
@@ -81,10 +101,11 @@ public class ExampleMemqProducer {
             }
             instance.flush();
             for (Future<MemqWriteResult> future : result) {
-              future.get();
+              MemqWriteResult memqWriteResult = future.get();
+              int ackLatency = memqWriteResult.getAckLatency();
+              messageLatency.update(ackLatency, TimeUnit.MILLISECONDS);
             }
-            ts = System.currentTimeMillis() - ts;
-            System.out.println(ts + "ms");
+            time.stop();
           }
         } catch (Exception e) {
           e.printStackTrace();

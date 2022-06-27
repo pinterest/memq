@@ -40,10 +40,10 @@ import com.pinterest.memq.client.commons2.Endpoint;
 import com.pinterest.memq.client.commons2.MemqCommonClient;
 import com.pinterest.memq.client.producer.MemqProducer;
 import com.pinterest.memq.client.producer.TaskRequest;
-import com.pinterest.memq.client.producer.http.DaemonThreadFactory;
 import com.pinterest.memq.commons.config.SSLConfig;
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicMetadata;
+import com.pinterest.memq.core.utils.DaemonThreadFactory;
 
 public class MemqNettyProducer<H, T> extends MemqProducer<H, T> {
 
