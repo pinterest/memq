@@ -15,26 +15,21 @@
  */
 package com.pinterest.memq.core.config;
 
-import com.google.common.collect.ImmutableList;
-import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.commons.protocol.Broker.BrokerType;
+import com.pinterest.memq.commons.protocol.TopicConfig;
 
-import io.dropwizard.Configuration;
-import io.dropwizard.request.logging.LogbackAccessRequestLogFactory;
-import io.dropwizard.server.DefaultServerFactory;
-
-public class MemqConfig extends Configuration {
+public class MemqConfig {
 
   public MemqConfig() {
-    DefaultServerFactory defaultServerFactory = (DefaultServerFactory) getServerFactory();
+//    DefaultServerFactory defaultServerFactory = (DefaultServerFactory) getServerFactory();
 
     // Note that if someone explicitly enables gzip in the Dropwizard config YAML
     // then settings will be over-ruled causing the UI to stop working
 
     // Disable HTTP request logging
-    LogbackAccessRequestLogFactory accessRequestLogFactory = new LogbackAccessRequestLogFactory();
-    accessRequestLogFactory.setAppenders(ImmutableList.of());
-    defaultServerFactory.setRequestLogFactory(accessRequestLogFactory);
+//    LogbackAccessRequestLogFactory accessRequestLogFactory = new LogbackAccessRequestLogFactory();
+//    accessRequestLogFactory.setAppenders(ImmutableList.of());
+//    defaultServerFactory.setRequestLogFactory(accessRequestLogFactory);
   }
 
   private int defaultBufferSize = 1024 * 1024;

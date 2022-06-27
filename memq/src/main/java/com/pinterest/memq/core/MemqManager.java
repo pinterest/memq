@@ -34,10 +34,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.InternalServerErrorException;
-import javax.ws.rs.NotFoundException;
-
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.ScheduledReporter;
 import com.google.gson.Gson;
@@ -51,12 +47,14 @@ import com.pinterest.memq.core.config.MemqConfig;
 import com.pinterest.memq.core.processing.TopicProcessor;
 import com.pinterest.memq.core.processing.TopicProcessorState;
 import com.pinterest.memq.core.processing.bucketing.BucketingTopicProcessor;
+import com.pinterest.memq.core.rpc.exceptions.BadRequestException;
+import com.pinterest.memq.core.rpc.exceptions.InternalServerErrorException;
+import com.pinterest.memq.core.rpc.exceptions.NotFoundException;
 import com.pinterest.memq.core.utils.DaemonThreadFactory;
 import com.pinterest.memq.core.utils.MiscUtils;
 
-import io.dropwizard.lifecycle.Managed;
 
-public class MemqManager implements Managed {
+public class MemqManager {
 
   private static final Logger logger = Logger.getLogger(MemqManager.class.getName());
   private static final Gson gson = new Gson();
@@ -211,12 +209,10 @@ public class MemqManager implements Managed {
     return metricsRegistryMap;
   }
 
-  @Override
   public void start() throws Exception {
     logger.info("Memq manager started");
   }
 
-  @Override
   public void stop() throws Exception {
     try {
       for (Iterator<Entry<String, TopicProcessor>> iterator = processorMap.entrySet()

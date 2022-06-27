@@ -25,11 +25,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import javax.annotation.Nullable;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.InternalServerErrorException;
-import javax.ws.rs.core.Response;
-
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.MetricRegistry;
@@ -51,6 +46,8 @@ import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.commons.storage.StorageHandler;
 import com.pinterest.memq.core.processing.Ackable;
 import com.pinterest.memq.core.processing.TopicProcessor;
+import com.pinterest.memq.core.rpc.exceptions.BadRequestException;
+import com.pinterest.memq.core.rpc.exceptions.InternalServerErrorException;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
@@ -274,7 +271,7 @@ public class BucketingTopicProcessor extends TopicProcessor {
           requestPacket.getClientRequestId(), requestPacket.getRequestType(), ResponseCodes.NO_DATA,
           new ReadResponsePacket(EMPTY_BATCH_DATA)));
     } catch (IOException e) {
-      throw new InternalServerErrorException(Response.serverError().build(), e);
+      throw new InternalServerErrorException(e);
     }
   }
 

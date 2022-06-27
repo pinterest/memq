@@ -15,19 +15,6 @@
  */
 package com.pinterest.memq.core.processing.bucketing;
 
-import com.pinterest.memq.commons.protocol.WriteRequestPacket;
-import com.pinterest.memq.commons.storage.StorageHandler;
-import com.pinterest.memq.core.commons.MemqProcessingThreadFactory;
-import com.pinterest.memq.core.utils.MiscUtils;
-
-import com.codahale.metrics.Counter;
-import com.codahale.metrics.Gauge;
-import com.codahale.metrics.Histogram;
-import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.Timer;
-import io.netty.buffer.ByteBuf;
-import io.netty.channel.ChannelHandlerContext;
-
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.Queue;
@@ -37,7 +24,20 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
-import javax.ws.rs.BadRequestException;
+
+import com.codahale.metrics.Counter;
+import com.codahale.metrics.Gauge;
+import com.codahale.metrics.Histogram;
+import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.Timer;
+import com.pinterest.memq.commons.protocol.WriteRequestPacket;
+import com.pinterest.memq.commons.storage.StorageHandler;
+import com.pinterest.memq.core.commons.MemqProcessingThreadFactory;
+import com.pinterest.memq.core.rpc.exceptions.BadRequestException;
+import com.pinterest.memq.core.utils.MiscUtils;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelHandlerContext;
 
 public class BatchManager {
   private volatile Batch currentBatch;
