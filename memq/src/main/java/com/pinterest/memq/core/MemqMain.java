@@ -80,6 +80,7 @@ public class MemqMain extends Application<MemqConfig> {
     logger.info("Memq started");
 
     initializeShutdownHooks(memqManager, memqGovernor, nettyServer);
+    initializeAdditionalModules(configuration, environment, memqManager, memqGovernor);
   }
 
   private void initializeShutdownHooks(MemqManager memqManager,
@@ -132,6 +133,10 @@ public class MemqMain extends Application<MemqConfig> {
         metricsRegistryMap, client);
     server.initialize();
     return server;
+  }
+
+  public void initializeAdditionalModules(MemqConfig config, Environment environment, MemqManager memqManager, MemqGovernor memqGovernor) throws Exception {
+
   }
 
   private OpenTSDBClient initializeMetricsTransmitter(MemqConfig configuration,

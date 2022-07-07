@@ -46,9 +46,9 @@ public final class MetadataPoller implements Runnable {
       try {
         Map<String, TopicMetadata> topicBrokerMap = new HashMap<>();
         // poll topic assignment data
-        List<String> brokers = client.getChildren().forPath("/brokers");
+        List<String> brokers = client.getChildren().forPath(MemqGovernor.ZNODE_BROKERS);
         for (String brokerId : brokers) {
-          String brokerDataStr = new String(client.getData().forPath("/brokers/" + brokerId));
+          String brokerDataStr = new String(client.getData().forPath(MemqGovernor.ZNODE_BROKERS_BASE + brokerId));
           Broker broker = GSON.fromJson(brokerDataStr, Broker.class);
           for (TopicConfig topicConfig : broker.getAssignedTopics()) {
             TopicMetadata md = topicBrokerMap.get(topicConfig.getTopic());

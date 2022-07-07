@@ -46,11 +46,11 @@ import com.pinterest.memq.core.config.MemqConfig;
 
 public class MemqGovernor {
 
-  private static final String ZNODE_BROKERS_BASE = "/brokers/";
-  private static final String ZNODE_GOVERNOR = "/governor";
-  private static final String ZNODE_BROKERS = "/brokers";
-  private static final String ZNODE_TOPICS_BASE = "/topics";
-  private static final String ZNODE_TOPICS = "/topics/";
+  public static final String ZNODE_GOVERNOR = "/governor";
+  public static final String ZNODE_BROKERS_BASE = "/brokers/";
+  public static final String ZNODE_BROKERS = "/brokers";
+  public static final String ZNODE_TOPICS_BASE = "/topics/";
+  public static final String ZNODE_TOPICS = "/topics";
   private static final Gson GSON = new Gson();
   private static final Logger logger = Logger.getLogger(MemqGovernor.class.getCanonicalName());
   private MemqConfig config;
@@ -61,6 +61,7 @@ public class MemqGovernor {
   private CuratorFramework client;
   private ClusteringConfig clusteringConfig;
   private String brokerZnodePath;
+  private volatile boolean closed = false;
 
   public MemqGovernor(MemqManager mgr, MemqConfig config, EnvironmentProvider provider) {
     this.mgr = mgr;
@@ -118,7 +119,7 @@ public class MemqGovernor {
         logger.info("Elected leader for cluster");
         // start leader process
         client.setData().forPath(ZNODE_GOVERNOR, provider.getIP().getBytes());
-        while (true) {
+        while (!closed) {
           Thread.sleep(5000);
         }
       }
@@ -144,16 +145,16 @@ public class MemqGovernor {
   }
 
   public static void createTopic(CuratorFramework client, TopicConfig config) throws Exception {
-    if (client.checkExists().forPath(ZNODE_TOPICS + config.getTopic()) != null) {
+    if (client.checkExists().forPath(ZNODE_TOPICS_BASE + config.getTopic()) != null) {
       throw new Exception("Topic exists");
     } else {
-      client.create().forPath(ZNODE_TOPICS + config.getTopic(), GSON.toJson(config).getBytes());
+      client.create().forPath(ZNODE_TOPICS_BASE + config.getTopic(), GSON.toJson(config).getBytes());
     }
   }
 
   private void initializeZNodesAndWatchers(CuratorFramework client) throws Exception {
-    if (client.checkExists().forPath(ZNODE_TOPICS_BASE) == null) {
-      client.create().withMode(CreateMode.PERSISTENT).forPath(ZNODE_TOPICS_BASE);
+    if (client.checkExists().forPath(ZNODE_TOPICS) == null) {
+      client.create().withMode(CreateMode.PERSISTENT).forPath(ZNODE_TOPICS);
     }
     if (client.checkExists().forPath(ZNODE_BROKERS) == null) {
       client.create().withMode(CreateMode.PERSISTENT).forPath(ZNODE_BROKERS);
@@ -196,12 +197,21 @@ public class MemqGovernor {
             "Failed to deregister broker znode, will be removed after session timeout", e);
       }
     }
+    closed = true;
     leaderSelector.close();
     client.close();
   }
 
   public void createTopic(TopicConfig topipConfig) throws Exception {
     createTopic(client, topipConfig);
+  }
+
+  public boolean hasLeadership() {
+    return leaderSelector.hasLeadership();
+  }
+
+  public CuratorFramework getCuratorFramework() {
+    return client;
   }
 
 }

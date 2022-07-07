@@ -23,6 +23,9 @@ import io.dropwizard.Configuration;
 import io.dropwizard.request.logging.LogbackAccessRequestLogFactory;
 import io.dropwizard.server.DefaultServerFactory;
 
+import java.util.HashMap;
+import java.util.Map;
+
 public class MemqConfig extends Configuration {
 
   public MemqConfig() {
@@ -70,6 +73,8 @@ public class MemqConfig extends Configuration {
   private ClusteringConfig clusteringConfig = null;
   
   private String topicCacheFile = "/tmp/.memq_topic_cache";
+
+  private Map<String, Object> additionalConfigs = new HashMap<>();
 
   public String getTopicCacheFile() {
     return topicCacheFile;
@@ -261,4 +266,11 @@ public class MemqConfig extends Configuration {
     this.brokerType = brokerType;
   }
 
+  public Map<String, Object> getAdditionalConfigs() {
+    return additionalConfigs;
+  }
+
+  public void setAdditionalConfigs(Map<String, Object> additionalConfigs) {
+    this.additionalConfigs = additionalConfigs;
+  }
 }

@@ -64,10 +64,10 @@ public class Balancer implements Runnable {
       if (leaderSelector.hasLeadership()) {
         if (firstRun) {
           if (config.getTopicConfig() != null) {
-            for (TopicConfig topipConfig : config.getTopicConfig()) {
+            for (TopicConfig topicConfig : config.getTopicConfig()) {
               try {
-                client.delete().forPath("/topics/" + topipConfig.getTopic());
-                governor.createTopic(topipConfig);
+                client.delete().forPath(MemqGovernor.ZNODE_TOPICS_BASE + topicConfig.getTopic());
+                governor.createTopic(topicConfig);
               } catch (Exception e) {
               }
             }
@@ -80,10 +80,10 @@ public class Balancer implements Runnable {
         try {
           // get current cluster capacity
           Set<Broker> brokers = new HashSet<>();
-          for (String id : client.getChildren().forPath("/brokers")) {
+          for (String id : client.getChildren().forPath(MemqGovernor.ZNODE_BROKERS)) {
             byte[] brokerInfoBytes;
             try {
-              brokerInfoBytes = client.getData().forPath("/brokers/" + id);
+              brokerInfoBytes = client.getData().forPath(MemqGovernor.ZNODE_BROKERS_BASE + id);
               String brokerInfo = new String(brokerInfoBytes);
               Broker broker = GSON.fromJson(brokerInfo, Broker.class);
               brokers.add(broker);
@@ -94,8 +94,8 @@ public class Balancer implements Runnable {
           logger.info("Current brokers:" + brokers);
 
           Set<TopicConfig> topics = new HashSet<>();
-          for (String topicName : client.getChildren().forPath("/topics")) {
-            byte[] topicConfigBytes = client.getData().forPath("/topics/" + topicName);
+          for (String topicName : client.getChildren().forPath(MemqGovernor.ZNODE_TOPICS)) {
+            byte[] topicConfigBytes = client.getData().forPath(MemqGovernor.ZNODE_TOPICS_BASE + topicName);
             String topicConfig = new String(topicConfigBytes);
             TopicConfig topic = GSON.fromJson(topicConfig, TopicConfig.class);
             topics.add(topic);
@@ -124,7 +124,7 @@ public class Balancer implements Runnable {
     Set<Broker> newBrokers = writeBalanceStrategy.balance(topics, writeBrokers);
     // update brokers
     for (Broker broker : newBrokers) {
-      client.setData().forPath("/brokers/" + broker.getBrokerIP(), GSON.toJson(broker).getBytes());
+      client.setData().forPath(MemqGovernor.ZNODE_BROKERS_BASE + broker.getBrokerIP(), GSON.toJson(broker).getBytes());
     }
   }
 
@@ -137,7 +137,7 @@ public class Balancer implements Runnable {
     Set<Broker> newBrokers = readBalanceStrategy.balance(topics, writeBrokers);
     // update brokers
     for (Broker broker : newBrokers) {
-      client.setData().forPath("/brokers/" + broker.getBrokerIP(), GSON.toJson(broker).getBytes());
+      client.setData().forPath(MemqGovernor.ZNODE_BROKERS_BASE + broker.getBrokerIP(), GSON.toJson(broker).getBytes());
     }
   }
 
