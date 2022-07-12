@@ -132,7 +132,7 @@ public class CustomS3Async2StorageHandler extends AbstractS3StorageHandler {
     this.registry = registry;
     this.dryrun = Boolean.parseBoolean(outputHandlerConfig.getProperty("dryrun", "false"));
     this.disableNotifications = Boolean
-        .parseBoolean(outputHandlerConfig.getProperty("disableNotifications", "true"));
+        .parseBoolean(outputHandlerConfig.getProperty("disableNotifications", "false"));
     if (!disableNotifications) {
       this.notificationSink = new KafkaNotificationSink();
       this.notificationSink.init(outputHandlerConfig);
