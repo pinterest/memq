@@ -22,6 +22,7 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.ThreadLocalRandom;
 
 import io.netty.util.ResourceLeakDetector;
 import org.junit.BeforeClass;
@@ -53,11 +54,10 @@ public class TestFileSystemStorageHandler {
     ResourceLeakDetector.setLevel(ResourceLeakDetector.Level.PARANOID);
   }
 
-
   private MetricRegistry registry = new MetricRegistry();
 
   @Rule
-  public TemporaryFolder folder = new TemporaryFolder();
+  public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
   @Test
   public void testInit() throws Exception {
@@ -65,6 +65,7 @@ public class TestFileSystemStorageHandler {
     Properties outputHandlerConfig = new Properties();
     outputHandlerConfig.setProperty(FileSystemStorageHandler.STORAGE_DIRS,
         folder.newFolder().getAbsolutePath());
+    System.out.println(folder.newFolder().getAbsolutePath());
     String topic = "testTopic";
     handler.initWriter(outputHandlerConfig, topic, registry);
     handler.closeWriter();
@@ -72,17 +73,29 @@ public class TestFileSystemStorageHandler {
 
   @Test
   public void testSpeculativeWrite() throws Exception {
-    StorageHandler handler = new FileSystemStorageHandler();
-    Properties outputHandlerConfig = new Properties();
-    outputHandlerConfig.setProperty(FileSystemStorageHandler.STORAGE_DIRS,
-        folder.newFolder().getAbsolutePath());
-    String topic = "testTopic";
-    handler.initWriter(outputHandlerConfig, topic, registry);
+    for (int k = 0; k < 1; k++) {
+      StorageHandler handler = new FileSystemStorageHandler();
+      Properties outputHandlerConfig = new Properties();
+      outputHandlerConfig.setProperty(FileSystemStorageHandler.STORAGE_DIRS,
+          folder.newFolder().getAbsolutePath() + "/" + k);
+      String topic = "testTopic";
+      handler.initWriter(outputHandlerConfig, topic, registry);
 
-    List<Message> messageList = generateSampleMessages();
-    int sizeInBytes = batchSizeInBytes(messageList);
-    handler.writeOutput(sizeInBytes, 0, messageList);
-    handler.closeWriter();
+      long time = System.currentTimeMillis();
+      long bytes = 0;
+      List<Message> messageList = generateSampleMessages(false);
+      for (int i = 0; i < 1000; i++) {
+        messageList.get(0).setClientRequestId(ThreadLocalRandom.current().nextLong());
+        int sizeInBytes = batchSizeInBytes(messageList);
+        handler.writeOutput(sizeInBytes, 0, messageList);
+        bytes += sizeInBytes;
+      }
+      messageList.forEach(m -> m.getBuf().release());
+      time = (System.currentTimeMillis() - time);
+      System.out.println(time + "ms " + (bytes / 1024 / 1024 / 1024) + "GB "
+          + (bytes * 1000 / 1024 / 1024 / (time)) + "MB/s");
+      handler.closeWriter();
+    }
   }
 
   @Test
@@ -95,7 +108,7 @@ public class TestFileSystemStorageHandler {
     handler.initWriter(outputHandlerConfig, topic, registry);
 
     byte[] msg = TestUtils.createMessage("hello world", (base, k) -> base.getBytes(), 100, true,
-        Compression.GZIP, null, false);
+        Compression.NONE, null, false);
     ByteBuf buffer = PooledByteBufAllocator.DEFAULT.buffer();
     buffer.writeBytes(msg);
     List<Message> messages = ImmutableList.of(Message.newInstance(buffer, 1, 1, null, (short) 3));
@@ -105,7 +118,7 @@ public class TestFileSystemStorageHandler {
     handler.initReader(properties, registry);
     JsonObject notification = new JsonObject();
     notification.addProperty(FileSystemStorageHandler.TOPIC, topic);
-    String path = absolutePath + "/" + topic + "/" + MiscUtils.getHostname()  + "/1_1_0";
+    String path = absolutePath + "/" + topic + "/" + MiscUtils.getHostname() + "/1_1_0";
     notification.addProperty(FileSystemStorageHandler.PATH, path);
     BatchData buf = handler.fetchBatchStreamForNotificationBuf(notification);
     DataInputStream stream = new DataInputStream(new ByteBufInputStream(buf.getDataAsBuf(), true));
@@ -132,11 +145,14 @@ public class TestFileSystemStorageHandler {
     return batch.stream().mapToInt(b -> b.getBuf().writerIndex()).sum();
   }
 
-  private List<Message> generateSampleMessages() {
+  public static final byte[] buf = new byte[1024 * 100];
+
+  private List<Message> generateSampleMessages(boolean random) {
     List<Message> messages = new ArrayList<>();
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 1 + (random ? ThreadLocalRandom.current().nextInt(100) : 9); i++) {
       Message m = new Message(1024 * 1024, true);
-      m.put(new byte[1024 * 100]);
+      m.setClientRequestId(ThreadLocalRandom.current().nextLong());
+      m.put(buf);
       messages.add(m);
     }
     return messages;

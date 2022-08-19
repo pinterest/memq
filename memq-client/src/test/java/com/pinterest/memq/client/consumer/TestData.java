@@ -31,30 +31,85 @@ import com.pinterest.memq.client.commons.serde.ByteArrayDeserializer;
 import com.pinterest.memq.commons.MemqLogMessage;
 
 public class TestData {
+  
+  @Test
+  public void testCompressionNone() throws Exception {
+    BiFunction<String, Integer, byte[]> getLogMessageBytes = (base, k) -> base.getBytes();
+    byte[] memqBatchData = TestUtils.getMemqBatchData("test1231231", getLogMessageBytes, 2, 5, true,
+        Compression.NONE, null, true);
+
+    byte[] decode = Base64.getDecoder().decode(Base64.getEncoder().encodeToString(memqBatchData));
+    DataInputStream dataInputStream = new DataInputStream(new ByteArrayInputStream(decode));
+    JsonObject currNotificationObj = new JsonObject();
+    currNotificationObj.addProperty(MemqLogMessage.INTERNAL_FIELD_TOPIC, "test");
+    currNotificationObj.addProperty(MemqLogMessage.INTERNAL_FIELD_OBJECT_SIZE, decode.length);
+    MemqLogMessageIterator<byte[], byte[]> memqLogMessageIterator = new MemqLogMessageIterator<byte[], byte[]>(
+        "test", "client0", dataInputStream, currNotificationObj, new ByteArrayDeserializer(),
+        new ByteArrayDeserializer(), new MetricRegistry(), false, null);
+    while (memqLogMessageIterator.hasNext()) {
+      memqLogMessageIterator.next();
+    }
+    memqLogMessageIterator.close();
+  }
 
   @Test
-  public void testData() throws Exception {
+  public void testCompressionZstd() throws Exception {
     BiFunction<String, Integer, byte[]> getLogMessageBytes = (base, k) -> base.getBytes();
-    byte[] memqBatchData = TestUtils.getMemqBatchData("test1231231", getLogMessageBytes, 2,
-        5, true, Compression.ZSTD, null, true);
-    
-    String encodeToString = Base64.getEncoder().encodeToString(memqBatchData);
-    System.out.println(encodeToString.length());
-    System.out.print(encodeToString);
+    byte[] memqBatchData = TestUtils.getMemqBatchData("test1231231", getLogMessageBytes, 2, 5, true,
+        Compression.ZSTD, null, true);
 
-//    byte[] decode = Base64.getDecoder().decode(
-//        "AAAAHAAAAAIAAAAAAAAAIAAAAJIAAAABAAAAsgAAAJIAKABkABUErBAAJQAAAXdqDH1EAAAAAAAAAAGRLVIQAAAAAAIAAABqACAAAAF3agx9QwgAAAAAAAAAAAANAAR0ZXN0AAV2YWx1ZQAAAAAAAAALdGVzdDEyMzEyMzEAIAAAAXdqDH1DCAAAAAAAAAABAA0ABHRlc3QABXZhbHVlAAAAAAAAAAt0ZXN0MTIzMTIzMQAoAGQAFQSsEAAlAAABd2oMfUUAAAAAAAAAAf6kvmoAAAAAAgAAAGoAIAAAAXdqDH1ECAAAAAAAAAAAAA0ABHRlc3QABXZhbHVlAAAAAAAAAAt0ZXN0MTIzMTIzMQAgAAABd2oMfUUIAAAAAAAAAAEADQAEdGVzdAAFdmFsdWUAAAAAAAAAC3Rlc3QxMjMxMjMx");
-//    DataInputStream dataInputStream = new DataInputStream(new ByteArrayInputStream(decode));
+    byte[] decode = Base64.getDecoder().decode(Base64.getEncoder().encodeToString(memqBatchData));
+    DataInputStream dataInputStream = new DataInputStream(new ByteArrayInputStream(decode));
+    JsonObject currNotificationObj = new JsonObject();
+    currNotificationObj.addProperty(MemqLogMessage.INTERNAL_FIELD_TOPIC, "test");
+    currNotificationObj.addProperty(MemqLogMessage.INTERNAL_FIELD_OBJECT_SIZE, decode.length);
+    MemqLogMessageIterator<byte[], byte[]> memqLogMessageIterator = new MemqLogMessageIterator<byte[], byte[]>(
+        "test", "client0", dataInputStream, currNotificationObj, new ByteArrayDeserializer(),
+        new ByteArrayDeserializer(), new MetricRegistry(), false, null);
+    while (memqLogMessageIterator.hasNext()) {
+      memqLogMessageIterator.next();
+    }
+    memqLogMessageIterator.close();
+  }
+
+  
+  @Test
+  public void testCompressionGzip() throws Exception {
+    BiFunction<String, Integer, byte[]> getLogMessageBytes = (base, k) -> base.getBytes();
+    byte[] memqBatchData = TestUtils.getMemqBatchData("test1231231", getLogMessageBytes, 2, 5, true,
+        Compression.GZIP, null, true);
+
+    byte[] decode = Base64.getDecoder().decode(Base64.getEncoder().encodeToString(memqBatchData));
+    DataInputStream dataInputStream = new DataInputStream(new ByteArrayInputStream(decode));
+    JsonObject currNotificationObj = new JsonObject();
+    currNotificationObj.addProperty(MemqLogMessage.INTERNAL_FIELD_TOPIC, "test");
+    currNotificationObj.addProperty(MemqLogMessage.INTERNAL_FIELD_OBJECT_SIZE, decode.length);
+    MemqLogMessageIterator<byte[], byte[]> memqLogMessageIterator = new MemqLogMessageIterator<byte[], byte[]>(
+        "test", "client0", dataInputStream, currNotificationObj, new ByteArrayDeserializer(),
+        new ByteArrayDeserializer(), new MetricRegistry(), false, null);
+    while (memqLogMessageIterator.hasNext()) {
+      memqLogMessageIterator.next();
+    }
+    memqLogMessageIterator.close();
+  }
+  
+//  @Test
+//  public void testCompressionLz4() throws Exception {
+//    BiFunction<String, Integer, byte[]> getLogMessageBytes = (base, k) -> base.getBytes();
+//    byte[] memqBatchData = TestUtils.getMemqBatchData("test1231231", getLogMessageBytes, 2, 5, true,
+//        Compression.LZ4, null, true);
 //
+//    byte[] decode = Base64.getDecoder().decode(Base64.getEncoder().encodeToString(memqBatchData));
+//    DataInputStream dataInputStream = new DataInputStream(new ByteArrayInputStream(decode));
 //    JsonObject currNotificationObj = new JsonObject();
 //    currNotificationObj.addProperty(MemqLogMessage.INTERNAL_FIELD_TOPIC, "test");
 //    currNotificationObj.addProperty(MemqLogMessage.INTERNAL_FIELD_OBJECT_SIZE, decode.length);
-//    MemqLogMessageIterator<byte[], byte[]> memqLogMessageIterator = new MemqLogMessageIterator<>(
-//        "test", dataInputStream, currNotificationObj, new ByteArrayDeserializer(),
+//    MemqLogMessageIterator<byte[], byte[]> memqLogMessageIterator = new MemqLogMessageIterator<byte[], byte[]>(
+//        "test", "client0", dataInputStream, currNotificationObj, new ByteArrayDeserializer(),
 //        new ByteArrayDeserializer(), new MetricRegistry(), false, null);
 //    while (memqLogMessageIterator.hasNext()) {
 //      memqLogMessageIterator.next();
 //    }
-  }
-
+//    memqLogMessageIterator.close();
+//  }
 }
