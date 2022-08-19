@@ -41,6 +41,8 @@ import javax.naming.ConfigurationException;
 
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.CompositeByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
+
 import org.apache.commons.codec.digest.DigestUtils;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscription;
@@ -447,7 +449,7 @@ public class CustomS3Async2StorageHandler extends AbstractS3StorageHandler {
 
   public static CompositeByteBuf messageAndHeaderToCompositeBuffer(final List<ByteBuf> messageByteBufs,
                                                                    ByteBuf batchHeaders) {
-    CompositeByteBuf byteBuf = ByteBufAllocator.DEFAULT.compositeBuffer();
+    CompositeByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.compositeBuffer();
     byteBuf.addComponent(true, batchHeaders.retainedDuplicate());
     byteBuf.addComponents(true,
         messageByteBufs.stream().map(ByteBuf::retainedDuplicate).collect(Collectors.toList()));

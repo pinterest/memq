@@ -19,11 +19,13 @@ import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.time.Duration;
@@ -78,6 +80,7 @@ import io.netty.util.ReferenceCounted;
  * This StorageHandler is used for local filesystem based PubSub.
  */
 @StorageHandlerName(name = "filesystem")
+@SuppressWarnings("unused")
 public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
 
   public static final String OPTIMIZATION_SENDFILE = "optimization.sendfile";
@@ -125,8 +128,7 @@ public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
       this.notificationPublishingTimer = MiscUtils.oneMinuteWindowTimer(registry,
           "output.notification.publish.latency");
     }
-    this.persistTimer = MiscUtils.oneMinuteWindowTimer(registry,
-        "storage.persist.latency");
+    this.persistTimer = MiscUtils.oneMinuteWindowTimer(registry, "storage.persist.latency");
     this.timeoutExceptionCounter = registry.counter("output.timeout.exceptions");
     this.requestExecutor = Executors.newCachedThreadPool(new DaemonThreadFactory());
     this.executionTimer = Executors.newSingleThreadScheduledExecutor(new DaemonThreadFactory());
@@ -169,7 +171,7 @@ public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
     CompositeByteBuf content = CustomS3Async2StorageHandler
         .messageAndHeaderToCompositeBuffer(buffers, batchHeader);
     Context persistTime = persistTimer.time();
-    String writePath = speculativeUpload(relativeFileName, content);
+    String writePath = speculativeUpload(sizeInBytes, relativeFileName, content);
     persistTime.stop();
     buffers.forEach(ReferenceCounted::release);
     content.release();
@@ -189,7 +191,8 @@ public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
     }
   }
 
-  private String speculativeUpload(String baseFileName,
+  private String speculativeUpload(int sizeInBytes,
+                                   String baseFileName,
                                    CompositeByteBuf content) throws WriteFailedException {
     int attempt = 0;
     Map<String, Future<String>> futureMap = new HashMap<>();
@@ -198,52 +201,68 @@ public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
     final int currentRetryTimeoutMs = retryTimeoutMillis;
     String result = null;
     boolean hasSucceeded = false;
-    while (attempt < maxAttempts) {
-      final int timeout = attempt == currentMaxAttempts - 1 ? LAST_ATTEMPT_TIMEOUT
-          : currentRetryTimeoutMs;
-      CompletableFuture<String> task = new CompletableFuture<>();
+    if (maxAttempts == 1) {
+      // optimize for single write path and don't use executors
       final int localAttemptId = attempt;
-      // add attempt number as a suffix
-      final String key = topic + "/" + HOSTNAME + "/" + baseFileName + "_" + localAttemptId;
-      Callable<String> uploadAttempt = writeFileTask(content, task, localAttemptId, key);
-      Future<String> future = requestExecutor.submit(uploadAttempt);
-      futureMap.put(key, future);
-      taskMap.put(key, task);
-
-      CompletableFuture<String> resultFuture = anyUploadResultOrTimeout(taskMap.values(),
-          Duration.ofMillis(timeout));
+      CompletableFuture<String> task = new CompletableFuture<>();
+      String key = new StringBuilder().append(topic).append("/").append(HOSTNAME)
+          .append("/").append(baseFileName).append("_").append(localAttemptId).toString();
       try {
-        result = resultFuture.get();
-        registry.counter("storage.fs.succeeded").inc();
-        hasSucceeded = true;
-      } catch (ExecutionException ee) {
-        if (ee.getCause() instanceof TimeoutException) {
-          timeoutExceptionCounter.inc();
-        } else {
-          logger.log(Level.SEVERE, "Request failed", ee);
-        }
+        return writeFileTask(sizeInBytes, content, task, localAttemptId, key).call();
       } catch (Exception e) {
-        logger.log(Level.SEVERE, "Request failed", e);
+        throw new WriteFailedException(e);
       }
-      attempt++;
-    }
-    for (Map.Entry<String, Future<String>> entry : futureMap.entrySet()) {
-      if (result != null && entry.getKey().endsWith(result)) {
-        continue;
-      }
-      entry.getValue().cancel(true);
-    }
-    if (result == null) {
-      throw new WriteFailedException("All upload attempts failed");
-    } else if (!hasSucceeded) {
-      throw new WriteFailedException("Upload failed due to error out: " + result);
     } else {
-      registry.counter("storage.fs.attempt." + attempt).inc();
-      return result;
+      while (attempt < maxAttempts) {
+        final int timeout = attempt == currentMaxAttempts - 1 ? LAST_ATTEMPT_TIMEOUT
+            : currentRetryTimeoutMs;
+        CompletableFuture<String> task = new CompletableFuture<>();
+        final int localAttemptId = attempt;
+        // add attempt number as a suffix
+        final String key = new StringBuilder().append(topic).append("/").append(HOSTNAME)
+            .append("/").append(baseFileName).append("_").append(localAttemptId).toString();
+        Callable<String> uploadAttempt = writeFileTask(sizeInBytes, content, task, localAttemptId,
+            key);
+        Future<String> future = requestExecutor.submit(uploadAttempt);
+        futureMap.put(key, future);
+        taskMap.put(key, task);
+
+        CompletableFuture<String> resultFuture = anyUploadResultOrTimeout(taskMap.values(),
+            Duration.ofMillis(timeout));
+        try {
+          result = resultFuture.get();
+          registry.counter("storage.fs.succeeded").inc();
+          hasSucceeded = true;
+        } catch (ExecutionException ee) {
+          if (ee.getCause() instanceof TimeoutException) {
+            timeoutExceptionCounter.inc();
+          } else {
+            logger.log(Level.SEVERE, "Request failed", ee);
+          }
+        } catch (Exception e) {
+          logger.log(Level.SEVERE, "Request failed", e);
+        }
+        attempt++;
+      }
+      for (Map.Entry<String, Future<String>> entry : futureMap.entrySet()) {
+        if (result != null && entry.getKey().endsWith(result)) {
+          continue;
+        }
+        entry.getValue().cancel(true);
+      }
+      if (result == null) {
+        throw new WriteFailedException("All upload attempts failed");
+      } else if (!hasSucceeded) {
+        throw new WriteFailedException("Upload failed due to error out: " + result);
+      } else {
+        registry.counter("storage.fs.attempt." + attempt).inc();
+        return result;
+      }
     }
   }
 
-  public Callable<String> writeFileTask(CompositeByteBuf content,
+  public Callable<String> writeFileTask(int sizeInBytes,
+                                        CompositeByteBuf content,
                                         CompletableFuture<String> task,
                                         final int attemptId,
                                         final String key) {
@@ -253,14 +272,8 @@ public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
         try {
           File fileToWrite = new File(storageDirs[attemptId], key);
           fileToWrite.getParentFile().mkdirs();
-          try (OutputStream os = new BufferedOutputStream(new FileOutputStream(fileToWrite))) {
-            if (!dryrun) {
-              content.readBytes(os, content.readableBytes());
-            }
-            os.close();
-          } catch (Exception e) {
-            throw new WriteFailedException(e);
-          }
+          writeViaChannel(sizeInBytes, content, fileToWrite);
+//          writeViaOutputstream(content, fileToWrite);
           String ur = fileToWrite.getAbsolutePath();
           task.complete(ur);
           return ur;
@@ -268,6 +281,37 @@ public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
           task.completeExceptionally(e);
           throw e;
         }
+      }
+
+      private void writeViaOutputstream(CompositeByteBuf content,
+                                        File fileToWrite) throws WriteFailedException {
+        try (OutputStream os = new BufferedOutputStream(new FileOutputStream(fileToWrite))) {
+          if (!dryrun) {
+            byte[] buffer = new byte[content.readableBytes()];
+            content.readBytes(buffer);
+            os.write(buffer);
+//            content.readBytes(os, content.readableBytes());
+          }
+          os.close();
+          FileChannel fileChannel = null;
+        } catch (Exception e) {
+          throw new WriteFailedException(e);
+        }
+      }
+
+      private void writeViaChannel(int sizeInBytes,
+                                   CompositeByteBuf content,
+                                   File fileToWrite) throws FileNotFoundException, IOException {
+        RandomAccessFile raf = new RandomAccessFile(fileToWrite, "rw");
+        FileChannel channel = raf.getChannel();
+        int readableBytes = content.readableBytes();
+        int bytesRead = 0;
+        while (bytesRead < readableBytes) {
+          bytesRead += content.readBytes(channel, 0, readableBytes - bytesRead);
+        }
+        channel.force(true);
+        channel.close();
+        raf.close();
       }
     };
   }
@@ -395,8 +439,7 @@ public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
     } else {
       BatchData batch;
       try {
-        batch = readBatchHeader(objectNotification.get(TOPIC).getAsString(),
-            objectNotification);
+        batch = readBatchHeader(objectNotification.get(TOPIC).getAsString(), objectNotification);
       } catch (Exception e) {
         throw new IOException(e);
       }
@@ -434,8 +477,8 @@ public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
       try {
         logger.fine(
             () -> "Making index message fetch request:" + objectNotification + " index:" + index);
-        batch = readBatchAtIndex(objectNotification.get(TOPIC).getAsString(),
-            objectNotification, index);
+        batch = readBatchAtIndex(objectNotification.get(TOPIC).getAsString(), objectNotification,
+            index);
       } catch (Exception e) {
         throw new IOException(e);
       }
@@ -451,8 +494,7 @@ public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
    * @return
    */
   protected boolean isValidReadRequest(String topic, String filePath) {
-    return storageDirList.stream()
-        .anyMatch(storageDir -> filePath.startsWith(storageDir));
+    return storageDirList.stream().anyMatch(storageDir -> filePath.startsWith(storageDir));
   }
 
   public CompletableFuture<String> anyUploadResultOrTimeout(Collection<CompletableFuture<String>> tasks,

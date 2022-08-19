@@ -84,7 +84,6 @@ public class TestUtils {
     for (ByteBuffer byteBuffer : bufList) {
       os.write(byteBuffer.array());
     }
-    System.out.println("Created:" + bufList.size() + " buffers");
     return os.toByteArray();
   }
 
@@ -96,7 +95,7 @@ public class TestUtils {
                                      List<byte[]> messageIdHashes,
                                      boolean enableTestHeaders) throws IOException {
     Semaphore maxRequestLock = new Semaphore(1);
-    MemqNettyRequest task = new MemqNettyRequest("xyz", 1L, Compression.GZIP,
+    MemqNettyRequest task = new MemqNettyRequest("xyz", 1L, compression,
         maxRequestLock, true, 1024 * 1024, 100, null, null, 10_000, false);
     for (int k = 0; k < logMessageCount; k++) {
       byte[] bytes = getLogMessageBytes.apply(baseLogMessage, k);

@@ -34,7 +34,7 @@ public enum Compression {
        ZSTD(2, 0,
            is -> new ZstdInputStreamNoFinalizer(is, RecyclingBufferPool.INSTANCE),
            os -> new ZstdOutputStreamNoFinalizer(os, RecyclingBufferPool.INSTANCE)
-       );
+       )));
 
   public byte id;
   public int minBufferSize;
