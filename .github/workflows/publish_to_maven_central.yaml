@@ -19,7 +19,7 @@ jobs:
           gpg-private-key: ${{ secrets.OSSRH_GPG_SECRET_KEY }}
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
       - name: build artifact
-        run: mvn clean package -DskipTests
+        run: mvn clean package -DskipTests -pl -memq-client-all,-deploy
       - name: Publish to the Maven Central Repository
         run: |
           mvn \
