@@ -25,7 +25,7 @@ jobs:
           mvn \
             --no-transfer-progress \
             --batch-mode \
-            deploy -DskipTests
+            deploy -DskipTests -pl -memq-client-all,-deploy
         env:
           MAVEN_USERNAME: ${{ secrets.OSSRH_USERNAME }}
           MAVEN_PASSWORD: ${{ secrets.OSSRH_TOKEN }}
