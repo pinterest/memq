@@ -16,12 +16,10 @@
 package com.pinterest.memq.client.examples;
 
 import java.io.File;
-import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -33,10 +31,17 @@ import com.pinterest.memq.client.commons.serde.ByteArraySerializer;
 import com.pinterest.memq.client.producer.MemqWriteResult;
 import com.pinterest.memq.client.producer2.MemqProducer;
 
+/**
+ * Example Java producer for MemQ
+ */
 public class ExampleMemqProducer {
 
-  public static void main(String[] args) throws IOException, InterruptedException,
-                                         ExecutionException {
+  /**
+   * Main method
+   * @param args
+   * @throws Exception
+   */
+  public static void main(String[] args) throws Exception {
     int nThreads = 1;
     if (args.length > 0) {
       nThreads = Integer.parseInt(args[0]);

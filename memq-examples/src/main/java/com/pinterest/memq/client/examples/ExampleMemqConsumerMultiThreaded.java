@@ -38,8 +38,16 @@ import com.pinterest.memq.client.consumer.MemqConsumer;
 import com.pinterest.memq.commons.CloseableIterator;
 import com.pinterest.memq.commons.MemqLogMessage;
 
+/**
+ * Example multi-threaded java consumer for MemQ
+ */
 public class ExampleMemqConsumerMultiThreaded {
 
+  /**
+   * Main method
+   * @param args
+   * @throws Exception
+   */
   public static void main(String[] args) throws Exception {
     Properties props = new Properties();
     if (args.length < 1) {
