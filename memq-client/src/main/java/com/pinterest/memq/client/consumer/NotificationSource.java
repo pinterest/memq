@@ -16,31 +16,31 @@
 package com.pinterest.memq.client.consumer;
 
 import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.TimeoutException;
+
+import org.apache.kafka.common.PartitionInfo;
+import org.apache.kafka.common.TopicPartition;
 
 import com.google.gson.JsonObject;
 
 interface NotificationSource {
 
-  void init(Set<String> subscribedTopics);
-  
-  boolean lookForNewObjects(Duration timeout,
-                            Queue<JsonObject> notificationQueue);
+  int lookForNewObjects(Duration timeout, Queue<JsonObject> notificationQueue);
 
-  void assign(List<String> items);
+  void assign(Collection<Integer> asList);
 
-  void seek(Map<String, byte[]> notificationOffset);
+  void seek(Map<Integer, Long> notificationOffset);
 
   long position(int partition);
 
   long committed(int partition);
 
-  Map<Integer, Long> offsetsOfTimestamps(Map<Integer, Long> partitionTimestamps);
-
-  void commit(Map<String, byte[]> notificationOffset);
+  public void commit(Map<Integer, Long> offsetMap);
 
   void commit();
 
@@ -57,5 +57,28 @@ interface NotificationSource {
   void close();
 
   String getNotificationTopicName();
+
+  List<PartitionInfo> getPartitions();
+
+  void setParentConsumer(MemqConsumer<?, ?> memqConsumer);
+
+  Map<Integer, Long> offsetsForTimestamps(Map<Integer, Long> partitionTimestamps);
+
+  Map<Integer, Long> getEarliestOffsets(Collection<Integer> partitions);
+
+  Map<Integer, Long> getLatestOffsets(Collection<Integer> partitions);
+
+  Set<TopicPartition> waitForAssignment();
+
+  void wakeup();
+
+  Map<Integer, JsonObject> getNotificationsAtOffsets(Duration timeout,
+                                                     Map<Integer, Long> partitionOffsets) throws TimeoutException;
+
+  Set<TopicPartition> getAssignments();
+
+  void seekToEnd(Collection<Integer> partitions);
+
+  void seekToBeginning(Collection<Integer> partitions);
 
 }

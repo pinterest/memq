@@ -139,7 +139,7 @@ public final class MemqConsumer<K, V> implements Closeable {
   private Properties properties;
   private ConcurrentLinkedQueue<JsonObject> notificationQueue;
   private String topicName;
-  private KafkaNotificationSource notificationSource;
+  private NotificationSource notificationSource;
   private boolean isBufferToFile;
   private boolean isDirectBuffer;
   private String bufferFilesDirectory;
@@ -703,7 +703,7 @@ public final class MemqConsumer<K, V> implements Closeable {
     return notificationQueue;
   }
 
-  public KafkaNotificationSource getNotificationSource() {
+  public NotificationSource getNotificationSource() {
     return notificationSource;
   }
 

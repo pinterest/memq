@@ -55,7 +55,7 @@ import com.google.gson.JsonObject;
 import com.pinterest.memq.client.producer.http.DaemonThreadFactory;
 import com.pinterest.memq.commons.MemqLogMessage;
 
-public class KafkaNotificationSource {
+public class KafkaNotificationSource implements NotificationSource {
 
   private static final Logger logger = Logger
       .getLogger(KafkaNotificationSource.class.getCanonicalName());
