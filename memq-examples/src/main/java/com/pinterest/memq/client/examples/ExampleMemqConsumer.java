@@ -70,7 +70,7 @@ public class ExampleMemqConsumer {
     // initialize group metrics
     String serverset = "/tmp/testmemq";
     List<String> lines = Files.readAllLines(new File(serverset).toPath());
-    String bootstrapServer = lines.get(0).split(":")[0];
+    String bootstrapServer = lines.get(0);
 
     try {
       // initialize MemqConsumer using builder
@@ -80,7 +80,7 @@ public class ExampleMemqConsumer {
       properties.setProperty(ConsumerConfigs.CLIENT_ID, consumerId);
       properties.setProperty(ConsumerConfigs.GROUP_ID, consumerId);
       properties.setProperty(ConsumerConfigs.DIRECT_CONSUMER, "false");
-      properties.setProperty(ConsumerConfigs.BOOTSTRAP_SERVERS, bootstrapServer + ":9094");
+      properties.setProperty(ConsumerConfigs.BOOTSTRAP_SERVERS, bootstrapServer);
       properties.put(ConsumerConfigs.KEY_DESERIALIZER_CLASS_KEY,
           ByteArrayDeserializer.class.getCanonicalName());
       properties.put(ConsumerConfigs.VALUE_DESERIALIZER_CLASS_KEY,
@@ -111,9 +111,9 @@ public class ExampleMemqConsumer {
               }
               s += value.length;
             }
-            if (c % 20000 == 0) {
+//            if (c % 20000 == 0) {
               System.out.println("Total:" + s / 1024 / 1024 + " Latency:" + (latency/1000_000));
-            }
+//            }
           }
         }
         mc.commitOffset();

@@ -14,7 +14,7 @@ if [[ ! -f kafka_2.11-2.4.1.tgz ]]; then
 fi
 tar xf kafka_2.11-2.4.1.tgz
 
-cp ../server.properties config/
+cp ../server.properties kafka_2.11-2.4.1/config/
 cd kafka_2.11-2.4.1
 echo "Starting zookeeper in background"
 bin/zookeeper-server-start.sh -daemon config/zookeeper.properties
