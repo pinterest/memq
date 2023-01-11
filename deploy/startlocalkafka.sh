@@ -14,15 +14,15 @@ if [[ ! -f kafka_2.11-2.4.1.tgz ]]; then
 fi
 tar xf kafka_2.11-2.4.1.tgz
 
-
+cp ../server.properties config/
 cd kafka_2.11-2.4.1
 echo "Starting zookeeper in background"
 bin/zookeeper-server-start.sh -daemon config/zookeeper.properties
 waitPort 2181
 echo "Starting kafka in background"
 bin/kafka-server-start.sh -daemon config/server.properties
-waitPort 9092
+waitPort 9094
 echo "Creating TestTopicNotifications"
 bin/kafka-topics.sh --zookeeper localhost:2181 --topic TestTopicNotifications --partitions 3 --replication-factor 1 --create
 mkdir -p /tmp/serverset
-echo "localhost:9092" > /tmp/serverset/notification.serverset
+echo "localhost:9094" > /tmp/serverset/notification.serverset

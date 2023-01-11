@@ -70,6 +70,7 @@ public class ExampleMemqProducer {
               .disableAcks(false).keySerializer(new ByteArraySerializer())
               .valueSerializer(new ByteArraySerializer()).topic(topicName).cluster("local")
               .compression(Compression.ZSTD).maxPayloadBytes(1024 * 150)
+              .sendRequestTimeout(60000)
               .bootstrapServers("127.0.0.1:9092").build();
           StringBuilder builder = new StringBuilder();
           while (builder.length() < 1024 * 100) {
