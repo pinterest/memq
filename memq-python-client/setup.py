@@ -17,7 +17,7 @@ long_description = (here / 'README.md').read_text(encoding='utf-8')
 
 setup(
     name='memq-client',  # Required
-    version='0.2.19',  # Required
+    version='0.2.20',  # Required
     description='MemQ Python Client',  # Optional
     long_description=long_description,  # Optional
     long_description_content_type='text/markdown',  # Optional (see note above)
