@@ -142,7 +142,7 @@ public class MemqNettyServer {
     } catch (Exception e) {
       logger.log(Level.SEVERE, "Failed to start Netty server", e);
     }
-    logger.info("\n\nNetty server started on port:" + nettyServerConfig.getPort() + "\n");
+    logger.info("\n\nNetty server has started on port:" + nettyServerConfig.getPort() + "\n");
   }
 
   private MetricRegistry initializeMetrics() throws UnknownHostException {
