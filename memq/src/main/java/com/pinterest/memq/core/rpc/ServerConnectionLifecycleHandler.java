@@ -74,7 +74,7 @@ public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler
   }
 
   /**
-   * Logs the exception caught in the inbound pipeline with channel id.
+   * Logs the exception caught in the inbound pipeline with channel id and closes the channel.
    * @param ctx       the {@link ChannelHandlerContext} for which the exception is caught
    * @param cause     the {@link Throwable} that was caught
    * @throws Exception
@@ -87,7 +87,7 @@ public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler
 
   /**
    * User event triggered.
-   * If the event is an instance of {@link IdleStateEvent}, it logs the disconnection event.
+   * If the event is an instance of {@link IdleStateEvent}, it logs the disconnection event and closes the channel.
    * @param ctx
    * @param evt
    * @throws Exception
