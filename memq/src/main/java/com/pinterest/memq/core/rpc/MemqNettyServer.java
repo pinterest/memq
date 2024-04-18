@@ -18,6 +18,7 @@ package com.pinterest.memq.core.rpc;
 import java.net.UnknownHostException;
 import java.nio.ByteOrder;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -61,13 +62,13 @@ import io.netty.handler.ssl.ClientAuth;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.timeout.IdleStateHandler;
 
 public class MemqNettyServer {
 
   public static final String SSL_HANDLER_NAME = "ssl";
 
   private static final Logger logger = Logger.getLogger(MemqNettyServer.class.getName());
-
   private EventLoopGroup childGroup;
   private EventLoopGroup parentGroup;
   private ChannelFuture serverChannelFuture;
@@ -115,6 +116,11 @@ public class MemqNettyServer {
         protected void initChannel(SocketChannel channel) throws Exception {
           SSLConfig sslConfig = nettyServerConfig.getSslConfig();
           ChannelPipeline pipeline = channel.pipeline();
+          int idleTimeoutSec = ThreadLocalRandom.current().nextInt(
+                  configuration.getServerConnectionIdleTimeoutDeltaSec())
+                  + configuration.getServerConnectionIdleTimeoutSec();
+          pipeline.addLast(new IdleStateHandler(0, 0, idleTimeoutSec, TimeUnit.SECONDS));
+          pipeline.addLast(new ServerConnectionLifecycleHandler());
           if (sslConfig != null) {
             KeyManagerFactory kmf = MemqUtils.extractKMFFromSSLConfig(sslConfig);
             TrustManagerFactory tmf = MemqUtils.extractTMPFromSSLConfig(sslConfig);
@@ -136,7 +142,7 @@ public class MemqNettyServer {
     } catch (Exception e) {
       logger.log(Level.SEVERE, "Failed to start Netty server", e);
     }
-    logger.info("\n\nNetty server started on port:" + nettyServerConfig.getPort() + "\n");
+    logger.info("\n\nNetty server has started on port:" + nettyServerConfig.getPort() + "\n");
   }
 
   private MetricRegistry initializeMetrics() throws UnknownHostException {

@@ -47,6 +47,8 @@ public class MemqConfig extends Configuration {
   private int defaultSlotTimeout = 10_000;
 
   private int cleanerThreadCount = 2;
+  private int serverConnectionIdleTimeoutSec = 900;
+  private int serverConnectionIdleTimeoutDeltaSec = 300;
 
   private OpenTsdbConfiguration openTsdbConfig = null;
 
@@ -272,5 +274,33 @@ public class MemqConfig extends Configuration {
 
   public void setAdditionalConfigs(Map<String, Object> additionalConfigs) {
     this.additionalConfigs = additionalConfigs;
+  }
+
+  /**
+   * @param serverConnectionIdleTimeoutSec
+   */
+  public void setServerConnectionIdleTimeoutSec(int serverConnectionIdleTimeoutSec) {
+    this.serverConnectionIdleTimeoutSec = serverConnectionIdleTimeoutSec;
+  }
+
+  /**
+   * @return the serverConnectionIdleTimeoutSec
+   */
+  public int getServerConnectionIdleTimeoutSec() {
+      return serverConnectionIdleTimeoutSec;
+  }
+
+  /**
+   * @param serverConnectionIdleTimeoutDeltaSec
+   */
+  public void setServerConnectionIdleTimeoutDeltaSec(int serverConnectionIdleTimeoutDeltaSec) {
+      this.serverConnectionIdleTimeoutDeltaSec = serverConnectionIdleTimeoutDeltaSec;
+  }
+
+  /**
+   * @return the serverConnectionIdleTimeoutDeltaSec
+   */
+  public int getServerConnectionIdleTimeoutDeltaSec() {
+      return serverConnectionIdleTimeoutDeltaSec;
   }
 }
