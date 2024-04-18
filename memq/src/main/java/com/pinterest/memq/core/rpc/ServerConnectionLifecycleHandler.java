@@ -25,15 +25,15 @@ import org.slf4j.LoggerFactory;
 
 import java.net.SocketAddress;
 
+/**
+ * Logging handler for server connection lifecycle events.
+ * Close the channel on exception caught in the inbound pipeline and on idle activity.
+ * Extends {@link ChannelDuplexHandler}.
+ */
 public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler {
 
   private final Logger logger = LoggerFactory.getLogger(ServerConnectionLifecycleHandler.class);
 
-  /**
-   * Logging handler for server connection lifecycle events.
-   * Close the channel on exception caught in the inbound pipeline and on idle activity.
-   * Extends {@link ChannelDuplexHandler}.
-   */
   public ServerConnectionLifecycleHandler() {
   }
 
