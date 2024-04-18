@@ -69,9 +69,6 @@ public class MemqNettyServer {
   public static final String SSL_HANDLER_NAME = "ssl";
 
   private static final Logger logger = Logger.getLogger(MemqNettyServer.class.getName());
-  private static final int DEFAULT_IDLE_TIMEOUT_SEC = 900; // 15 minutes
-  private static final int IDLE_TIMEOUT_RANGE_SEC = 300; // + 0~5 minutes
-
   private EventLoopGroup childGroup;
   private EventLoopGroup parentGroup;
   private ChannelFuture serverChannelFuture;
@@ -119,7 +116,9 @@ public class MemqNettyServer {
         protected void initChannel(SocketChannel channel) throws Exception {
           SSLConfig sslConfig = nettyServerConfig.getSslConfig();
           ChannelPipeline pipeline = channel.pipeline();
-          int idleTimeoutSec = ThreadLocalRandom.current().nextInt(IDLE_TIMEOUT_RANGE_SEC) + DEFAULT_IDLE_TIMEOUT_SEC;
+          int idleTimeoutSec = ThreadLocalRandom.current().nextInt(
+                  configuration.getServerConnectionIdleTimeoutDeltaSec())
+                  + configuration.getServerConnectionIdleTimeoutSec();
           pipeline.addLast(new IdleStateHandler(0, 0, idleTimeoutSec, TimeUnit.SECONDS));
           pipeline.addLast(new ServerConnectionLifecycleHandler());
           if (sslConfig != null) {
