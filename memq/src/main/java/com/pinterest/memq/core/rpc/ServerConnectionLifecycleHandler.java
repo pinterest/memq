@@ -30,7 +30,9 @@ public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler
   private final Logger logger = LoggerFactory.getLogger(ServerConnectionLifecycleHandler.class);
 
   /**
-   * Logging handler for server connection lifecycle events. Extends {@link ChannelDuplexHandler}.
+   * Logging handler for server connection lifecycle events.
+   * Close the channel on exception caught in the inbound pipeline and on idle activity.
+   * Extends {@link ChannelDuplexHandler}.
    */
   public ServerConnectionLifecycleHandler() {
   }
@@ -88,8 +90,8 @@ public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler
   /**
    * User event triggered.
    * If the event is an instance of {@link IdleStateEvent}, it logs the disconnection event and closes the channel.
-   * @param ctx
-   * @param evt
+   * @param ctx     the {@link ChannelHandlerContext} for which the user event is triggered
+   * @param evt     the user event that was triggered
    * @throws Exception
    */
   @Override
