@@ -118,7 +118,6 @@ public class MemqNettyServer {
           SSLConfig sslConfig = nettyServerConfig.getSslConfig();
           ChannelPipeline pipeline = channel.pipeline();
           int idleTimeoutSec = ThreadLocalRandom.current().nextInt(300) + 900;
-          logger.info("Setting idle timeout to " + idleTimeoutSec + " seconds");
           pipeline.addLast(new IdleStateHandler(0, 0, idleTimeoutSec, TimeUnit.SECONDS));
           pipeline.addLast(new ServerConnectionLifecycleHandler());
           if (sslConfig != null) {
