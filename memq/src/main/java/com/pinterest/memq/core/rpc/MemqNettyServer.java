@@ -69,8 +69,8 @@ public class MemqNettyServer {
   public static final String SSL_HANDLER_NAME = "ssl";
 
   private static final Logger logger = Logger.getLogger(MemqNettyServer.class.getName());
-  private static final int DEFAULT_IDLE_TIMEOUT_SEC = 900;
-  private static final int IDLE_TIMEOUT_RANGE_SEC = 300;
+  private static final int DEFAULT_IDLE_TIMEOUT_SEC = 900; // 15 minutes
+  private static final int IDLE_TIMEOUT_RANGE_SEC = 300; // + 0~5 minutes
 
   private EventLoopGroup childGroup;
   private EventLoopGroup parentGroup;

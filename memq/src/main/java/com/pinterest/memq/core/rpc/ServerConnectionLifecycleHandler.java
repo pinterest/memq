@@ -25,13 +25,24 @@ import org.slf4j.LoggerFactory;
 
 import java.net.SocketAddress;
 
-final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler {
+public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler {
 
   private final Logger logger = LoggerFactory.getLogger(ServerConnectionLifecycleHandler.class);
 
+  /**
+   * Logging handler for server connection lifecycle events. Extends {@link ChannelDuplexHandler}.
+   */
   public ServerConnectionLifecycleHandler() {
   }
 
+  /**
+   * Connects to the remote address. Logs the remote address.
+   * @param ctx               the {@link ChannelHandlerContext} for which the connect operation is made
+   * @param remoteAddress     the {@link SocketAddress} to which it should connect
+   * @param localAddress      the {@link SocketAddress} which is used as source on connect
+   * @param promise           the {@link ChannelPromise} to notify once the operation completes
+   * @throws Exception
+   */
   @Override
   public void connect(ChannelHandlerContext ctx, SocketAddress remoteAddress,
                       SocketAddress localAddress, ChannelPromise promise) throws Exception {
@@ -39,12 +50,22 @@ final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler {
     super.connect(ctx, remoteAddress, localAddress, promise);
   }
 
+  /**
+   * Disconnects from the remote address. Logs the channel id and remote address.
+   * @param ctx       the {@link ChannelHandlerContext} for which the disconnect operation is made
+   * @throws Exception
+   */
   @Override
   public void channelActive(ChannelHandlerContext ctx) throws Exception {
     logger.info("[" + ctx.channel().id() + "] Connected to " + ctx.channel().remoteAddress());
     super.channelActive(ctx);
   }
 
+  /**
+   * Disconnects from the remote address. Logs the channel id and remote address.
+   * @param ctx       the {@link ChannelHandlerContext} for which the disconnect operation is made
+   * @throws Exception
+   */
   @Override
   public void channelInactive(ChannelHandlerContext ctx) throws Exception {
     logger.info("[" + ctx.channel().id() + "] Closing connection to server: " + ctx.channel()
@@ -52,13 +73,25 @@ final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler {
     super.channelInactive(ctx);
   }
 
+  /**
+   * Logs the exception caught in the inbound pipeline with channel id.
+   * @param ctx       the {@link ChannelHandlerContext} for which the exception is caught
+   * @param cause     the {@link Throwable} that was caught
+   * @throws Exception
+   */
   @Override
   public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
     logger.error("[" + ctx.channel().id() + "] Exception caught in inbound pipeline: ", cause);
     ctx.close();
   }
 
-  // idle event handling
+  /**
+   * User event triggered.
+   * If the event is an instance of {@link IdleStateEvent}, it logs the disconnection event.
+   * @param ctx
+   * @param evt
+   * @throws Exception
+   */
   @Override
   public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
     if (evt instanceof IdleStateEvent) {
