@@ -99,6 +99,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufInputStream;
 import io.netty.buffer.ByteBufOutputStream;
 import io.netty.buffer.PooledByteBufAllocator;
+import software.amazon.awssdk.core.exception.SdkClientException;
 
 /**
  * Consumer class for MemQ data. This consumer follows conventions to other
@@ -787,7 +788,7 @@ public final class MemqConsumer<K, V> implements Closeable {
           try {
             loadNewNotification(poll);
             break;
-          } catch (IOException e) {
+          } catch (IOException | SdkClientException e) {
             if (retryCount == 1) {
               throw new RuntimeException(e);
             } else {
