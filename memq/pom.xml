@@ -6,7 +6,7 @@
 	<parent>
 		<groupId>com.pinterest.memq</groupId>
 		<artifactId>memq-parent</artifactId>
-		<version>0.2.20</version>
+		<version>0.2.21</version>
 		<relativePath>../pom.xml</relativePath>
 	</parent>
 	<artifactId>memq</artifactId>
