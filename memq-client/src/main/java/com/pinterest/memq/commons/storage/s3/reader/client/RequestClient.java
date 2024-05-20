@@ -15,6 +15,7 @@
  */
 package com.pinterest.memq.commons.storage.s3.reader.client;
 
+import software.amazon.awssdk.http.SdkHttpFullRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 
 import java.io.Closeable;
@@ -26,6 +27,9 @@ import io.netty.buffer.ByteBuf;
 
 public interface RequestClient extends Closeable {
   void initialize(Properties properties);
+  InputStream tryObjectGet(SdkHttpFullRequest request) throws IOException;
+  ByteBuf tryObjectGetAsBuffer(SdkHttpFullRequest request) throws IOException;
+  
   InputStream tryObjectGet(GetObjectRequest request) throws IOException;
   ByteBuf tryObjectGetAsBuffer(GetObjectRequest request) throws IOException;
 }

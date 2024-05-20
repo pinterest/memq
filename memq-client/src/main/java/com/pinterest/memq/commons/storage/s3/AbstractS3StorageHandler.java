@@ -40,6 +40,7 @@ import com.pinterest.memq.commons.storage.s3.reader.client.ApacheRequestClient;
 import com.pinterest.memq.commons.storage.s3.reader.client.ReactorNettyRequestClient;
 import com.pinterest.memq.commons.storage.s3.reader.client.RequestClient;
 
+import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 
 public abstract class AbstractS3StorageHandler implements StorageHandler {
@@ -61,7 +62,8 @@ public abstract class AbstractS3StorageHandler implements StorageHandler {
   public static final String USE_APACHE_HTTP_CLIENT = "useApacheHttpClient";
 
   private MetricRegistry registry;
-  private RequestClient httpClient;
+  protected RequestClient httpClient;
+  protected Region region;
 
   @Override
   public void initReader(Properties properties, MetricRegistry registry) throws Exception {
@@ -73,6 +75,7 @@ public abstract class AbstractS3StorageHandler implements StorageHandler {
       this.httpClient = new ReactorNettyRequestClient(registry);
     }
     httpClient.initialize(properties);
+    this.region = Region.of(properties.getProperty("region", "us-east-1").toLowerCase());
   }
 
   @Override
