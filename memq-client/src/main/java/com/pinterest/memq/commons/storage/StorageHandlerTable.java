@@ -38,6 +38,7 @@ public abstract class StorageHandlerTable {
   }
 
   public static void findAndRegisterOutputHandlers(String packageName) {
+    logger.info("[TEST1] Scanning package:" + packageName);
     Reflections reflections = new Reflections(packageName.trim());
     Set<Class<?>> annotatedClasses = reflections.getTypesAnnotatedWith(StorageHandlerName.class);
     for (Class<?> annotatedClass : annotatedClasses) {

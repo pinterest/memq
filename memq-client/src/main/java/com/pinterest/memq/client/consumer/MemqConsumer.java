@@ -419,7 +419,7 @@ public final class MemqConsumer<K, V> implements Closeable {
       storageProperties.setProperty(ConsumerConfigs.TOPIC_INTERNAL_PROP, topic);
       notificationSourceProps.setProperty(ConsumerConfig.GROUP_ID_CONFIG, groupId);
       notificationSourceProps.putAll(storageProperties);
-      System.out.println("[TEST] StraogeHandlerName: " + topicMetadata.getStorageHandlerName());
+      logger.info("[TEST1] StraogeHandlerName: " + topicMetadata.getStorageHandlerName());
       storageHandler = StorageHandlerTable.getClass(topicMetadata.getStorageHandlerName())
           .newInstance();
       storageHandler.initReader(storageProperties, metricRegistry);
