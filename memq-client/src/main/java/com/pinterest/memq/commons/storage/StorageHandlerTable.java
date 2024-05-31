@@ -37,6 +37,11 @@ public abstract class StorageHandlerTable {
     findAndRegisterOutputHandlers(StorageHandlerTable.class.getPackage().getName());
   }
 
+  public static void testVersion() {
+    logger.info("**New Version Ready");
+    System.out.println("**New Version Ready");
+  }
+
   public static void findAndRegisterOutputHandlers(String packageName) {
     logger.info("[TEST1] Scanning package:" + packageName);
     Reflections reflections = new Reflections(packageName.trim());
