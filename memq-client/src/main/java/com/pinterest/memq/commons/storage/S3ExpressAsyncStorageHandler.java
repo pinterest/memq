@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.pinterest.memq.commons.storage.s3express;
+package com.pinterest.memq.commons.storage;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -42,6 +42,8 @@ import java.util.stream.Collectors;
 
 import javax.naming.ConfigurationException;
 
+import com.pinterest.memq.commons.storage.s3express.SessionCreds;
+import com.pinterest.memq.commons.storage.s3express.SessionTokenManager;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscription;
@@ -53,9 +55,6 @@ import com.codahale.metrics.Timer.Context;
 import com.google.gson.JsonObject;
 import com.pinterest.memq.commons.MemqLogMessage;
 import com.pinterest.memq.commons.protocol.BatchData;
-import com.pinterest.memq.commons.storage.StorageHandler;
-import com.pinterest.memq.commons.storage.StorageHandlerName;
-import com.pinterest.memq.commons.storage.WriteFailedException;
 import com.pinterest.memq.commons.storage.s3.AbstractS3StorageHandler;
 import com.pinterest.memq.commons.storage.s3.KafkaNotificationSink;
 import com.pinterest.memq.core.commons.Message;

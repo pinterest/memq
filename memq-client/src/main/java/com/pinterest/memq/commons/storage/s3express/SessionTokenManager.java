@@ -109,7 +109,7 @@ public class SessionTokenManager {
     return concurrentLinkedDeque.peek();
   }
 
-  protected SessionCreds fetchCredentials(String bucketname) throws Exception {
+  public SessionCreds fetchCredentials(String bucketname) throws Exception {
     InstanceProfileCredentialsProvider credentialProvider = InstanceProfileCredentialsProvider
         .builder().asyncCredentialUpdateEnabled(true).asyncThreadName("IamCredentialUpdater")
         .build();
