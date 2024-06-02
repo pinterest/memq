@@ -130,7 +130,9 @@ public class SessionTokenManager {
         headers.set(entry.getKey(), entry.getValue().get(0));
       }
     }).get().uri(req.getUri()).responseSingle((response, bytes) -> bytes.asString()).block();
-    
+
+    System.out.println(String.format("[DEBUG] BucketName: %s\n Req1: %s\n Credential: %s\n ",
+        bucketname, req1, credentialProvider.resolveCredentials()));
     System.out.println("CredentialResponse\n"+awsResponse+"\n\n");
 
     DocumentBuilderFactory builderFactory = DocumentBuilderFactory.newInstance();
