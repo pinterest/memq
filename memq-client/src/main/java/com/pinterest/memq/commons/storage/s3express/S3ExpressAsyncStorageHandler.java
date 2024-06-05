@@ -595,6 +595,9 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     } finally {
       long fetchTime = System.currentTimeMillis() - fetchStartTime;
       getLogger().fine("Fetch Time:" + fetchTime);
+      System.out.println("[DEBUG] Fetch Time:" + fetchTime);
+      System.out.println("[DEBUG] Registry:" + registry);
+      System.out.println("[DEBUG] OBJECT_FETCH_LATENCY_MS_HISTOGRAM_KEY:" + OBJECT_FETCH_LATENCY_MS_HISTOGRAM_KEY);
 //      registry.histogram(OBJECT_FETCH_LATENCY_MS_HISTOGRAM_KEY).update(fetchTime);
     }
   }
