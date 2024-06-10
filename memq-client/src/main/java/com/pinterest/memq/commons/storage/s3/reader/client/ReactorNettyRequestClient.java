@@ -143,6 +143,9 @@ public class ReactorNettyRequestClient implements RequestClient {
 
   protected ByteBuf tryObjectGetInternal(URI uri, Map<String, List<String>> headers, boolean reinitializeClientOnSslClosedEngineException)
       throws IOException {
+    String debugMessage = "[DEBUG] ReactorNettyRequestClient.tryObjectGetInternal: uri = " + uri + ", headers = " + headers + ", reinitializeClientOnSslClosedEngineException = " + reinitializeClientOnSslClosedEngineException;
+    System.out.println(debugMessage);
+    logger.warn(debugMessage);
     try {
       return client
           .headers(
