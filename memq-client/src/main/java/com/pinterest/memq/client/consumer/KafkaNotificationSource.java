@@ -341,6 +341,9 @@ public class KafkaNotificationSource implements NotificationSource {
 
   public Map<Integer, JsonObject> getNotificationsAtOffsets(Duration timeout,
                                                             Map<Integer, Long> partitionOffsets) throws TimeoutException {
+    String debugNote = String.format("[DEBUG1] Getting notifications at offsets %s from topic %s", partitionOffsets, notificationTopicName);
+    logger.info(debugNote);
+    System.out.println(debugNote);
     Set<TopicPartition> tpSet = new HashSet<>();
     Map<Integer, JsonObject> notificationMap = new HashMap<>();
     for (Map.Entry<Integer, Long> entry : partitionOffsets.entrySet()) {
@@ -368,6 +371,9 @@ public class KafkaNotificationSource implements NotificationSource {
       }
       deadline -= (System.currentTimeMillis() - start);
     }
+    debugNote = String.format("[DEBUG2] notificationMap: %s", notificationMap);
+    logger.info(debugNote);
+    System.out.println(debugNote);
     if (deadline < 0 && !tpSet.isEmpty()) {
       throw new TimeoutException(
           "Failed to retrieve all notifications within " + timeout.toMillis() + " seconds");
