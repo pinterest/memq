@@ -10,7 +10,7 @@
 	<properties>
 		<dropwizard.version>1.3.5</dropwizard.version>
 		<netty.version>4.1.75.Final</netty.version>
-		<aws.sdk2.version>2.13.52</aws.sdk2.version>
+		<aws.sdk2.version>2.25.70</aws.sdk2.version>
 	</properties>
 	<modules>
 		<module>memq</module>
