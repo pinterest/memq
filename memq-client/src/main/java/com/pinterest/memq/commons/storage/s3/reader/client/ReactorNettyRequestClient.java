@@ -104,6 +104,11 @@ public class ReactorNettyRequestClient implements RequestClient {
 
   @Override
   public InputStream tryObjectGet(GetObjectRequest request) throws IOException {
+    String debugNote = "[DEBUG3] AWS Credentials: " +
+            System.getenv("AWS_ACCESS_KEY_ID") +
+            " || " + System.getenv("AWS_SECRET_ACCESS_KEY");
+    System.out.println(debugNote);
+    logger.info(debugNote);
     PresignedGetObjectRequest presignGetObject = presigner.presignGetObject(GetObjectPresignRequest
         .builder()
         .getObjectRequest(request)
