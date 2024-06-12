@@ -150,7 +150,7 @@ public class ReactorNettyRequestClient implements RequestClient {
       throws IOException {
     String debugMessage = "[DEBUG] ReactorNettyRequestClient.tryObjectGetInternal: uri = " + uri + ", headers = " + headers + ", reinitializeClientOnSslClosedEngineException = " + reinitializeClientOnSslClosedEngineException;
     System.out.println(debugMessage);
-    logger.warn(debugMessage);
+    logger.info(debugMessage);
     try {
       return client
           .headers(
@@ -208,6 +208,9 @@ public class ReactorNettyRequestClient implements RequestClient {
       else if (e.getCause() instanceof IOException) {
         throw (IOException) e.getCause();
       } else if (e.getCause() instanceof ReadTimeoutException || e.getCause() instanceof TimeoutException) {
+        debugMessage = "[DEBUG2] TimeoutException with uri = " + uri;
+        System.out.println(debugMessage);
+        logger.info(debugMessage);
         throw new IOException(e.getCause());
       } else {
         throw new IOException(e);
