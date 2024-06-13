@@ -98,11 +98,16 @@ public class ReactorNettyRequestClient implements RequestClient {
     String debugMessage = "[DEBUG4] ReactorNettyRequestClient.createHttpClient: readTimeoutDuration = " + readTimeoutDuration + ", responseTimeoutDuration = " + responseTimeoutDuration;
     System.out.println(debugMessage);
     logger.info(debugMessage);
-    return HttpClient.create()
-        .option(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
-        .option(ChannelOption.SO_LINGER, 0)
-        .responseTimeout(readTimeoutDuration)
-        .secure();
+    HttpClient simpleClient = HttpClient.create();
+    logger.info("[DEBUG7] Can create simple client");
+    HttpClient secureClient = HttpClient.create().secure();
+    logger.info("[DEBUG8] Can create secure client");
+    return secureClient;
+//    return HttpClient.create()
+//        .option(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
+//        .option(ChannelOption.SO_LINGER, 0)
+//        .responseTimeout(readTimeoutDuration)
+//        .secure();
   }
 
   @Override
