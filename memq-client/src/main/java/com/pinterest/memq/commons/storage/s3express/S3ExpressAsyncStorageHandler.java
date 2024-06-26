@@ -354,6 +354,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
                                      final int count,
                                      int timeout) throws URISyntaxException, InterruptedException {
     Context internalLatency = s3PutInternalLatencyTimer.time();
+    long timestampBeforeUploadMs = System.currentTimeMillis();
     try {
 
       SessionTokenManager instance = SessionTokenManager.getInstance();
@@ -413,6 +414,9 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     } finally {
       long stop = internalLatency.stop();
 //      logger.info("Latency:" + stop / 1000_000);
+      long timestampAfterUploadMs = System.currentTimeMillis();
+      System.out.println(String.format("Upload latency ms: %; timestampBeforeUploadMs: %s; timestampAfterUploadMs: %s",
+              timestampAfterUploadMs - timestampBeforeUploadMs, timestampBeforeUploadMs, timestampAfterUploadMs));
     }
   }
 
@@ -569,7 +573,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
       throw new IOException(e);
     }
     
-    
+
     SdkHttpFullRequest req = SdkHttpFullRequest.builder().method(SdkHttpMethod.GET)
         .appendHeader("x-amz-s3session-token", credentials.token)
         .uri(URI.create(
@@ -590,11 +594,15 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
         }).signingName("s3express").signingRegion(region).build());
     
     long fetchStartTime = System.currentTimeMillis();
+    long timestampBeforeDownloadMs = System.currentTimeMillis();
     try {
       return httpClient.tryObjectGet(req1);
     } finally {
       long fetchTime = System.currentTimeMillis() - fetchStartTime;
       getLogger().fine("Fetch Time:" + fetchTime);
+      long timestampAfterDownloadMs = System.currentTimeMillis();
+      System.out.println(String.format("Download latency ms: %; timestampBeforeDownloadMs: %s; timestampAfterDownloadMs: %s",
+              timestampAfterDownloadMs - timestampBeforeDownloadMs, timestampBeforeDownloadMs, timestampAfterDownloadMs));
     }
   }
   
