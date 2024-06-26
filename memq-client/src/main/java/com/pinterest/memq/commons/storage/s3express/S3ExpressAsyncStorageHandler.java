@@ -415,8 +415,11 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
       long stop = internalLatency.stop();
 //      logger.info("Latency:" + stop / 1000_000);
       long timestampAfterUploadMs = System.currentTimeMillis();
-      System.out.println(String.format("Upload latency ms: %; timestampBeforeUploadMs: %s; timestampAfterUploadMs: %s",
-              timestampAfterUploadMs - timestampBeforeUploadMs, timestampBeforeUploadMs, timestampAfterUploadMs));
+      String latencyRecord = String.format(
+              "Upload latency ms: %s; timestampBeforeUploadMs: %s; timestampAfterUploadMs: %s",
+              timestampAfterUploadMs - timestampBeforeUploadMs, timestampBeforeUploadMs, timestampAfterUploadMs);
+      System.out.println(latencyRecord);
+      logger.info(latencyRecord);
     }
   }
 
@@ -601,8 +604,12 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
       long fetchTime = System.currentTimeMillis() - fetchStartTime;
       getLogger().fine("Fetch Time:" + fetchTime);
       long timestampAfterDownloadMs = System.currentTimeMillis();
-      System.out.println(String.format("Download latency ms: %; timestampBeforeDownloadMs: %s; timestampAfterDownloadMs: %s",
-              timestampAfterDownloadMs - timestampBeforeDownloadMs, timestampBeforeDownloadMs, timestampAfterDownloadMs));
+      String latencyRecord = String.format(
+              "Download latency ms: %s; timestampBeforeDownloadMs: %s; timestampAfterDownloadMs: %s",
+              timestampAfterDownloadMs - timestampBeforeDownloadMs, timestampBeforeDownloadMs, timestampAfterDownloadMs
+      );
+      System.out.println(latencyRecord);
+      logger.info(latencyRecord);
     }
   }
   
