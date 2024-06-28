@@ -90,6 +90,7 @@ public abstract class AbstractS3StorageHandler implements StorageHandler {
             .get(MemqLogMessage.INTERNAL_FIELD_NOTIFICATION_PARTITION_OFFSET).getAsNumber()
         + "}");
     getLogger().finest("Object size: " + currentObjectSize);
+    long timestampBeforeDownloadMs = System.currentTimeMillis();
     long fetchStartTime = System.currentTimeMillis();
     try {
       return httpClient
@@ -97,6 +98,13 @@ public abstract class AbstractS3StorageHandler implements StorageHandler {
     } finally {
       long fetchTime = System.currentTimeMillis() - fetchStartTime;
       getLogger().fine("Fetch Time:" + fetchTime);
+      long timestampAfterDownloadMs = System.currentTimeMillis();
+      String latencyRecord = String.format(
+              "Download latency ms: %s; timestampBeforeDownloadMs: %s; timestampAfterDownloadMs: %s",
+              timestampAfterDownloadMs - timestampBeforeDownloadMs, timestampBeforeDownloadMs, timestampAfterDownloadMs
+      );
+      System.out.println(latencyRecord);
+      getLogger().info(latencyRecord);
       registry.histogram(OBJECT_FETCH_LATENCY_MS_HISTOGRAM_KEY).update(fetchTime);
     }
   }
