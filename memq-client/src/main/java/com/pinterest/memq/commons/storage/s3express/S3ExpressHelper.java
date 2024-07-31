@@ -21,7 +21,6 @@ public class S3ExpressHelper {
         }
     }
 
-    // pinterest-sammamish--use1-az5--x-s3
     public static String generateBucketUrl(String bucketName) throws S3ExpressParsingException{
         validateS3ExpressBucketName(bucketName);
         String region = getRegionFromBucket(bucketName);
