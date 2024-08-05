@@ -34,7 +34,7 @@ public class TopicConfig implements Comparable<TopicConfig> {
   private int batchMilliSeconds = 60_000;
 
   @Deprecated
-  private float batchSizeMB = -1;
+  private int batchSizeMB = -1;
 
   private long batchSizeBytes = 100 * 1024 * 1024;
 
@@ -85,7 +85,7 @@ public class TopicConfig implements Comparable<TopicConfig> {
                      int bufferSize,
                      int ringBufferSize,
                      String topic,
-                     float batchSizeMB,
+                     int batchSizeMB,
                      double inputTrafficMB,
                      int clusteringMultiplier) {
     super();
@@ -161,12 +161,12 @@ public class TopicConfig implements Comparable<TopicConfig> {
   /**
    * @param batchSizeMB the batchSizeMB to set
    */
-  public void setBatchSizeMB(float batchSizeMB) {
-    this.batchSizeBytes = (long) (batchSizeMB * 1024 * 1024);
+  public void setBatchSizeMB(int batchSizeMB) {
+    this.batchSizeBytes = batchSizeMB * 1024 * 1024;
   }
 
-  public void setBatchSizeKB(float batchSizeKB) {
-    this.batchSizeBytes = (long) (batchSizeKB * 1024);
+  public void setBatchSizeKB(int batchSizeKB) {
+    this.batchSizeBytes = batchSizeKB * 1024;
   }
 
   public void setBatchSizeBytes(long batchSizeBytes) {
@@ -174,9 +174,7 @@ public class TopicConfig implements Comparable<TopicConfig> {
   }
 
   public long getBatchSizeBytes() {
-    if (batchSizeMB != -1) {
-      return (long) (batchSizeMB * 1024 * 1024);
-    }
+    if (batchSizeMB != -1) return batchSizeMB * 1024 * 1024;
     return batchSizeBytes;
   }
 
