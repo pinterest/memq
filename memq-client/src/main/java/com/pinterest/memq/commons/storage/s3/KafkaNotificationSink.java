@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.Future;
 import java.util.logging.Logger;
 
 import javax.naming.ConfigurationException;
@@ -27,6 +28,7 @@ import javax.naming.ConfigurationException;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.serialization.StringSerializer;
 
 import com.google.gson.Gson;
@@ -54,11 +56,8 @@ public class KafkaNotificationSink {
     producerProps.put(ProducerConfig.ACKS_CONFIG, "-1");
     producerProps.put(ProducerConfig.RETRIES_CONFIG, "3");
 
-    // Notification latency reduction attempt
-    producerProps.put(ProducerConfig.LINGER_MS_CONFIG, "0");
-    producerProps.put(ProducerConfig.BATCH_SIZE_CONFIG, "100");
-    System.out.println("[TEST] Producer_config_no_batching");
-    logger.info("[TEST] Producer_config_no_batching");
+    System.out.println("[TEST] Producer_flush_for_individual_message");
+    logger.info("[TEST] Producer_flush_for_individual_message");
 
     ProducerConfig.configNames().forEach((s) -> {
       if (props.containsKey(s)) {
@@ -99,9 +98,9 @@ public class KafkaNotificationSink {
                                   int retryCount
                                   ) throws Exception {
     try {
-      producer
-          .send(new ProducerRecord<String, String>(notificationTopic, null, gson.toJson(payload)))
-          .get();
+      Future<RecordMetadata> send = producer.send(new ProducerRecord<String, String>(notificationTopic, null, gson.toJson(payload)));
+      producer.flush();
+      send.get();
     } catch (Exception e) {
       reinitializeSink();
       if (retryCount < 2) {
