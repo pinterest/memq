@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.Future;
 import java.util.logging.Logger;
 
 import javax.naming.ConfigurationException;
@@ -27,6 +28,7 @@ import javax.naming.ConfigurationException;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.serialization.StringSerializer;
 
 import com.google.gson.Gson;
@@ -92,9 +94,9 @@ public class KafkaNotificationSink {
                                   int retryCount
                                   ) throws Exception {
     try {
-      producer
-          .send(new ProducerRecord<String, String>(notificationTopic, null, gson.toJson(payload)))
-          .get();
+      Future<RecordMetadata> send = producer.send(new ProducerRecord<String, String>(notificationTopic, null, gson.toJson(payload)));
+      producer.flush();
+      send.get();
     } catch (Exception e) {
       reinitializeSink();
       if (retryCount < 2) {
