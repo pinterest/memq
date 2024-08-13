@@ -40,7 +40,7 @@ import org.w3c.dom.Node;
 import io.netty.channel.ChannelOption;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
-import software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.signer.AwsS3V4Signer;
 import software.amazon.awssdk.auth.signer.params.AwsS3V4SignerParams;
 import software.amazon.awssdk.http.SdkHttpFullRequest;
@@ -110,9 +110,8 @@ public class SessionTokenManager {
   }
 
   protected SessionCreds fetchCredentials(String bucketname) throws Exception {
-    InstanceProfileCredentialsProvider credentialProvider = InstanceProfileCredentialsProvider
-        .builder().asyncCredentialUpdateEnabled(true).asyncThreadName("IamCredentialUpdater")
-        .build();
+    DefaultCredentialsProvider credentialProvider = DefaultCredentialsProvider
+        .builder().asyncCredentialUpdateEnabled(true).build();
     // Sign it...
     AwsS3V4Signer signer = AwsS3V4Signer.create();
     SdkHttpFullRequest req = SdkHttpFullRequest.builder()
