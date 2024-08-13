@@ -226,8 +226,6 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   public void writeOutput(int objectSize,
                           int checksum,
                           final List<Message> messages) throws WriteFailedException {
-    System.out.println("[TEST] Running test s3express_experiment_240813_2");
-    logger.info("[TEST] Running test s3express_experiment_240813_2");
     Context timer = s3PutLatencyTimer.time();
     ByteBuf batchHeader = StorageHandler.getBatchHeadersAsByteArray(messages);
     final List<ByteBuf> messageBuffers = messageToBufferList(messages);

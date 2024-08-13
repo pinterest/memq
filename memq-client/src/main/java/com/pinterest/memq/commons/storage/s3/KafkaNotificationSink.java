@@ -55,6 +55,8 @@ public class KafkaNotificationSink {
     producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
     producerProps.put(ProducerConfig.ACKS_CONFIG, "-1");
     producerProps.put(ProducerConfig.RETRIES_CONFIG, "3");
+    System.out.println("[TEST] Producer_flush_for_individual_message");
+    logger.info("[TEST] Producer_flush_for_individual_message");
     ProducerConfig.configNames().forEach((s) -> {
       if (props.containsKey(s)) {
         producerProps.put(s, props.getProperty(s));
@@ -94,8 +96,6 @@ public class KafkaNotificationSink {
                                   int retryCount
                                   ) throws Exception {
     try {
-      System.out.println("[TEST] Producer_flush_for_individual_message");
-      logger.info("[TEST] Producer_flush_for_individual_message");
       Future<RecordMetadata> send = producer.send(new ProducerRecord<String, String>(notificationTopic, null, gson.toJson(payload)));
       producer.flush();
       send.get();
