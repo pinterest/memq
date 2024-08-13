@@ -94,6 +94,7 @@ public class KafkaNotificationSink {
                                   int retryCount
                                   ) throws Exception {
     try {
+      logger.info("Producer_flush_for_individiual_message");
       Future<RecordMetadata> send = producer.send(new ProducerRecord<String, String>(notificationTopic, null, gson.toJson(payload)));
       producer.flush();
       send.get();
