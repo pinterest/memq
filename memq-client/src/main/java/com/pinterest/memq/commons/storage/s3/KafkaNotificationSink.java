@@ -53,12 +53,9 @@ public class KafkaNotificationSink {
     producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
     producerProps.put(ProducerConfig.ACKS_CONFIG, "-1");
     producerProps.put(ProducerConfig.RETRIES_CONFIG, "3");
-
-    // Notification latency reduction attempt
-    producerProps.put(ProducerConfig.LINGER_MS_CONFIG, "0");
-    producerProps.put(ProducerConfig.BATCH_SIZE_CONFIG, "100");
-    System.out.println("[TEST] Producer_config_no_batching");
-    logger.info("[TEST] Producer_config_no_batching");
+    
+    System.out.println("[TEST] Producer_baseline");
+    logger.info("[TEST] Producer_baseline");
 
     ProducerConfig.configNames().forEach((s) -> {
       if (props.containsKey(s)) {
