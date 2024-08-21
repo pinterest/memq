@@ -42,6 +42,8 @@ import org.w3c.dom.Node;
 import io.netty.channel.ChannelOption;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider;
 import software.amazon.awssdk.auth.signer.AwsS3V4Signer;
 import software.amazon.awssdk.auth.signer.params.AwsS3V4SignerParams;
@@ -64,6 +66,7 @@ public class SessionTokenManager {
   private static final int DEFAULT_PENDING_ACQUIRE_TIMEOUT_SECOND = 60;
   private static final int DEFAULT_EVICT_IN_BACKGROUND_SECOND = 120;
   private static final int FETCH_CREDENTIALS_INTERVAL_MS = 100;
+  private static final boolean USE_DEFAULT_CREDENTIAL_PROVIDER = true;
   private Map<String, ConcurrentLinkedDeque<SessionCreds>> bucketCredentialMap = new ConcurrentHashMap<>();
   private ScheduledExecutorService es = Executors.newScheduledThreadPool(1, new ThreadFactory() {
     @Override
@@ -174,13 +177,21 @@ public class SessionTokenManager {
    * @return SdkHttpFullRequest signed request
    */
   public static SdkHttpFullRequest signRequest(SdkHttpFullRequest req, Region region) {
-    InstanceProfileCredentialsProvider credentialProvider = InstanceProfileCredentialsProvider
-            .builder().asyncCredentialUpdateEnabled(true).asyncThreadName(CREDENTIAL_PROVIDER_THREAD_NAME)
-            .build();
     AwsS3V4Signer signer = AwsS3V4Signer.create();
-    return signer.sign(req,
-            AwsS3V4SignerParams.builder().awsCredentials(credentialProvider.resolveCredentials())
-                    .signingName(S3_EXPRESS).signingRegion(region).build());
+    if (USE_DEFAULT_CREDENTIAL_PROVIDER) {
+      DefaultCredentialsProvider credentialProvider = DefaultCredentialsProvider
+              .builder().asyncCredentialUpdateEnabled(true).build();
+      return signer.sign(req,
+              AwsS3V4SignerParams.builder().awsCredentials(credentialProvider.resolveCredentials())
+                      .signingName(S3_EXPRESS).signingRegion(region).build());
+    } else {
+      InstanceProfileCredentialsProvider credentialProvider = InstanceProfileCredentialsProvider
+              .builder().asyncCredentialUpdateEnabled(true).asyncThreadName(CREDENTIAL_PROVIDER_THREAD_NAME)
+              .build();
+      return signer.sign(req,
+              AwsS3V4SignerParams.builder().awsCredentials(credentialProvider.resolveCredentials())
+                      .signingName(S3_EXPRESS).signingRegion(region).build());
+    }
   }
 
   /**
