@@ -39,6 +39,6 @@ public class S3ExpressHelper {
     }
 
     public static String getCurrentDateHr() {
-        return new SimpleDateFormat("yy-MM-dd-HH").format(new java.util.Date());
+        return new SimpleDateFormat("yyMMdd-HH").format(new java.util.Date());
     }
 }

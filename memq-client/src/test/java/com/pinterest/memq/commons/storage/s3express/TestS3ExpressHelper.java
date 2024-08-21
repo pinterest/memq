@@ -10,7 +10,7 @@ public class TestS3ExpressHelper {
     public void testGenerateBucketUrl() throws Exception {
         String bucketName = "testbucket--use1-az5--x-s3";
         assertEquals(
-                "https://testbucket--use1-az5--x-s3.s3express-use1-az5.us-east-1.amazonaws.com",
+                "https://testbucket--use1-az5--x-s3.s3express-use1-az5.us-east-1.amazonaws.com/",
                 S3ExpressHelper.generateBucketUrl(bucketName)
         );
     }
@@ -42,6 +42,6 @@ public class TestS3ExpressHelper {
     @Test
     public void testGetCurrentDateHr() {
         String currentDateHr = S3ExpressHelper.getCurrentDateHr();
-        assertTrue(currentDateHr.matches("\\d{2}-\\d{2}-\\d{2}-\\d{2}"));
+        assertTrue(currentDateHr.matches("\\d{2}\\d{2}\\d{2}-\\d{2}"));
     }
 }

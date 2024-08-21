@@ -357,68 +357,61 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
                                      final int count,
                                      int timeout) throws URISyntaxException, InterruptedException {
     Context internalLatency = s3PutInternalLatencyTimer.time();
-    try {
 
-      SessionTokenManager instance = SessionTokenManager.getInstance();
-      SessionCreds credentials = instance.getCredentials(bucket);
+    SessionTokenManager instance = SessionTokenManager.getInstance();
+    SessionCreds credentials = instance.getCredentials(bucket);
 
-      AwsS3V4Signer signer = AwsS3V4Signer.create();
+    AwsS3V4Signer signer = AwsS3V4Signer.create();
 
-      SdkHttpFullRequest req = SdkHttpFullRequest.builder().method(SdkHttpMethod.PUT)
-          .appendHeader("x-amz-s3session-token", credentials.token)
-          .appendHeader(CONTENT_LENGTH, String.valueOf(contentLength))
-          .uri(URI.create(
-              baseConnStr + key))
-          .build();
-      final SdkHttpFullRequest req1 = signer.sign(req,
-          AwsS3V4SignerParams.builder().awsCredentials(new AwsCredentials() {
+    SdkHttpFullRequest req = SdkHttpFullRequest.builder().method(SdkHttpMethod.PUT)
+        .appendHeader("x-amz-s3session-token", credentials.token)
+        .appendHeader(CONTENT_LENGTH, String.valueOf(contentLength))
+        .uri(URI.create(
+            baseConnStr + key))
+        .build();
+    final SdkHttpFullRequest req1 = signer.sign(req,
+        AwsS3V4SignerParams.builder().awsCredentials(new AwsCredentials() {
 
-            @Override
-            public String secretAccessKey() {
-              return credentials.secret;
-            }
-
-            @Override
-            public String accessKeyId() {
-              return credentials.key;
-            }
-          }).signingName("s3express").signingRegion(region).build());
-
-      s3RequestCounter.inc();
-      Mono<HttpClientResponse> responseFuture = secureClient.headers(headers -> {
-        for (Entry<String, List<String>> entry : req1.headers().entrySet()) {
-          headers.set(entry.getKey(), entry.getValue());
-        }
-      }).put().uri(req.getUri()).send(bodyPublisher).response();
-      HttpClientResponse response = responseFuture.block();
-
-      HttpResponseStatus status = response.status();
-      int responseCode = status.code();
-      HttpHeaders responseHeaders = response.responseHeaders();
-
-      if (responseCode != SUCCESS_CODE) {
-        logger.severe(responseCode + " reason:" + status.reasonPhrase() + "\t" + responseHeaders
-            + " index:" + count + " url:" + req.getUri());
-      }
-      if (contentMD5 != null && responseCode == SUCCESS_CODE) {
-        try {
-          String eTagHex = responseHeaders.get(E_TAG);
-          String etagToBase64 = MemqUtils.etagToBase64(eTagHex.replace("\"", ""));
-          if (!contentMD5.equals(etagToBase64)) {
-            logger.severe("Request failed due to etag mismatch url:" + req.getUri());
-            responseCode = ERROR_CODE;
+          @Override
+          public String secretAccessKey() {
+            return credentials.secret;
           }
-        } catch (Exception e) {
-          logger.log(Level.SEVERE, "Unable to parse the returnedetag", e);
-        }
+
+          @Override
+          public String accessKeyId() {
+            return credentials.key;
+          }
+        }).signingName("s3express").signingRegion(region).build());
+
+    s3RequestCounter.inc();
+    Mono<HttpClientResponse> responseFuture = secureClient.headers(headers -> {
+      for (Entry<String, List<String>> entry : req1.headers().entrySet()) {
+        headers.set(entry.getKey(), entry.getValue());
       }
-      return new UploadResult(key, responseCode, responseHeaders, internalLatency.stop(), count);
-    } finally {
-      long uploadLatencyMs = internalLatency.stop() / 1_000_000;
-      if (uploadLatencyMs > HIGH_LATENCY_THRESHOLD) {
-          logger.warning("Upload high latency(" + uploadLatencyMs + ")ms, key: " + key + ", attempt: " + count);
+    }).put().uri(req.getUri()).send(bodyPublisher).response();
+    HttpClientResponse response = responseFuture.block();
+
+    HttpResponseStatus status = response.status();
+    int responseCode = status.code();
+    HttpHeaders responseHeaders = response.responseHeaders();
+
+    if (responseCode != SUCCESS_CODE) {
+      logger.severe(responseCode + " reason:" + status.reasonPhrase() + "\t" + responseHeaders
+          + " index:" + count + " url:" + req.getUri());
+    }
+    if (contentMD5 != null && responseCode == SUCCESS_CODE) {
+      try {
+        String eTagHex = responseHeaders.get(E_TAG);
+        String etagToBase64 = MemqUtils.etagToBase64(eTagHex.replace("\"", ""));
+        if (!contentMD5.equals(etagToBase64)) {
+          logger.severe("Request failed due to etag mismatch url:" + req.getUri());
+          responseCode = ERROR_CODE;
+        }
+      } catch (Exception e) {
+        logger.log(Level.SEVERE, "Unable to parse the returnedetag", e);
       }
     }
+    return new UploadResult(key, responseCode, responseHeaders, internalLatency.stop(), count);
   }
 
   public static class UploadResult {
