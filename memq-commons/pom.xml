@@ -5,7 +5,7 @@
 	<parent>
 		<groupId>com.pinterest.memq</groupId>
 		<artifactId>memq-parent</artifactId>
-		<version>0.2.21</version>
+		<version>0.2.22-SNAPSHOT</version>
 		<relativePath>../pom.xml</relativePath>
 	</parent>
 	<artifactId>memq-commons</artifactId>
@@ -29,7 +29,7 @@
 		<dependency>
 			<groupId>io.projectreactor.netty</groupId>
 			<artifactId>reactor-netty-http</artifactId>
-			<version>1.0.18</version>
+			<version>1.1.2</version>
 		</dependency>
 		<dependency>
 			<groupId>org.reflections</groupId>
