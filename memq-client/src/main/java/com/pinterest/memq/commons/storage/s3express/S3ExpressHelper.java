@@ -25,7 +25,7 @@ public class S3ExpressHelper {
         validateS3ExpressBucketName(bucketName);
         String region = getRegionFromBucket(bucketName);
         String azName = bucketName.split("--")[1];
-        return String.format("https://%s.s3express-%s.%s.amazonaws.com", bucketName, azName, region);
+        return String.format("https://%s.s3express-%s.%s.amazonaws.com/", bucketName, azName, region);
     }
 
     public static String getRegionFromBucket(String bucketName) throws S3ExpressParsingException {
