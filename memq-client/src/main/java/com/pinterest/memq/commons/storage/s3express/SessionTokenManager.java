@@ -66,7 +66,7 @@ public class SessionTokenManager {
   private static final int DEFAULT_PENDING_ACQUIRE_TIMEOUT_SECOND = 60;
   private static final int DEFAULT_EVICT_IN_BACKGROUND_SECOND = 120;
   private static final int FETCH_CREDENTIALS_INTERVAL_MS = 100;
-  private static final boolean USE_DEFAULT_CREDENTIAL_PROVIDER = true;
+  private static final boolean USE_DEFAULT_CREDENTIAL_PROVIDER = false;
   private Map<String, ConcurrentLinkedDeque<SessionCreds>> bucketCredentialMap = new ConcurrentHashMap<>();
   private ScheduledExecutorService es = Executors.newScheduledThreadPool(1, new ThreadFactory() {
     @Override
