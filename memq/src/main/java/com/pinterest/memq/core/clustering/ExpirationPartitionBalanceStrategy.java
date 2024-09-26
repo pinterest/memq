@@ -102,8 +102,10 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         List<Broker> ineligibleBrokers = new ArrayList<>();
         PriorityQueue<Broker> queue = entry.getValue();
 
-        logger.warning("[DEBUG] queue1: " + queue + " partitionsPerRack: " + partitionsPerRack);
         TopicAssignment assignment = new TopicAssignment(topicConfig, trafficPerPartition);
+        logger.warning("[DEBUG1] -----");
+        logger.warning("[DEBUG1] inputTrafficMB: " + inputTrafficMB);
+        logger.warning("[DEBUG1] Start: queue: " + queue.size() + "; partitionsPerRack: " + partitionsPerRack);
         while (!queue.isEmpty()) {
           Broker broker = queue.poll();
           if (broker.getAssignedTopics().contains(assignment)) {
@@ -111,11 +113,13 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
             broker.getAssignedTopics().remove(assignment);
             broker.getAssignedTopics().add(assignment); // update configs/traffic/timestamp
             partitionsPerRack--;
+            logger.warning("[DEBUG1] Refreshing broker: " + broker.getBrokerIP());
           } else {
             dequeuedBrokers.add(broker);
+            logger.warning("[DEBUG1] Dequeueing broker: " + broker.getBrokerIP());
           }
         }
-        logger.warning("[DEBUG] dequeuedBrokers:" + dequeuedBrokers);
+        logger.warning("[DEBUG1] Mid: dequeue: " + dequeuedBrokers.size() + "; ineligible: " + ineligibleBrokers.size() + "; partitionsPerRack: " + partitionsPerRack);
         if (partitionsPerRack < 0) {
           PriorityQueue<Broker> utilizationSortedBrokers = new PriorityQueue<>(
               Comparator.comparingInt(Broker::getAvailableCapacity).reversed()
@@ -130,7 +134,8 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         }
         queue.addAll(dequeuedBrokers);
         dequeuedBrokers.clear();
-        logger.warning("[DEBUG] queue: " + queue + " ineligibleBrokers: " + ineligibleBrokers + "partitionsPerRack: " + partitionsPerRack);
+        logger.warning("[DEBUG1] End: queue: " + queue.size() + "; partitionsPerRack: " + partitionsPerRack);
+        logger.warning("[DEBUG1] -----");
         if (partitionsPerRack > queue.size()) {
           logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
               + partitionsPerRack + " nodes:" + queue.size());
