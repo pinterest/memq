@@ -33,7 +33,7 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 
 public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
 
-  private long defaultExpirationTime = 300_000;
+  private long defaultExpirationTime = 60_000;
   private static final int DEFAULT_CAPACITY = 200;
   private static final Logger logger = Logger.getLogger(ExpirationPartitionBalanceStrategy.class.getName());
   private Map<String, Integer> instanceTypeThroughputMap = new HashMap<>();
@@ -105,7 +105,7 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         TopicAssignment assignment = new TopicAssignment(topicConfig, trafficPerPartition);
         logger.warning("[DEBUG1] -----");
         logger.warning("[DEBUG1] inputTrafficMB: " + inputTrafficMB);
-        logger.warning("[DEBUG1] Start: queue: " + queue.size() + "; partitionsPerRack: " + partitionsPerRack);
+        logger.warning("[DEBUG1] S1: queue: " + queue.size() + "; partitionsPerRack: " + partitionsPerRack);
         while (!queue.isEmpty()) {
           Broker broker = queue.poll();
           if (broker.getAssignedTopics().contains(assignment)) {
@@ -119,7 +119,7 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
             logger.warning("[DEBUG1] Dequeueing broker: " + broker.getBrokerIP());
           }
         }
-        logger.warning("[DEBUG1] Mid: dequeue: " + dequeuedBrokers.size() + "; ineligible: " + ineligibleBrokers.size() + "; partitionsPerRack: " + partitionsPerRack);
+        logger.warning("[DEBUG1] S2: dequeue: " + dequeuedBrokers.size() + "; ineligible: " + ineligibleBrokers.size() + "; partitionsPerRack: " + partitionsPerRack);
         if (partitionsPerRack < 0) {
           PriorityQueue<Broker> utilizationSortedBrokers = new PriorityQueue<>(
               Comparator.comparingInt(Broker::getAvailableCapacity).reversed()
@@ -134,11 +134,11 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         }
         queue.addAll(dequeuedBrokers);
         dequeuedBrokers.clear();
-        logger.warning("[DEBUG1] End: queue: " + queue.size() + "; partitionsPerRack: " + partitionsPerRack);
-        logger.warning("[DEBUG1] -----");
+        logger.warning("[DEBUG1] S3: queue: " + queue.size() + "; partitionsPerRack: " + partitionsPerRack);
         if (partitionsPerRack > queue.size()) {
           logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
               + partitionsPerRack + " nodes:" + queue.size());
+          logger.warning("[DEBUG1] Break");
           break;
         } else if (partitionsPerRack > 0) {
           for (int i = 0; i < partitionsPerRack; i++) {
@@ -146,15 +146,18 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
             dequeuedBrokers.add(broker);
             if (broker == null || broker.getAssignedTopics() == null) {
               logger.info("Failed to initialize broker assigned topic set, skipping broker");
+              logger.warning("[DEBUG1] Continue");
               continue;
             }
             if (broker.getAssignedTopics().contains(assignment)) {
               broker.getAssignedTopics().remove(assignment);
               broker.getAssignedTopics().add(assignment);
+              logger.warning("[DEBUG1] Refreshing broker: " + broker.getBrokerIP());
               logger.info(
                   i + " Topic(" + topic + ") already assigned to node " + broker.getBrokerIP() + ", updating configs");
             } else if (broker.getAvailableCapacity() - trafficPerPartition > 0) {
               broker.getAssignedTopics().add(assignment);
+              logger.warning("[DEBUG1] Assigning broker: " + broker.getBrokerIP());
               logger.info("(" + topic + ") assigned to broker:" + broker.getBrokerIP());
             } else {
               logger.severe(i + " (" + topic + ") Insufficient capacity left on nodes:" + broker
@@ -164,7 +167,8 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         }
         queue.addAll(ineligibleBrokers);
         queue.addAll(dequeuedBrokers);
-        logger.warning("[DEBUG] queue2:" + queue);
+        logger.warning("[DEBUG1] S4: queue: " + queue.size() + "; partitionsPerRack: " + partitionsPerRack);
+        logger.warning("[DEBUG1] -----");
       }
     }
 
