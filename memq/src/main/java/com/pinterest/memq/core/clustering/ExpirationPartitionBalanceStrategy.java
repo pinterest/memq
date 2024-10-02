@@ -27,6 +27,7 @@ import java.util.Set;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
+import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicAssignment;
 import com.pinterest.memq.commons.protocol.TopicConfig;
@@ -34,6 +35,7 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
 
   private long defaultExpirationTime = 1_000;
+  private MetricRegistry registry = new MetricRegistry();
   private static final int DEFAULT_CAPACITY = 200;
   private static final Logger logger = Logger.getLogger(ExpirationPartitionBalanceStrategy.class.getName());
   private Map<String, Integer> instanceTypeThroughputMap = new HashMap<>();
@@ -124,9 +126,10 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         queue.addAll(dequeuedBrokers);
         dequeuedBrokers.clear();
         if (partitionsPerRack > queue.size()) {
-          logger.severe("[TEST1] Freezing topic assignment state: " + topic);
           logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
               + partitionsPerRack + " nodes:" + queue.size());
+          logger.severe("[TEST1] Freezing topic assignment state: " + topic);
+          registry.counter("memq.test.balancer.error.insufficient_broker");
           // TODO: handle this case
           insufficientBroker = true;
           for (Broker broker: oldBrokerList) {
