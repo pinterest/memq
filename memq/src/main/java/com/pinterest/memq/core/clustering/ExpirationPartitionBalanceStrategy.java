@@ -33,7 +33,7 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 
 public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
 
-  private long defaultExpirationTime = 10_000;
+  private long defaultExpirationTime = 1_000;
   private static final int DEFAULT_CAPACITY = 200;
   private static final Logger logger = Logger.getLogger(ExpirationPartitionBalanceStrategy.class.getName());
   private Map<String, Integer> instanceTypeThroughputMap = new HashMap<>();
@@ -127,7 +127,7 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
           logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
               + partitionsPerRack + " nodes:" + queue.size());
           // TODO: handle this case
-          logger.severe("[TEST] Freezing topic assignment state");
+          logger.severe("[TEST] Freezing topic assignment state: " + topic);
           insufficientBroker = true;
           for (Broker broker: oldBrokerList) {
             Set<TopicAssignment> topicAssignments = broker.getAssignedTopics();
