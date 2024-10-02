@@ -33,7 +33,7 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 
 public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
 
-  private long defaultExpirationTime = 300_000;
+  private long defaultExpirationTime = 10_000;
   private static final int DEFAULT_CAPACITY = 200;
   private static final Logger logger = Logger.getLogger(ExpirationPartitionBalanceStrategy.class.getName());
   private Map<String, Integer> instanceTypeThroughputMap = new HashMap<>();
@@ -76,6 +76,7 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
 
     int racks = rackBrokerCapacityMap.size();
 
+    boolean insufficientBroker = false;
     for (TopicConfig topicConfig : topicsList) {
       String topic = topicConfig.getTopic();
       double inputTrafficMB = topicConfig.getInputTrafficMB();
@@ -125,6 +126,17 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         if (partitionsPerRack > queue.size()) {
           logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
               + partitionsPerRack + " nodes:" + queue.size());
+          // TODO: handle this case
+          logger.severe("[TEST] Freezing topic assignment state");
+          insufficientBroker = true;
+          for (Broker broker: oldBrokerList) {
+            Set<TopicAssignment> topicAssignments = broker.getAssignedTopics();
+            for (TopicAssignment topicAssignment: topicAssignments) {
+              broker.getAssignedTopics().remove(topicAssignment);
+              broker.getAssignedTopics().add(topicAssignment);
+            }
+          }
+          newBrokerList = new ArrayList<>(oldBrokerList);
           break;
         } else if (partitionsPerRack > 0) {
           for (int i = 0; i < partitionsPerRack; i++) {
@@ -148,6 +160,9 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
             }
           }
         }
+        if (insufficientBroker) {
+          break;
+        }
         queue.addAll(ineligibleBrokers);
         queue.addAll(dequeuedBrokers);
       }
@@ -165,5 +180,9 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
     for (Map.Entry<String, PriorityQueue<Broker>> entry2 : rackBrokerCapacityMap.entrySet()) {
       logger.info("Rack:" + entry2.getKey() + "\n\t" + entry2.getValue());
     }
+  }
+
+  private void handleInsufficientBrokers() {
+
   }
 }
