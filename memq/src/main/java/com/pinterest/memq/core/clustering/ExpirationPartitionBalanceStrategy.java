@@ -1,12 +1,12 @@
 /**
  * Copyright 2022 Pinterest, Inc.
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *    http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -33,7 +33,7 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 
 public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
 
-  private long defaultExpirationTime = 60_000;
+  private long defaultExpirationTime = 1_000;
   private static final int DEFAULT_CAPACITY = 200;
   private static final Logger logger = Logger.getLogger(ExpirationPartitionBalanceStrategy.class.getName());
   private Map<String, Integer> instanceTypeThroughputMap = new HashMap<>();
@@ -50,7 +50,6 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
 
     long now = System.currentTimeMillis();
 
-    logger.warning("[DEBUG] oldBrokerList:" + oldBrokerList);
     // establish base assignment from sticky (non-expired) assignments
     for (Broker b : oldBrokerList) {
       Set<TopicAssignment> brokerStickyAssignments = b.getAssignedTopics()
@@ -62,7 +61,6 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
       newBroker.setAssignedTopics(brokerStickyAssignments);
       newBrokerList.add(newBroker);
     }
-    logger.warning("[DEBUG] newBrokerList:" + newBrokerList);
 
     Map<String, PriorityQueue<Broker>> rackBrokerCapacityMap = new HashMap<>();
     for (Broker broker : newBrokerList) {
@@ -75,10 +73,10 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
       );
       priorityQueue.add(broker);
     }
-    logger.warning("[DEBUG] rackBrokerCapacityMap:" + rackBrokerCapacityMap);
 
     int racks = rackBrokerCapacityMap.size();
 
+    boolean insufficientBroker = false;
     for (TopicConfig topicConfig : topicsList) {
       String topic = topicConfig.getTopic();
       double inputTrafficMB = topicConfig.getInputTrafficMB();
@@ -88,9 +86,6 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
       if (partitions < racks) {
         partitions = racks;
       }
-
-      logger.warning("[DEBUG] (" + topic + ")" + " partitions:" + partitions + " inputTrafficMB:" + inputTrafficMB
-          + " ceil:" + ceil + " racks:" + racks);
 
       int trafficPerPartition = (int) (inputTrafficMB / partitions);
       logger.info("(" + topic + ")" + " partitions:" + partitions + " traffic:" + inputTrafficMB
@@ -103,9 +98,6 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         PriorityQueue<Broker> queue = entry.getValue();
 
         TopicAssignment assignment = new TopicAssignment(topicConfig, trafficPerPartition);
-        logger.warning("[DEBUG1] -----");
-        logger.warning("[DEBUG1] inputTrafficMB: " + inputTrafficMB);
-        logger.warning("[DEBUG1] S1: queue: " + queue.size() + "; partitionsPerRack: " + partitionsPerRack);
         while (!queue.isEmpty()) {
           Broker broker = queue.poll();
           if (broker.getAssignedTopics().contains(assignment)) {
@@ -113,13 +105,10 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
             broker.getAssignedTopics().remove(assignment);
             broker.getAssignedTopics().add(assignment); // update configs/traffic/timestamp
             partitionsPerRack--;
-            logger.warning("[DEBUG1] Refreshing broker: " + broker.getBrokerIP());
           } else {
             dequeuedBrokers.add(broker);
-            logger.warning("[DEBUG1] Dequeueing broker: " + broker.getBrokerIP());
           }
         }
-        logger.warning("[DEBUG1] S2: dequeue: " + dequeuedBrokers.size() + "; ineligible: " + ineligibleBrokers.size() + "; partitionsPerRack: " + partitionsPerRack);
         if (partitionsPerRack < 0) {
           PriorityQueue<Broker> utilizationSortedBrokers = new PriorityQueue<>(
               Comparator.comparingInt(Broker::getAvailableCapacity).reversed()
@@ -134,11 +123,20 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         }
         queue.addAll(dequeuedBrokers);
         dequeuedBrokers.clear();
-        logger.warning("[DEBUG1] S3: queue: " + queue.size() + "; partitionsPerRack: " + partitionsPerRack);
         if (partitionsPerRack > queue.size()) {
+          logger.severe("[TEST1] Freezing topic assignment state: " + topic);
           logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
               + partitionsPerRack + " nodes:" + queue.size());
-          logger.warning("[DEBUG1] Break");
+          // TODO: handle this case
+          insufficientBroker = true;
+          for (Broker broker: oldBrokerList) {
+            Set<TopicAssignment> topicAssignments = broker.getAssignedTopics();
+            for (TopicAssignment topicAssignment: topicAssignments) {
+              broker.getAssignedTopics().remove(topicAssignment);
+              broker.getAssignedTopics().add(topicAssignment);
+            }
+          }
+          newBrokerList = new ArrayList<>(oldBrokerList);
           break;
         } else if (partitionsPerRack > 0) {
           for (int i = 0; i < partitionsPerRack; i++) {
@@ -146,18 +144,15 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
             dequeuedBrokers.add(broker);
             if (broker == null || broker.getAssignedTopics() == null) {
               logger.info("Failed to initialize broker assigned topic set, skipping broker");
-              logger.warning("[DEBUG1] Continue");
               continue;
             }
             if (broker.getAssignedTopics().contains(assignment)) {
               broker.getAssignedTopics().remove(assignment);
               broker.getAssignedTopics().add(assignment);
-              logger.warning("[DEBUG1] Refreshing broker: " + broker.getBrokerIP());
               logger.info(
                   i + " Topic(" + topic + ") already assigned to node " + broker.getBrokerIP() + ", updating configs");
             } else if (broker.getAvailableCapacity() - trafficPerPartition > 0) {
               broker.getAssignedTopics().add(assignment);
-              logger.warning("[DEBUG1] Assigning broker: " + broker.getBrokerIP());
               logger.info("(" + topic + ") assigned to broker:" + broker.getBrokerIP());
             } else {
               logger.severe(i + " (" + topic + ") Insufficient capacity left on nodes:" + broker
@@ -165,10 +160,11 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
             }
           }
         }
+        if (insufficientBroker) {
+          break;
+        }
         queue.addAll(ineligibleBrokers);
         queue.addAll(dequeuedBrokers);
-        logger.warning("[DEBUG1] S4: queue: " + queue.size() + "; partitionsPerRack: " + partitionsPerRack);
-        logger.warning("[DEBUG1] -----");
       }
     }
 
@@ -184,5 +180,9 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
     for (Map.Entry<String, PriorityQueue<Broker>> entry2 : rackBrokerCapacityMap.entrySet()) {
       logger.info("Rack:" + entry2.getKey() + "\n\t" + entry2.getValue());
     }
+  }
+
+  private void handleInsufficientBrokers() {
+
   }
 }
