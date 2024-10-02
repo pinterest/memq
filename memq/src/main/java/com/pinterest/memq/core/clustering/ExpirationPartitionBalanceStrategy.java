@@ -124,10 +124,10 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         queue.addAll(dequeuedBrokers);
         dequeuedBrokers.clear();
         if (partitionsPerRack > queue.size()) {
+          logger.severe("[TEST1] Freezing topic assignment state: " + topic);
           logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
               + partitionsPerRack + " nodes:" + queue.size());
           // TODO: handle this case
-          logger.severe("[TEST] Freezing topic assignment state: " + topic);
           insufficientBroker = true;
           for (Broker broker: oldBrokerList) {
             Set<TopicAssignment> topicAssignments = broker.getAssignedTopics();

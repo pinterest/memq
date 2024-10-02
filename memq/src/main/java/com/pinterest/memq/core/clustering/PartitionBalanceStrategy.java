@@ -131,6 +131,7 @@ public class PartitionBalanceStrategy extends BalanceStrategy {
         queue.addAll(dequeuedBrokers);
         dequeuedBrokers.clear();
         if (partitionsPerRack > queue.size()) {
+          logger.severe("[TEST1] No action: " + topic);
           logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
               + partitionsPerRack + " nodes:" + queue.size());
           break;
