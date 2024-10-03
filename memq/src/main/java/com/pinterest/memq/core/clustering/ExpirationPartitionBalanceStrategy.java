@@ -128,8 +128,9 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         if (partitionsPerRack > queue.size()) {
           logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
               + partitionsPerRack + " nodes:" + queue.size());
-          logger.severe("[TEST1] Freezing topic assignment state: " + topic);
-          registry.counter("memq.test.balancer.error.insufficient_broker");
+          logger.severe("[TEST2] Freezing topic assignment state: " + topic);
+          registry.counter("memq.test2.balancer.error.insufficient_broker");
+          registry.histogram("memq.test2.balancer.alert.insufficient_broker").update(1);
           // TODO: handle this case
           insufficientBroker = true;
           for (Broker broker: oldBrokerList) {
@@ -142,6 +143,7 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
           newBrokerList = new ArrayList<>(oldBrokerList);
           break;
         } else if (partitionsPerRack > 0) {
+          registry.histogram("memq.test2.balancer.alert.insufficient_broker").update(0);
           for (int i = 0; i < partitionsPerRack; i++) {
             Broker broker = queue.poll();
             dequeuedBrokers.add(broker);
