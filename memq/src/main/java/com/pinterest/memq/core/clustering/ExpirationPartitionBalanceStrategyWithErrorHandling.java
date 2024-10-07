@@ -42,7 +42,7 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
 
   private long defaultExpirationTime = 1_000; // TODO: Rollback
   private MetricRegistry registry = new MetricRegistry();
-  private static final String ALERT_METRIC = "balancer.error";
+  private static final String ALERT_METRIC = "balancer.test.error";
   private static final int DEFAULT_CAPACITY = 200;
   private static final Logger logger = Logger.getLogger(ExpirationPartitionBalanceStrategyWithErrorHandling.class.getName());
   private Map<String, Integer> instanceTypeThroughputMap = new HashMap<>();
@@ -184,7 +184,7 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
 
   protected void sendAlert() {
     if (!registry.getCounters().containsKey(ALERT_METRIC)) {
-      registry.register(ALERT_METRIC, new com.codahale.metrics.Counter());
+      registry.counter(ALERT_METRIC);
     }
     registry.counter(ALERT_METRIC).inc();
   }
