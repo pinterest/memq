@@ -8,8 +8,12 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.logging.Logger;
 
 public class ExpirationPartitionBalanceStrategyWithAssignmentFreeze extends ExpirationPartitionBalanceStrategyWithErrorHandling {
+
+    private static final Logger logger =
+        Logger.getLogger(ExpirationPartitionBalanceStrategyWithAssignmentFreeze.class.getName());
 
     /**
      * Use the existing assignment and send alert.
@@ -20,7 +24,7 @@ public class ExpirationPartitionBalanceStrategyWithAssignmentFreeze extends Expi
      */
     @Override
     protected Set<Broker> handleBalancerError(Set<TopicConfig> topics, Set<Broker> brokers) {
-        System.out.println("[TEST] ExpirationPartitionBalanceStrategyWithAssignmentFreeze");
+        logger.info("[TEST] ExpirationPartitionBalanceStrategyWithAssignmentFreeze");
         this.sendAlert();
         List<Broker> brokerList = new ArrayList<>(brokers);
         for (Broker broker : brokerList) {
