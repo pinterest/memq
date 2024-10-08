@@ -40,9 +40,9 @@ import java.util.stream.Collectors;
  */
 public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extends BalanceStrategy {
 
-  private long defaultExpirationTime = 1_000; // TODO: Rollback
+  private long defaultExpirationTime = 300_000; // 5 minutes
   private MetricRegistry registry = new MetricRegistry();
-  private static final String ALERT_METRIC = "balancer.test.error";
+  private static final String ALERT_METRIC = "governor.balancer.error";
   private static final int DEFAULT_CAPACITY = 200;
   private static final Logger logger = Logger.getLogger(ExpirationPartitionBalanceStrategyWithErrorHandling.class.getName());
   private Map<String, Integer> instanceTypeThroughputMap = new HashMap<>();
@@ -183,9 +183,6 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
   protected abstract Set<Broker> handleBalancerError(Set<TopicConfig> topics, Set<Broker> brokers);
 
   protected void sendAlert() {
-    if (!registry.getCounters().containsKey(ALERT_METRIC)) {
-      registry.counter(ALERT_METRIC);
-    }
     registry.counter(ALERT_METRIC).inc();
   }
 }

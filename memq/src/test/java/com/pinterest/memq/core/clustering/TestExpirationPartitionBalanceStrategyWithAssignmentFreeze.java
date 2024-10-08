@@ -11,64 +11,80 @@ import java.util.Set;
 import static org.junit.Assert.assertEquals;
 
 public class TestExpirationPartitionBalanceStrategyWithAssignmentFreeze {
-    @Test
-    public void testAssignment() throws Exception {
-        short port = 9092;
-        ExpirationPartitionBalanceStrategyWithAssignmentFreeze strategy = new ExpirationPartitionBalanceStrategyWithAssignmentFreeze();
-        strategy.setDefaultExpirationTime(500);
 
-        TopicConfig baseConfig = new TopicConfig(0, 1024 * 1024 * 50, 256, "hello", 50, 0, 3);
-        TopicConfig conf = new TopicConfig(baseConfig);
-        Set<Broker> brokers = new HashSet<>(
-            Arrays.asList(
-                new Broker("1.1.1.1", port, "c5.2xlarge", "us-east-1a", Broker.BrokerType.WRITE, new HashSet<>()),
-                new Broker("1.1.1.2", port, "c5.2xlarge", "us-east-1b", Broker.BrokerType.WRITE, new HashSet<>()),
-                new Broker("1.1.1.3", port, "c5.2xlarge", "us-east-1c", Broker.BrokerType.WRITE, new HashSet<>()),
-                new Broker("1.1.1.4", port, "c5.2xlarge", "us-east-1a", Broker.BrokerType.WRITE, new HashSet<>()),
-                new Broker("1.1.1.5", port, "c5.2xlarge", "us-east-1b", Broker.BrokerType.WRITE, new HashSet<>()),
-                new Broker("1.1.1.6", port, "c5.2xlarge", "us-east-1c", Broker.BrokerType.WRITE, new HashSet<>())
-            )
+    private static Broker generateBroker(int index, String localityLetter) throws Exception {
+        return new Broker(
+            "1.1.1." + index,
+            (short) 9092,
+            "c6i.2xlarge",
+            "us-east-1" + localityLetter,
+            Broker.BrokerType.WRITE,
+            new HashSet<>()
         );
+    }
 
-        Set<TopicConfig> topics = new HashSet<>();
-        conf.setInputTrafficMB(900);
-        topics.add(conf);
-        brokers = strategy.balance(topics, brokers);
+    private static TopicConfig generateTopicConfig(int index) throws Exception {
+        return new TopicConfig(
+            index,
+            1024 * 1024 * 50,
+            256,
+            "test_topic_" + index,
+            50,
+            0,
+            3
+        );
+    }
+
+    private static int getAssignedTopicsCount(Set<Broker> brokers) {
         int assigned = 0;
         for (Broker broker : brokers) {
             assigned += broker.getAssignedTopics().size();
         }
-        assertEquals(6, assigned);
+        return assigned;
+    }
 
-        topics.clear();
-        conf.setInputTrafficMB(1350);
-        topics.add(conf);
-        brokers = strategy.balance(topics, brokers);
-        assigned = 0;
-        for (Broker broker : brokers) {
-            assigned += broker.getAssignedTopics().size();
-        }
-        assertEquals(6, assigned);
+    @Test
+    public void testExpirationPartitionBalanceStrategyWithAssignmentFreeze() throws Exception {
+        int expirationTime = 500; // 500ms
+        ExpirationPartitionBalanceStrategyWithAssignmentFreeze strategy = new ExpirationPartitionBalanceStrategyWithAssignmentFreeze();
+        strategy.setDefaultExpirationTime(expirationTime); // 500ms
 
-        Thread.sleep(1000);
-        topics.clear();
-        conf.setInputTrafficMB(1350);
-        topics.add(conf);
-        brokers = strategy.balance(topics, brokers);
-        assigned = 0;
-        for (Broker broker : brokers) {
-            assigned += broker.getAssignedTopics().size();
-        }
-        assertEquals(6, assigned);
+        // 3 brokers, 1 topic with 450MB input traffic
+        TopicConfig topicConfig = generateTopicConfig(0);
+        topicConfig.setInputTrafficMB(450);
+        Set<TopicConfig> topics = new HashSet<>(Arrays.asList(topicConfig));
+        Set<Broker> brokers = new HashSet<>(
+            Arrays.asList(
+                generateBroker(1, "a"),
+                generateBroker(2, "b"),
+                generateBroker(3, "c")
+            )
+        );
 
-        brokers.add(new Broker("1.1.1.7", port, "c5.2xlarge", "us-east-1a", Broker.BrokerType.WRITE, new HashSet<>()));
-        brokers.add(new Broker("1.1.1.8", port, "c5.2xlarge", "us-east-1b", Broker.BrokerType.WRITE, new HashSet<>()));
-        brokers.add(new Broker("1.1.1.9", port, "c5.2xlarge", "us-east-1c", Broker.BrokerType.WRITE, new HashSet<>()));
+        // topic assigned to all 3 brokers
         brokers = strategy.balance(topics, brokers);
-        assigned = 0;
-        for (Broker broker : brokers) {
-            assigned += broker.getAssignedTopics().size();
-        }
-        assertEquals(9, assigned);
+        assertEquals(3, getAssignedTopicsCount(brokers));
+
+        // topic requires 6 brokers, but only 3 available, still keep the assignment
+        topicConfig.setInputTrafficMB(900);
+        brokers = strategy.balance(topics, brokers);
+        assertEquals(3, getAssignedTopicsCount(brokers));
+
+        // after expiration, still keep the assignment
+        Thread.sleep(expirationTime); // 1000ms
+        brokers = strategy.balance(topics, brokers);
+        assertEquals(3, getAssignedTopicsCount(brokers));
+
+        // add 3 more brokers, topic should be assigned to all 6 brokers
+        brokers.add(generateBroker(4, "a"));
+        brokers.add(generateBroker(5, "b"));
+        brokers.add(generateBroker(6, "c"));
+        brokers = strategy.balance(topics, brokers);
+        assertEquals(6, getAssignedTopicsCount(brokers));
+
+        // reduce input traffic to 450MB, topic should be assigned to 3 brokers
+        topicConfig.setInputTrafficMB(450);
+        brokers = strategy.balance(topics, brokers);
+        assertEquals(3, getAssignedTopicsCount(brokers));
     }
 }

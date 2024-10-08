@@ -121,6 +121,7 @@ public class MemqNettyServer {
                   + configuration.getServerConnectionIdleTimeoutSec();
           pipeline.addLast(new IdleStateHandler(0, 0, idleTimeoutSec, TimeUnit.SECONDS));
           pipeline.addLast(new ServerConnectionLifecycleHandler());
+          // TODO: handler for turning on and off of the auto read
           if (sslConfig != null) {
             KeyManagerFactory kmf = MemqUtils.extractKMFFromSSLConfig(sslConfig);
             TrustManagerFactory tmf = MemqUtils.extractTMPFromSSLConfig(sslConfig);

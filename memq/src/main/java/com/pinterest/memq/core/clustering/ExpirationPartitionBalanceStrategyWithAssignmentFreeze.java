@@ -24,7 +24,7 @@ public class ExpirationPartitionBalanceStrategyWithAssignmentFreeze extends Expi
      */
     @Override
     protected Set<Broker> handleBalancerError(Set<TopicConfig> topics, Set<Broker> brokers) {
-        logger.info("[TEST] ExpirationPartitionBalanceStrategyWithAssignmentFreeze");
+        logger.info("Trigger assignment freeze and send alert. Current assignment: " + brokers);
         this.sendAlert();
         List<Broker> brokerList = new ArrayList<>(brokers);
         for (Broker broker : brokerList) {
