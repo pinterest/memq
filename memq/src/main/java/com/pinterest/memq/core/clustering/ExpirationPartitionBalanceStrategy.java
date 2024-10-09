@@ -40,6 +40,7 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
 
   @Override
   public Set<Broker> balance(Set<TopicConfig> topics, Set<Broker> brokers) {
+    boolean insufficientBrokers = false;
     List<Broker> oldBrokerList = new ArrayList<>(brokers);
     Collections.sort(oldBrokerList);
 
@@ -123,8 +124,9 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         queue.addAll(dequeuedBrokers);
         dequeuedBrokers.clear();
         if (partitionsPerRack > queue.size()) {
-          logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
-              + partitionsPerRack + " nodes:" + queue.size());
+//          logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
+//              + partitionsPerRack + " nodes:" + queue.size());
+          insufficientBrokers = true;
           break;
         } else if (partitionsPerRack > 0) {
           for (int i = 0; i < partitionsPerRack; i++) {
@@ -152,7 +154,9 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         queue.addAll(dequeuedBrokers);
       }
     }
-
+    if (insufficientBrokers) {
+      logger.info("[TEST] Trigger insufficientBrokers case. Current assignment:" + newBrokerList);
+    }
     return new HashSet<>(newBrokerList);
   }
 

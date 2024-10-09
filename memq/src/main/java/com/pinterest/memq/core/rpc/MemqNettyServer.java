@@ -121,6 +121,7 @@ public class MemqNettyServer {
                   + configuration.getServerConnectionIdleTimeoutSec();
           pipeline.addLast(new IdleStateHandler(0, 0, idleTimeoutSec, TimeUnit.SECONDS));
           pipeline.addLast(new ServerConnectionLifecycleHandler());
+          pipeline.addLast(new CongestionControlHandler());
           if (sslConfig != null) {
             KeyManagerFactory kmf = MemqUtils.extractKMFFromSSLConfig(sslConfig);
             TrustManagerFactory tmf = MemqUtils.extractTMPFromSSLConfig(sslConfig);
