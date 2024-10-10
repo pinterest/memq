@@ -41,7 +41,8 @@ public final class CongestionControlHandler extends ChannelDuplexHandler {
     Runtime runtime = Runtime.getRuntime();
     long memoryMax = runtime.maxMemory();
     long memoryUsed = runtime.totalMemory() - runtime.freeMemory();
-    long memoryUsedPercent = (long) memoryUsed / memoryMax * 100;
+    double memoryUsedPercentDouble = (double) memoryUsed / memoryMax * 100;
+    long memoryUsedPercent = Math.round(memoryUsedPercentDouble);
     long unpooledMemoryUsed = UnpooledByteBufAllocator.DEFAULT.metric().usedHeapMemory();
     long pooledMemoryUsed = PooledByteBufAllocator.DEFAULT.metric().usedHeapMemory();
     long unpooledHeapMemoryUsed = UnpooledByteBufAllocator.DEFAULT.metric().usedDirectMemory();
