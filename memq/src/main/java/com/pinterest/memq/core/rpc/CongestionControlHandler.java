@@ -9,6 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.SocketAddress;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class CongestionControlHandler extends ChannelDuplexHandler {
 
@@ -39,18 +41,23 @@ public final class CongestionControlHandler extends ChannelDuplexHandler {
     Runtime runtime = Runtime.getRuntime();
     long memoryMax = runtime.maxMemory();
     long memoryUsed = runtime.totalMemory() - runtime.freeMemory();
-    double memoryUsedPercent = (double) memoryUsed / memoryMax * 100;
+    long memoryUsedPercent = (long) memoryUsed / memoryMax * 100;
     long unpooledMemoryUsed = UnpooledByteBufAllocator.DEFAULT.metric().usedHeapMemory();
     long pooledMemoryUsed = PooledByteBufAllocator.DEFAULT.metric().usedHeapMemory();
     long unpooledHeapMemoryUsed = UnpooledByteBufAllocator.DEFAULT.metric().usedDirectMemory();
     long pooledHeapMemoryUsed = PooledByteBufAllocator.DEFAULT.metric().usedDirectMemory();
-
-    logger.info("[TEST] channelRead metrics: Timestamp:" + System.currentTimeMillis() +
-        "; Memory used: " + memoryUsedPercent +
-        "%; Unpooled memory used: " + unpooledMemoryUsed +
-        "; Pooled memory used: " + pooledMemoryUsed +
-        "; Unpooled heap memory used: " + unpooledHeapMemoryUsed +
-        "; Pooled heap memory used: " + pooledHeapMemoryUsed + ";");
+    List<Long> usageList = new ArrayList<Long>() {
+      {
+        add(memoryMax);
+        add(memoryUsed);
+        add(memoryUsedPercent);
+        add(unpooledMemoryUsed);
+        add(pooledMemoryUsed);
+        add(unpooledHeapMemoryUsed);
+        add(pooledHeapMemoryUsed);
+      }
+    };
+    logger.info("[TEST_METRICS] " + usageList.toString());
     super.channelRead(ctx, msg);
   }
 }

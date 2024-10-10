@@ -158,12 +158,20 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
       // Assign all topics to all brokers
       newBrokerList = new ArrayList<>();
       for (Broker broker : oldBrokerList) {
-        Set<TopicAssignment> allTopics = new HashSet<>();
-        for (TopicConfig topicConfig : topicsList) {
-          TopicAssignment assignment = new TopicAssignment(topicConfig, 0);
-          allTopics.add(assignment);
+        if (broker.getAssignedTopics() == null) {
+          // If no assignment, assign all topics
+          Set<TopicAssignment> allTopics = new HashSet<>();
+          for (TopicConfig topicConfig : topicsList) {
+            TopicAssignment assignment = new TopicAssignment(topicConfig, 0);
+            allTopics.add(assignment);
+          }
+          broker.setAssignedTopics(allTopics);
+        } else {
+          // Refresh timestamp
+          for (TopicAssignment topicAssignment : broker.getAssignedTopics()) {
+            topicAssignment.setAssignmentTimestamp(System.currentTimeMillis());
+          }
         }
-        broker.setAssignedTopics(allTopics);
         newBrokerList.add(broker);
       }
       logger.info("[TEST] Trigger insufficientBrokers case. Current assignment:" + newBrokerList);
