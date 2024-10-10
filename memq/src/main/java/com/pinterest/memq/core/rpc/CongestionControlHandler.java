@@ -42,7 +42,7 @@ public final class CongestionControlHandler extends ChannelDuplexHandler {
   @Override
   public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
     int randomValue = random.nextInt(100);
-    if (randomValue < 90) {
+    if (randomValue < 80) {
       // Drop log messages
       return;
     }
@@ -56,31 +56,31 @@ public final class CongestionControlHandler extends ChannelDuplexHandler {
     long pooledMemoryUsed = PooledByteBufAllocator.DEFAULT.metric().usedHeapMemory();
     long unpooledHeapMemoryUsed = UnpooledByteBufAllocator.DEFAULT.metric().usedDirectMemory();
     long pooledHeapMemoryUsed = PooledByteBufAllocator.DEFAULT.metric().usedDirectMemory();
-    // Check system memory usage.
-    OperatingSystemMXBean osBean = ManagementFactory.getPlatformMXBean(
-        OperatingSystemMXBean.class);
-    long physicalMemorySize = osBean.getTotalPhysicalMemorySize();
-    long freePhysicalMemorySize = osBean.getFreePhysicalMemorySize();
-    long usedPhysicalMemorySize = physicalMemorySize - freePhysicalMemorySize;
-    // Check CPU usage
-    double processCpuLoad = osBean.getProcessCpuLoad() * 100;
-    double systemCpuLoad = osBean.getSystemCpuLoad() * 100;
+//    // Check system memory usage.
+//    OperatingSystemMXBean osBean = ManagementFactory.getPlatformMXBean(
+//        OperatingSystemMXBean.class);
+//    long physicalMemorySize = osBean.getTotalPhysicalMemorySize();
+//    long freePhysicalMemorySize = osBean.getFreePhysicalMemorySize();
+//    long usedPhysicalMemorySize = physicalMemorySize - freePhysicalMemorySize;
+//    // Check CPU usage
+//    double processCpuLoad = osBean.getProcessCpuLoad() * 100;
+//    double systemCpuLoad = osBean.getSystemCpuLoad() * 100;
 
     List<String> usageList = new ArrayList<String>() {
       {
         add(String.valueOf(System.currentTimeMillis()));
         add(String.valueOf(memoryMax));
         add(String.valueOf(memoryUsed));
-        add(String.valueOf(memoryUsedPercent));
+        add(String.format( "%.2f", memoryUsedPercent));
         add(String.valueOf(unpooledMemoryUsed));
         add(String.valueOf(pooledMemoryUsed));
         add(String.valueOf(unpooledHeapMemoryUsed));
         add(String.valueOf(pooledHeapMemoryUsed));
-        add(String.valueOf(physicalMemorySize));
-        add(String.valueOf(freePhysicalMemorySize));
-        add(String.valueOf(usedPhysicalMemorySize));
-        add(String.valueOf(processCpuLoad));
-        add(String.valueOf(systemCpuLoad));
+//        add(String.valueOf(physicalMemorySize));
+//        add(String.valueOf(freePhysicalMemorySize));
+//        add(String.valueOf(usedPhysicalMemorySize));
+//        add(String.valueOf(processCpuLoad));
+//        add(String.valueOf(systemCpuLoad));
       }
     };
     logger.info("[TEST_METRICS] " + usageList.toString());
