@@ -3,7 +3,7 @@
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>com.pinterest.memq</groupId>
 	<artifactId>memq-parent</artifactId>
-	<version>0.2.21</version>
+	<version>0.2.22-SNAPSHOT</version>
 	<packaging>pom</packaging>
 	<name>memq-parent</name>
 	<description>Hyperscale PubSub System</description>

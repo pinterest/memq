@@ -63,6 +63,7 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateHandler;
+import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 
 public class MemqNettyServer {
 
@@ -105,6 +106,12 @@ public class MemqNettyServer {
     try {
       ServerBootstrap serverBootstrap = new ServerBootstrap();
       serverBootstrap.group(parentGroup, childGroup);
+
+      long writeLimit = 1024 * 1024 * 11;
+      long readLimit = 1024 * 1024 * 11;
+      GlobalTrafficShapingHandler trafficShapingHandler =
+          new GlobalTrafficShapingHandler(childGroup, writeLimit, readLimit);
+
       if (useEpoll) {
         serverBootstrap.channel(EpollServerSocketChannel.class);
       } else {
@@ -121,6 +128,8 @@ public class MemqNettyServer {
                   + configuration.getServerConnectionIdleTimeoutSec();
           pipeline.addLast(new IdleStateHandler(0, 0, idleTimeoutSec, TimeUnit.SECONDS));
           pipeline.addLast(new ServerConnectionLifecycleHandler());
+          pipeline.addLast(trafficShapingHandler);
+//          pipeline.addLast(new CongestionControlHandler());
           if (sslConfig != null) {
             KeyManagerFactory kmf = MemqUtils.extractKMFFromSSLConfig(sslConfig);
             TrustManagerFactory tmf = MemqUtils.extractTMPFromSSLConfig(sslConfig);

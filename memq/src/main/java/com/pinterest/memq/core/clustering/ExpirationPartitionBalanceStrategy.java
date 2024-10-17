@@ -40,6 +40,7 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
 
   @Override
   public Set<Broker> balance(Set<TopicConfig> topics, Set<Broker> brokers) {
+    boolean insufficientBrokers = false;
     List<Broker> oldBrokerList = new ArrayList<>(brokers);
     Collections.sort(oldBrokerList);
 
@@ -123,8 +124,9 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         queue.addAll(dequeuedBrokers);
         dequeuedBrokers.clear();
         if (partitionsPerRack > queue.size()) {
-          logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
-              + partitionsPerRack + " nodes:" + queue.size());
+//          logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
+//              + partitionsPerRack + " nodes:" + queue.size());
+          insufficientBrokers = true;
           break;
         } else if (partitionsPerRack > 0) {
           for (int i = 0; i < partitionsPerRack; i++) {
@@ -152,7 +154,29 @@ public class ExpirationPartitionBalanceStrategy extends BalanceStrategy {
         queue.addAll(dequeuedBrokers);
       }
     }
-
+    if (insufficientBrokers) {
+      // Assign all topics to all brokers
+      newBrokerList = new ArrayList<>();
+      for (Broker broker : oldBrokerList) {
+        if (broker.getAssignedTopics() == null || broker.getAssignedTopics().isEmpty()) {
+          // If no assignment, assign all topics
+          Set<TopicAssignment> allTopics = new HashSet<>();
+          for (TopicConfig topicConfig : topicsList) {
+            TopicAssignment assignment = new TopicAssignment(topicConfig, 0);
+            allTopics.add(assignment);
+          }
+          broker.setAssignedTopics(allTopics);
+          logger.info("[TEST] Trigger insufficientBrokers case. Assigning all topics to broker.");
+        } else {
+          // Refresh timestamp
+          for (TopicAssignment topicAssignment : broker.getAssignedTopics()) {
+            topicAssignment.setAssignmentTimestamp(System.currentTimeMillis());
+          }
+          logger.info("[TEST] Trigger insufficientBrokers case. Freezing existing assignments.");
+        }
+        newBrokerList.add(broker);
+      }
+    }
     return new HashSet<>(newBrokerList);
   }
 
