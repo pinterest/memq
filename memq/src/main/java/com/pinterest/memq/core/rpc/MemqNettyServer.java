@@ -107,10 +107,11 @@ public class MemqNettyServer {
       ServerBootstrap serverBootstrap = new ServerBootstrap();
       serverBootstrap.group(parentGroup, childGroup);
 
-      long writeLimit = 1024 * 1024 * 11;
-      long readLimit = 1024 * 1024 * 11;
+      long writeLimit = 1024 * 1024 * 5;
+      long readLimit = 1024 * 1024 * 5;
       GlobalTrafficShapingHandler trafficShapingHandler =
           new GlobalTrafficShapingHandler(childGroup, writeLimit, readLimit);
+      logger.info("[TEST] Initialize GlobalTrafficShapingHandler");
 
       if (useEpoll) {
         serverBootstrap.channel(EpollServerSocketChannel.class);
@@ -129,6 +130,8 @@ public class MemqNettyServer {
           pipeline.addLast(new IdleStateHandler(0, 0, idleTimeoutSec, TimeUnit.SECONDS));
           pipeline.addLast(new ServerConnectionLifecycleHandler());
           pipeline.addLast(trafficShapingHandler);
+          logger.info("[TEST] Adding traffic shaping handler with writeLimit:" + writeLimit
+              + " readLimit:" + readLimit);
 //          pipeline.addLast(new CongestionControlHandler());
           if (sslConfig != null) {
             KeyManagerFactory kmf = MemqUtils.extractKMFFromSSLConfig(sslConfig);
