@@ -24,6 +24,8 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.commons.protocol.Broker.BrokerType;
 import com.google.common.collect.Sets;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
 import java.util.Arrays;
 import java.util.HashMap;
@@ -32,12 +34,23 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 
+@RunWith(Parameterized.class)
 public class TestExpirationPartitionBalanceStrategy {
+
+  @Parameterized.Parameters(name = "Class: {0}")
+  public static BalanceStrategy[] strategies() {
+    return new BalanceStrategy[] {new ExpirationPartitionBalanceStrategy(), new ExpirationPartitionBalanceStrategyWithAssignmentFreeze()};
+  }
+
+    private final BalanceStrategy strategy;
+
+  public TestExpirationPartitionBalanceStrategy(BalanceStrategy strategy) {
+    this.strategy = strategy;
+  }
 
   @Test
   public void testExpirationPartitionBalanceStrategy() {
     short port = 9092;
-    BalanceStrategy strategy = new ExpirationPartitionBalanceStrategy();
     Set<Broker> brokers = new HashSet<>(
         Arrays.asList(new Broker("1.1.1.9", port, "c5.2xlarge", "us-east-1c", BrokerType.WRITE, new HashSet<>()),
             new Broker("1.1.1.8", port, "c5.2xlarge", "us-east-1b", BrokerType.WRITE, new HashSet<>()),
@@ -82,7 +95,6 @@ public class TestExpirationPartitionBalanceStrategy {
   @Test
   public void testUpdateConfigs() {
     short port = 9092;
-    BalanceStrategy strategy = new ExpirationPartitionBalanceStrategy();
     Set<Broker> brokers = new HashSet<>(
         Arrays.asList(new Broker("1.1.1.9", port, "c5.2xlarge", "us-east-1c", BrokerType.WRITE, new HashSet<>()),
             new Broker("1.1.1.8", port, "c5.2xlarge", "us-east-1b", BrokerType.WRITE, new HashSet<>()),
@@ -138,7 +150,6 @@ public class TestExpirationPartitionBalanceStrategy {
   @Test
   public void testPartitionBalanceStrategyShrink() {
     short port = 9092;
-    BalanceStrategy strategy = new ExpirationPartitionBalanceStrategy();
     Set<Broker> brokers = new HashSet<>(
         Arrays.asList(new Broker("1.1.1.9", port, "c5.2xlarge", "us-east-1c", BrokerType.WRITE, new HashSet<>()),
             new Broker("1.1.1.8", port, "c5.2xlarge", "us-east-1b", BrokerType.WRITE, new HashSet<>()),
@@ -191,8 +202,10 @@ public class TestExpirationPartitionBalanceStrategy {
   @Test
   public void testExpiringAssignments() throws Exception {
     short port = 9092;
-    ExpirationPartitionBalanceStrategy strategy = new ExpirationPartitionBalanceStrategy();
-    strategy.setDefaultExpirationTime(1000L);
+    if (strategy instanceof ExpirationPartitionBalanceStrategy)
+      ((ExpirationPartitionBalanceStrategy) strategy).setDefaultExpirationTime(1000);
+    else if (strategy instanceof ExpirationPartitionBalanceStrategyWithAssignmentFreeze)
+      ((ExpirationPartitionBalanceStrategyWithAssignmentFreeze) strategy).setDefaultExpirationTime(1000);
     Set<Broker> brokers = new HashSet<>(
         Arrays.asList(new Broker("1.1.1.9", port, "c5.2xlarge", "us-east-1c", BrokerType.WRITE, new HashSet<>()),
             new Broker("1.1.1.8", port, "c5.2xlarge", "us-east-1b", BrokerType.WRITE, new HashSet<>()),
