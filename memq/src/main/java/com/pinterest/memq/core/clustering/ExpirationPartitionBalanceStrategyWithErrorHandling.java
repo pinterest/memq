@@ -133,7 +133,7 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
         queue.addAll(dequeuedBrokers);
         dequeuedBrokers.clear();
         if (partitionsPerRack > queue.size()) {
-          logger.severe("Insufficient number of nodes to host this topic:" + topic + " partitions:"
+          logger.severe("Insufficient number of nodes in rack " + entry.getKey() + " to host this topic:" + topic + " partitions:"
               + partitionsPerRack + " nodes:" + queue.size());
           balancerError = true;
           break;
@@ -155,7 +155,7 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
               logger.info("(" + topic + ") assigned to broker:" + broker.getBrokerIP());
             } else {
               logger.severe(i + " (" + topic + ") Insufficient capacity left on nodes:" + broker
-                  + " needed:" + trafficPerPartition + "\n" + queue);
+                  + " needed:" + trafficPerPartition + " / available:" + broker.getAvailableCapacity() + "\nqueue: " + queue);
             }
           }
         }
