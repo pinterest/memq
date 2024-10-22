@@ -295,7 +295,7 @@ public class TestExpirationPartitionBalanceStrategyWithAssignmentFreeze {
         Thread.sleep(expirationTime * 2);
 
         // topic0 needs 9 brokers, topic1 still needs 6 brokers, but only 12 available in total
-        topicConfig0.setInputTrafficMB(1350);
+        topicConfig0.setInputTrafficMB(1350);   // setting this to 1800 (all 12 brokers) will result in topic1 being fully dropped
 
         brokers = strategy.balance(topics, brokers);
         assignedBrokers0 = getAssignedBrokersForTopic(brokers, topicConfig0.getTopic());
