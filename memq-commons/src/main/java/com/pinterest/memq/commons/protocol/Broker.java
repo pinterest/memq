@@ -150,7 +150,7 @@ public class Broker implements Packet, Comparable<Broker> {
   public String toString() {
     return "Broker [brokerIP=" + brokerIP + ", brokerPort=" + brokerPort + ", instanceType="
         + instanceType + ", locality=" + locality + ", totalNetworkCapacity=" + totalNetworkCapacity
-        + ", brokerType=" + brokerType + "]";
+        + ", availableNetworkCapacity=" + getAvailableCapacity() + ", brokerType=" + brokerType + "]";
   }
 
   @Override
