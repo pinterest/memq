@@ -150,7 +150,7 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
               broker.getAssignedTopics().add(assignment);
               logger.info(
                   i + " Topic(" + topic + ") already assigned to node " + broker.getBrokerIP() + ", updating configs");
-            } else if (broker.getAvailableCapacity() - trafficPerPartition > 0) {
+            } else if (broker.getAvailableCapacity() - trafficPerPartition >= 0) {
               broker.getAssignedTopics().add(assignment);
               logger.info("(" + topic + ") assigned to broker:" + broker.getBrokerIP());
             } else {
