@@ -103,8 +103,6 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   static {
     java.security.Security.setProperty("networkaddress.cache.ttl", "1");
   }
-
-  private static final String HOSTNAME = MiscUtils.getHostname();
   private Logger logger = Logger.getLogger(S3ExpressAsyncStorageHandler.class.getName());
   private String path;
   private String bucket;
@@ -116,6 +114,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   private boolean enableHashing;
   private boolean enableMD5;
   private volatile int maxAttempts;
+  private volatile int maxS3Attempts;
   private volatile int retryTimeoutMillis;
   private HttpClient secureClient;
   private MetricRegistry registry;
@@ -183,6 +182,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     this.retryTimeoutMillis = Integer
         .parseInt(outputHandlerConfig.getProperty("retryTimeoutMillis", "5000"));
     this.maxAttempts = Integer.parseInt(outputHandlerConfig.getProperty("retryCount", "2")) + 1;
+    this.maxS3Attempts = Integer.parseInt(outputHandlerConfig.getProperty("retryCount500s", "3")) + 1;
     ConnectionProvider provider = ConnectionProvider.builder("s3express").maxConnections(10)
         .maxIdleTime(Duration.ofSeconds(20)).maxLifeTime(Duration.ofSeconds(60))
         .pendingAcquireTimeout(Duration.ofSeconds(60)).evictInBackground(Duration.ofSeconds(120))
@@ -193,8 +193,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
 
     SessionCreds session = SessionTokenManager.getInstance().fetchCredentials(bucket);
     logger.info("Tested fetch credentials:" + session);
-    // TODO fix me with dynamic lookup
-    baseConnStr = "https://" + bucket + ".s3express-use1-az5.us-east-1.amazonaws.com/";
+    baseConnStr = S3ExpressHelper.generateBucketUrl(bucket);
   }
   
   @Override
@@ -219,7 +218,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     if (bucket == null) {
       throw new ConfigurationException("Missing S3 bucket name");
     }
-    baseConnStr = "https://" + bucket + ".s3express-use1-az5.us-east-1.amazonaws.com/";
+    baseConnStr = S3ExpressHelper.generateBucketUrl(bucket);
   }
 
   @Override
@@ -283,7 +282,11 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
             if (result.getResponseCode() >= 500 && result.getResponseCode() < 600) {
               // retry 500s without increasing attempts
               s3RetryCounters.inc();
-              // TODO: add circuit breaker for too many S3 failures
+              if (s3RetryCounters.getCount() >= maxS3Attempts) {
+                logger.severe(String.format("Retried %d times for key %s, still getting 5XX, giving up",
+                        maxS3Attempts, key));
+                break;
+              }
               continue;
             }
           }
@@ -354,66 +357,61 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
                                      final int count,
                                      int timeout) throws URISyntaxException, InterruptedException {
     Context internalLatency = s3PutInternalLatencyTimer.time();
-    try {
 
-      SessionTokenManager instance = SessionTokenManager.getInstance();
-      SessionCreds credentials = instance.getCredentials(bucket);
+    SessionTokenManager instance = SessionTokenManager.getInstance();
+    SessionCreds credentials = instance.getCredentials(bucket);
 
-      AwsS3V4Signer signer = AwsS3V4Signer.create();
+    AwsS3V4Signer signer = AwsS3V4Signer.create();
 
-      SdkHttpFullRequest req = SdkHttpFullRequest.builder().method(SdkHttpMethod.PUT)
-          .appendHeader("x-amz-s3session-token", credentials.token)
-          .appendHeader(CONTENT_LENGTH, String.valueOf(contentLength))
-          .uri(URI.create(
-              baseConnStr + key))
-          .build();
-      final SdkHttpFullRequest req1 = signer.sign(req,
-          AwsS3V4SignerParams.builder().awsCredentials(new AwsCredentials() {
+    SdkHttpFullRequest req = SdkHttpFullRequest.builder().method(SdkHttpMethod.PUT)
+        .appendHeader("x-amz-s3session-token", credentials.token)
+        .appendHeader(CONTENT_LENGTH, String.valueOf(contentLength))
+        .uri(URI.create(
+            baseConnStr + key))
+        .build();
+    final SdkHttpFullRequest req1 = signer.sign(req,
+        AwsS3V4SignerParams.builder().awsCredentials(new AwsCredentials() {
 
-            @Override
-            public String secretAccessKey() {
-              return credentials.secret;
-            }
-
-            @Override
-            public String accessKeyId() {
-              return credentials.key;
-            }
-          }).signingName("s3express").signingRegion(region).build());
-
-      s3RequestCounter.inc();
-      Mono<HttpClientResponse> responseFuture = secureClient.headers(headers -> {
-        for (Entry<String, List<String>> entry : req1.headers().entrySet()) {
-          headers.set(entry.getKey(), entry.getValue());
-        }
-      }).put().uri(req.getUri()).send(bodyPublisher).response();
-      HttpClientResponse response = responseFuture.block();
-
-      HttpResponseStatus status = response.status();
-      int responseCode = status.code();
-      HttpHeaders responseHeaders = response.responseHeaders();
-
-      if (responseCode != SUCCESS_CODE) {
-        logger.severe(responseCode + " reason:" + status.reasonPhrase() + "\t" + responseHeaders
-            + " index:" + count + " url:" + req.getUri());
-      }
-      if (contentMD5 != null && responseCode == SUCCESS_CODE) {
-        try {
-          String eTagHex = responseHeaders.get(E_TAG);
-          String etagToBase64 = MemqUtils.etagToBase64(eTagHex.replace("\"", ""));
-          if (!contentMD5.equals(etagToBase64)) {
-            logger.severe("Request failed due to etag mismatch url:" + req.getUri());
-            responseCode = ERROR_CODE;
+          @Override
+          public String secretAccessKey() {
+            return credentials.secret;
           }
-        } catch (Exception e) {
-          logger.log(Level.SEVERE, "Unable to parse the returnedetag", e);
-        }
+
+          @Override
+          public String accessKeyId() {
+            return credentials.key;
+          }
+        }).signingName("s3express").signingRegion(region).build());
+
+    s3RequestCounter.inc();
+    Mono<HttpClientResponse> responseFuture = secureClient.headers(headers -> {
+      for (Entry<String, List<String>> entry : req1.headers().entrySet()) {
+        headers.set(entry.getKey(), entry.getValue());
       }
-      return new UploadResult(key, responseCode, responseHeaders, internalLatency.stop(), count);
-    } finally {
-      long stop = internalLatency.stop();
-//      logger.info("Latency:" + stop / 1000_000);
+    }).put().uri(req.getUri()).send(bodyPublisher).response();
+    HttpClientResponse response = responseFuture.block();
+
+    HttpResponseStatus status = response.status();
+    int responseCode = status.code();
+    HttpHeaders responseHeaders = response.responseHeaders();
+
+    if (responseCode != SUCCESS_CODE) {
+      logger.severe(responseCode + " reason:" + status.reasonPhrase() + "\t" + responseHeaders
+          + " index:" + count + " url:" + req.getUri());
     }
+    if (contentMD5 != null && responseCode == SUCCESS_CODE) {
+      try {
+        String eTagHex = responseHeaders.get(E_TAG);
+        String etagToBase64 = MemqUtils.etagToBase64(eTagHex.replace("\"", ""));
+        if (!contentMD5.equals(etagToBase64)) {
+          logger.severe("Request failed due to etag mismatch url:" + req.getUri());
+          responseCode = ERROR_CODE;
+        }
+      } catch (Exception e) {
+        logger.log(Level.SEVERE, "Unable to parse the returnedetag", e);
+      }
+    }
+    return new UploadResult(key, responseCode, responseHeaders, internalLatency.stop(), count);
   }
 
   public static class UploadResult {
@@ -463,26 +461,27 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     }
   }
 
+  /**
+   * Create upload path for s3 express data object
+   * Example: 21-01-01-01/topic/1_1_0
+   * @param firstMessageClientRequestId
+   * @param firstMessageServerRequestId
+   * @param attempt
+   * @return
+   */
   private StringBuilder createKey(long firstMessageClientRequestId,
                                   long firstMessageServerRequestId,
                                   int attempt) {
     StringBuilder keyBuilder = new StringBuilder();
-    if (enableHashing) {
-      String hash = DigestUtils.md2Hex(String.valueOf(firstMessageClientRequestId));
-      keyBuilder.append(hash, 0, 2);
-      keyBuilder.append(SLASH);
-    }
+    keyBuilder.append(S3ExpressHelper.getCurrentDateHr());
+    keyBuilder.append(SLASH);
     keyBuilder.append(path);
     keyBuilder.append(SLASH);
     keyBuilder.append(firstMessageClientRequestId);
     keyBuilder.append(SEPARATOR);
     keyBuilder.append(firstMessageServerRequestId);
     keyBuilder.append(SEPARATOR);
-    keyBuilder.append(System.currentTimeMillis());
-    keyBuilder.append(SEPARATOR);
     keyBuilder.append(attempt);
-    keyBuilder.append(SEPARATOR);
-    keyBuilder.append(HOSTNAME);
     return keyBuilder;
   }
 
@@ -495,12 +494,12 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     CompositeByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.compositeBuffer();
     byteBuf.addComponent(true, batchHeaders.retainedDuplicate());
     byteBuf.addComponents(true,
-        messageByteBufs.stream().map(ByteBuf::retainedDuplicate).collect(Collectors.toList()));
+            messageByteBufs.stream().map(ByteBuf::retainedDuplicate).collect(Collectors.toList()));
     return byteBuf;
   }
 
-  public static Publisher<ByteBuf> getBodyPublisher(final List<ByteBuf> messageByteBufs,
-                                                    ByteBuf batchHeaders) {
+  public static Publisher<ByteBuf> getBodyPublisher(
+          final List<ByteBuf> messageByteBufs, ByteBuf batchHeaders) {
     return s -> s.onSubscribe(new Subscription() {
       @Override
       public void request(long n) {
@@ -508,7 +507,6 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
         s.onNext(byteBuf);
         s.onComplete();
       }
-
       @Override
       public void cancel() {
       }
@@ -545,62 +543,30 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   public Logger getLogger() {
     return logger;
   }
-  
-  @Override
-  public InputStream fetchBatchStreamForNotification(JsonObject nextNotificationToProcess) throws IOException {
-    AwsS3V4Signer signer = AwsS3V4Signer.create();
 
-    String currentBucket = nextNotificationToProcess.get(BUCKET).getAsString();
-    String currentKey = nextNotificationToProcess.get(KEY).getAsString();
-    int currentObjectSize = nextNotificationToProcess.get(SIZE).getAsInt();
-    getLogger().fine("Updating bucket and key: " + currentBucket + "/" + currentKey + " {"
-        + nextNotificationToProcess.get(MemqLogMessage.INTERNAL_FIELD_NOTIFICATION_PARTITION_ID)
-            .getAsNumber()
-        + ", " + nextNotificationToProcess
-            .get(MemqLogMessage.INTERNAL_FIELD_NOTIFICATION_PARTITION_OFFSET).getAsNumber()
-        + "}");
-    getLogger().finest("Object size: " + currentObjectSize);
-    
-    SessionTokenManager instance = SessionTokenManager.getInstance();
-    SessionCreds credentials;
-    try {
-      credentials = instance.getCredentials(currentBucket);
-    } catch (InterruptedException e) {
-      throw new IOException(e);
-    }
-    
-    
-    SdkHttpFullRequest req = SdkHttpFullRequest.builder().method(SdkHttpMethod.GET)
-        .appendHeader("x-amz-s3session-token", credentials.token)
-        .uri(URI.create(
-            baseConnStr + currentKey))
-        .build();
-    final SdkHttpFullRequest req1 = signer.sign(req,
-        AwsS3V4SignerParams.builder().awsCredentials(new AwsCredentials() {
-
-          @Override
-          public String secretAccessKey() {
-            return credentials.secret;
-          }
-
-          @Override
-          public String accessKeyId() {
-            return credentials.key;
-          }
-        }).signingName("s3express").signingRegion(region).build());
-    
-    long fetchStartTime = System.currentTimeMillis();
-    try {
-      return httpClient.tryObjectGet(req1);
-    } finally {
-      long fetchTime = System.currentTimeMillis() - fetchStartTime;
-      getLogger().fine("Fetch Time:" + fetchTime);
-      registry.histogram(OBJECT_FETCH_LATENCY_MS_HISTOGRAM_KEY).update(fetchTime);
-    }
+  private SdkHttpFullRequest generateGetObjectRequest(SessionCreds creds, String objectKey) {
+    return SdkHttpFullRequest.builder().method(SdkHttpMethod.GET)
+            .appendHeader("x-amz-s3session-token", creds.token)
+            .uri(URI.create(baseConnStr + objectKey))
+            .build();
   }
-  
-  @Override
-  public BatchData fetchBatchStreamForNotificationBuf(JsonObject nextNotificationToProcess) throws IOException {
+
+  private SdkHttpFullRequest signRequest(SessionCreds creds, SdkHttpFullRequest request) {
+    AwsS3V4Signer signer = AwsS3V4Signer.create();
+    return signer.sign(request,
+            AwsS3V4SignerParams.builder().awsCredentials(new AwsCredentials() {
+              @Override
+              public String secretAccessKey() {
+                return creds.secret;
+              }
+              @Override
+              public String accessKeyId() {
+                return creds.key;
+              }
+            }).signingName("s3express").signingRegion(region).build());
+  }
+
+  private SessionCreds getCredentials(String bucket) throws IOException {
     SessionTokenManager instance = SessionTokenManager.getInstance();
     SessionCreds credentials;
     try {
@@ -608,41 +574,43 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     } catch (InterruptedException e) {
       throw new IOException(e);
     }
+    return credentials;
+  }
 
-    AwsS3V4Signer signer = AwsS3V4Signer.create();
-
+  private SdkHttpFullRequest generateFetchRequest(JsonObject nextNotificationToProcess) throws IOException {
     String currentBucket = nextNotificationToProcess.get(BUCKET).getAsString();
     String currentKey = nextNotificationToProcess.get(KEY).getAsString();
     int currentObjectSize = nextNotificationToProcess.get(SIZE).getAsInt();
-    getLogger().fine("Updating bucket and key: " + currentBucket + "/" + currentKey + " {"
-        + nextNotificationToProcess.get(MemqLogMessage.INTERNAL_FIELD_NOTIFICATION_PARTITION_ID)
+    logger.fine("Updating bucket and key: " + currentBucket + "/" + currentKey + " {"
+            + nextNotificationToProcess.get(MemqLogMessage.INTERNAL_FIELD_NOTIFICATION_PARTITION_ID)
             .getAsNumber()
-        + ", " + nextNotificationToProcess
+            + ", " + nextNotificationToProcess
             .get(MemqLogMessage.INTERNAL_FIELD_NOTIFICATION_PARTITION_OFFSET).getAsNumber()
-        + "}");
-    getLogger().finest("Object size: " + currentObjectSize);
-    
-    
-    SdkHttpFullRequest req = SdkHttpFullRequest.builder().method(SdkHttpMethod.GET)
-        .appendHeader("x-amz-s3session-token", credentials.token)
-        .uri(URI.create(
-            baseConnStr + currentKey))
-        .build();
-    final SdkHttpFullRequest req1 = signer.sign(req,
-        AwsS3V4SignerParams.builder().awsCredentials(new AwsCredentials() {
+            + "}");
+    logger.finest("Object size: " + currentObjectSize);
 
-          @Override
-          public String secretAccessKey() {
-            return credentials.secret;
-          }
-
-          @Override
-          public String accessKeyId() {
-            return credentials.key;
-          }
-        }).signingName("s3express").signingRegion(region).build());
-    
-    return new BatchData(currentObjectSize, httpClient.tryObjectGetAsBuffer(req1)); 
+    SessionCreds credentials = getCredentials(currentBucket);
+    SdkHttpFullRequest request = generateGetObjectRequest(credentials, currentKey);
+    SdkHttpFullRequest signedRequest = signRequest(credentials, request);
+    return signedRequest;
   }
 
+  @Override
+  public InputStream fetchBatchStreamForNotification(JsonObject nextNotificationToProcess) throws IOException {
+    final SdkHttpFullRequest request = generateFetchRequest(nextNotificationToProcess);
+    long fetchStartTime = System.currentTimeMillis();
+    try {
+      return httpClient.tryObjectGet(request);
+    } finally {
+      long fetchTime = System.currentTimeMillis() - fetchStartTime;
+      getLogger().fine("Fetch Time:" + fetchTime);
+    }
+  }
+  
+  @Override
+  public BatchData fetchBatchStreamForNotificationBuf(JsonObject nextNotificationToProcess) throws IOException {
+    int currentObjectSize = nextNotificationToProcess.get(SIZE).getAsInt();
+    final SdkHttpFullRequest request = generateFetchRequest(nextNotificationToProcess);
+    return new BatchData(currentObjectSize, httpClient.tryObjectGetAsBuffer(request));
+  }
 }

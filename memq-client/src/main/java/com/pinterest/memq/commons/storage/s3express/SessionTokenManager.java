@@ -21,12 +21,14 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -40,6 +42,8 @@ import org.w3c.dom.Node;
 import io.netty.channel.ChannelOption;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider;
 import software.amazon.awssdk.auth.signer.AwsS3V4Signer;
 import software.amazon.awssdk.auth.signer.params.AwsS3V4SignerParams;
@@ -53,9 +57,18 @@ import software.amazon.awssdk.regions.Region;
 public class SessionTokenManager {
 
   private static final SessionTokenManager mgr = new SessionTokenManager();
+  private static final Logger logger = Logger.getLogger(SessionTokenManager.class.getName());
+  private static final String S3_EXPRESS = "s3express";
+  private static final String CREDENTIAL_PROVIDER_THREAD_NAME = "IamCredentialUpdater";
+  private static final int DEFAULT_MAX_CONNECTIONS_SECOND = 10;
+  private static final int DEFAULT_MAX_IDLE_TIME_SECOND = 20;
+  private static final int DEFAULT_MAX_LIFE_TIME_SECOND = 60;
+  private static final int DEFAULT_PENDING_ACQUIRE_TIMEOUT_SECOND = 60;
+  private static final int DEFAULT_EVICT_IN_BACKGROUND_SECOND = 120;
+  private static final int FETCH_CREDENTIALS_INTERVAL_MS = 100;
+  private static final boolean USE_DEFAULT_CREDENTIAL_PROVIDER = false;
   private Map<String, ConcurrentLinkedDeque<SessionCreds>> bucketCredentialMap = new ConcurrentHashMap<>();
   private ScheduledExecutorService es = Executors.newScheduledThreadPool(1, new ThreadFactory() {
-
     @Override
     public Thread newThread(Runnable r) {
       Thread th = new Thread(r);
@@ -66,30 +79,57 @@ public class SessionTokenManager {
   private HttpClient secureClient;
 
   public SessionTokenManager() {
-    ConnectionProvider provider = ConnectionProvider.builder("s3express").maxConnections(10)
-        .maxIdleTime(Duration.ofSeconds(20)).maxLifeTime(Duration.ofSeconds(60))
-        .pendingAcquireTimeout(Duration.ofSeconds(60)).evictInBackground(Duration.ofSeconds(120))
-        .build();
-    secureClient = HttpClient.create(provider).option(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
-        .option(ChannelOption.SO_LINGER, 0).secure();
+    this(new Properties());
+  }
+
+  public SessionTokenManager(Properties props) {
+    ConnectionProvider connectionProvider = getConnectionProvider(props);
+    secureClient = HttpClient.create(connectionProvider).option(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
+            .option(ChannelOption.SO_LINGER, 0).secure();
   }
 
   public static SessionTokenManager getInstance() {
     return mgr;
   }
 
-  public SessionCreds getCredentials(final String bucketname) throws InterruptedException {
-    ConcurrentLinkedDeque<SessionCreds> concurrentLinkedDeque = bucketCredentialMap.get(bucketname);
+  private static ConnectionProvider getConnectionProvider(Properties props) {
+    int maxConnections = Integer.parseInt(props.getProperty("maxConnections",
+            String.valueOf(DEFAULT_MAX_CONNECTIONS_SECOND)));
+    int maxIdleTime = Integer.parseInt(props.getProperty("maxIdleTime",
+            String.valueOf(DEFAULT_MAX_IDLE_TIME_SECOND)));
+    int maxLifeTime = Integer.parseInt(props.getProperty("maxLifeTime",
+            String.valueOf(DEFAULT_MAX_LIFE_TIME_SECOND)));
+    int pendingAcquireTimeout = Integer.parseInt(props.getProperty("pendingAcquireTimeout",
+            String.valueOf(DEFAULT_PENDING_ACQUIRE_TIMEOUT_SECOND)));
+    int evictInBackground = Integer.parseInt(props.getProperty("evictInBackground",
+            String.valueOf(DEFAULT_EVICT_IN_BACKGROUND_SECOND)));
+    return ConnectionProvider.builder(S3_EXPRESS)
+            .maxConnections(maxConnections)
+            .maxIdleTime(Duration.ofSeconds(maxIdleTime))
+            .maxLifeTime(Duration.ofSeconds(maxLifeTime))
+            .pendingAcquireTimeout(Duration.ofSeconds(pendingAcquireTimeout))
+            .evictInBackground(Duration.ofSeconds(evictInBackground))
+            .build();
+  }
+
+  /**
+   * Running credentials fetcher for the given bucket.
+   * @param bucketName
+   * @return SessionCreds
+   * @throws InterruptedException
+   */
+  public SessionCreds getCredentials(final String bucketName) throws InterruptedException {
+    ConcurrentLinkedDeque<SessionCreds> concurrentLinkedDeque = bucketCredentialMap.get(bucketName);
     if (concurrentLinkedDeque == null) {
       synchronized (bucketCredentialMap) {
-        concurrentLinkedDeque = bucketCredentialMap.get(bucketname);
+        concurrentLinkedDeque = bucketCredentialMap.get(bucketName);
         if (concurrentLinkedDeque == null) {
           concurrentLinkedDeque = new ConcurrentLinkedDeque<>();
           // start the scheduled task for credential refresh
           final ConcurrentLinkedDeque<SessionCreds> concurrentLinkedDequeRef = concurrentLinkedDeque;
           es.scheduleAtFixedRate(() -> {
             try {
-              SessionCreds fetchCredentials = fetchCredentials(bucketname);
+              SessionCreds fetchCredentials = fetchCredentials(bucketName);
               concurrentLinkedDequeRef.add(fetchCredentials);
               if (concurrentLinkedDequeRef.size() == 2) {
                 // purge existing credentials
@@ -99,58 +139,100 @@ public class SessionTokenManager {
               e.printStackTrace();
             }
           }, 0, 4, TimeUnit.MINUTES);
-          bucketCredentialMap.put(bucketname, concurrentLinkedDeque);
+          bucketCredentialMap.put(bucketName, concurrentLinkedDeque);
         }
       }
     }
     while (concurrentLinkedDeque.isEmpty()) {
-      Thread.sleep(100);
+      Thread.sleep(FETCH_CREDENTIALS_INTERVAL_MS);
     }
     return concurrentLinkedDeque.peek();
   }
 
-  protected SessionCreds fetchCredentials(String bucketname) throws Exception {
-    InstanceProfileCredentialsProvider credentialProvider = InstanceProfileCredentialsProvider
-        .builder().asyncCredentialUpdateEnabled(true).asyncThreadName("IamCredentialUpdater")
-        .build();
-    // Sign it...
-    AwsS3V4Signer signer = AwsS3V4Signer.create();
-    SdkHttpFullRequest req = SdkHttpFullRequest.builder()
-        .appendHeader("x-amz-create-session-mode", "ReadWrite")
-        .appendRawQueryParameter("session", "").method(SdkHttpMethod.GET)
-        .uri(URI.create("https://" + bucketname + ".s3express-use1-az5.us-east-1.amazonaws.com"))
-        .build();
-    SdkHttpFullRequest req1 = signer.sign(req,
-        AwsS3V4SignerParams.builder().awsCredentials(credentialProvider.resolveCredentials())
-            .signingName("s3express").signingRegion(Region.US_EAST_1).build());
-
-    Map<String, List<String>> headers2 = req1.headers();
+  /**
+   * Fetch the session credentials for the given bucket
+   * @param bucketName
+   * @return SessionCreds
+   * @throws Exception
+   */
+  protected SessionCreds fetchCredentials(String bucketName) throws Exception {
+    SdkHttpFullRequest createSessionRequest = generateCreateSessionRequest(bucketName);
+    Region region = Region.of(S3ExpressHelper.getRegionFromBucket(bucketName));
+    SdkHttpFullRequest signedCreateSessionRequest = signRequest(createSessionRequest, region);
+    Map<String, List<String>> signedCreateSessionRequestHeaders = signedCreateSessionRequest.headers();
     String awsResponse = secureClient.headers(headers -> {
-      for (Entry<String, List<String>> entry : headers2.entrySet()) {
+      for (Entry<String, List<String>> entry : signedCreateSessionRequestHeaders.entrySet()) {
         headers.set(entry.getKey(), entry.getValue().get(0));
       }
-    }).get().uri(req.getUri()).responseSingle((response, bytes) -> bytes.asString()).block();
-    
-    System.out.println("CredentialResponse\n"+awsResponse+"\n\n");
+    }).get().uri(createSessionRequest.getUri()).responseSingle((response, bytes) -> bytes.asString()).block();
+    logger.fine("AWS Credential Response: " + awsResponse);
+    return generateSessionCreds(awsResponse);
+  }
 
+  /**
+   * Sign the request with instance credentials.
+   * Override this method to use different credential provider.
+   * @param req
+   * @param region
+   * @return SdkHttpFullRequest signed request
+   */
+  public static SdkHttpFullRequest signRequest(SdkHttpFullRequest req, Region region) {
+    AwsS3V4Signer signer = AwsS3V4Signer.create();
+    if (USE_DEFAULT_CREDENTIAL_PROVIDER) {
+      DefaultCredentialsProvider credentialProvider = DefaultCredentialsProvider
+              .builder().asyncCredentialUpdateEnabled(true).build();
+      return signer.sign(req,
+              AwsS3V4SignerParams.builder().awsCredentials(credentialProvider.resolveCredentials())
+                      .signingName(S3_EXPRESS).signingRegion(region).build());
+    } else {
+      InstanceProfileCredentialsProvider credentialProvider = InstanceProfileCredentialsProvider
+              .builder().asyncCredentialUpdateEnabled(true).asyncThreadName(CREDENTIAL_PROVIDER_THREAD_NAME)
+              .build();
+      return signer.sign(req,
+              AwsS3V4SignerParams.builder().awsCredentials(credentialProvider.resolveCredentials())
+                      .signingName(S3_EXPRESS).signingRegion(region).build());
+    }
+  }
+
+  /**
+   * Generate the create session request
+   * @param bucketName
+   * @return SdkHttpFullRequest create session request
+   * @throws Exception
+   */
+  private static SdkHttpFullRequest generateCreateSessionRequest(String bucketName) throws Exception {
+    return SdkHttpFullRequest.builder()
+        .appendHeader("x-amz-create-session-mode", "ReadWrite")
+        .appendRawQueryParameter("session", "").method(SdkHttpMethod.GET)
+        .uri(URI.create(S3ExpressHelper.generateBucketUrl(bucketName)))
+        .build();
+  }
+
+  /**
+   * Generate the session credentials from the AWS response string
+   * @param awsResponse
+   * @return SessionCreds session credentials
+   * @throws Exception
+   */
+  private static SessionCreds generateSessionCreds(String awsResponse) throws Exception {
     DocumentBuilderFactory builderFactory = DocumentBuilderFactory.newInstance();
     DocumentBuilder builder = builderFactory.newDocumentBuilder();
     Document xmlDocument = builder.parse(new ByteArrayInputStream(awsResponse.getBytes()));
     XPath xPath = XPathFactory.newInstance().newXPath();
 
     SessionCreds creds = new SessionCreds();
-
     String expression = "/CreateSessionResult/Credentials/SessionToken";
     creds.token = ((Node) (xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE)))
-        .getTextContent();
+            .getTextContent();
 
     expression = "/CreateSessionResult/Credentials/SecretAccessKey";
     creds.secret = ((Node) (xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE)))
-        .getTextContent();
+            .getTextContent();
 
     expression = "/CreateSessionResult/Credentials/AccessKeyId";
     creds.key = ((Node) (xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE)))
-        .getTextContent();
+            .getTextContent();
+
     return creds;
   }
 
@@ -158,5 +240,4 @@ public class SessionTokenManager {
     SessionTokenManager token = new SessionTokenManager();
     token.fetchCredentials("test");
   }
-
 }
