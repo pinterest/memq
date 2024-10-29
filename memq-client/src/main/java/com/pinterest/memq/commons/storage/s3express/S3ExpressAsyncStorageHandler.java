@@ -94,6 +94,12 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   private static final String CONTENT_LENGTH = "Content-Length";
   private static final String CONTENT_MD5 = "Content-MD5";
   private static final String E_TAG = "ETag";
+  private static final String BUCKET = "bucket";
+  private static final String REGION = "region";
+  private static final String DEFAULT_REGION = "us-east-1";
+  private static final String DEFAULT_RETRY_TIMEOUT_MILLIS = "5000";
+  private static final String DEFAULT_RETRY_COUNT = "2";
+  private static final String DEFAULT_RETRY_COUNT_500S = "3";
   private static final String SEPARATOR = "_";
   private static final int LAST_ATTEMPT_TIMEOUT = 60_000;
   private Logger logger = Logger.getLogger(S3ExpressAsyncStorageHandler.class.getName());
@@ -128,13 +134,25 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   public S3ExpressAsyncStorageHandler() {
   }
 
-  @Override
-  public void initWriter(Properties outputHandlerConfig,
-                         String topic,
-                         MetricRegistry registry) throws Exception {
-    this.logger = Logger.getLogger(S3ExpressAsyncStorageHandler.class.getName() + "-" + topic);
-    this.topic = topic;
+  protected void initializeWriterRegistry(MetricRegistry registry) {
     this.registry = registry;
+    this.s3RequestCounter = registry.counter(
+        "output.s3express.requests");
+    this.s3RetryCounters = registry.counter(
+        "output.s3express.retries");
+    this.timeoutExceptionCounter = registry.counter(
+        "output.timeout.exceptions");
+    this.notificationFailureCounter = registry.counter(
+        "output.notification.fail");
+    this.notificationPublishingTimer = MiscUtils.oneMinuteWindowTimer(registry,
+        "output.notification.publish.latency");
+    this.s3PutLatencyTimer = MiscUtils.oneMinuteWindowTimer(registry,
+        "output.s3express.putobjectlatency");
+    this.s3PutInternalLatencyTimer = MiscUtils.oneMinuteWindowTimer(registry,
+        "output.s3express.internalPutobjectlatency");
+  }
+
+  protected void loadOutputHandlerConfigs(Properties outputHandlerConfig, String topic) throws Exception {
     this.dryrun = Boolean.parseBoolean(outputHandlerConfig.getProperty("dryrun", "false"));
     this.disableNotifications = Boolean
         .parseBoolean(outputHandlerConfig.getProperty("disableNotifications", "false"));
@@ -142,40 +160,37 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
       this.notificationSink = new KafkaNotificationSink();
       this.notificationSink.init(outputHandlerConfig);
     }
-    this.s3RequestCounter = registry.counter("output.s3express.requests");
-    this.timeoutExceptionCounter = registry.counter("output.timeout.exceptions");
-    this.notificationFailureCounter = registry.counter("output.notification.fail");
-    this.notificationPublishingTimer = MiscUtils.oneMinuteWindowTimer(registry,
-        "output.notification.publish.latency");
-    this.s3PutLatencyTimer = MiscUtils.oneMinuteWindowTimer(registry,
-        "output.s3express.putobjectlatency");
-    this.s3PutInternalLatencyTimer = MiscUtils.oneMinuteWindowTimer(registry,
-        "output.s3express.internalPutobjectlatency");
-    this.region = Region.of(outputHandlerConfig.getProperty("region", "us-east-1").toLowerCase());
-
-    this.bucket = outputHandlerConfig.getProperty("bucket");
+    this.region = Region.of(outputHandlerConfig.getProperty(REGION, DEFAULT_REGION).toLowerCase());
+    this.bucket = outputHandlerConfig.getProperty(BUCKET);
     if (bucket == null) {
       throw new ConfigurationException("Missing S3 bucket name");
     }
-
-    this.enableMD5 = Boolean.parseBoolean(outputHandlerConfig.getProperty("enableMD5", "true"));
+    this.enableMD5 = Boolean.parseBoolean(outputHandlerConfig.getProperty("enableMD5", "false"));
     if (!enableMD5) {
       logger.warning("MD5 hashes for uploads have been disabled");
     }
-
+    this.retryTimeoutMillis = Integer
+        .parseInt(outputHandlerConfig.getProperty("retryTimeoutMillis", DEFAULT_RETRY_TIMEOUT_MILLIS));
+    this.maxAttempts = Integer.parseInt(outputHandlerConfig.getProperty("retryCount", DEFAULT_RETRY_COUNT)) + 1;
+    this.maxS3Attempts = Integer.parseInt(outputHandlerConfig.getProperty("retryCount500s", DEFAULT_RETRY_COUNT_500S)) + 1;
     this.path = outputHandlerConfig.getProperty("path", topic);
+  }
+
+  @Override
+  public void initWriter(Properties outputHandlerConfig,
+                         String topic,
+                         MetricRegistry registry) throws Exception {
+    this.topic = topic;
+    initializeWriterRegistry(registry);
+    loadOutputHandlerConfigs(outputHandlerConfig, topic);
+    this.logger = Logger.getLogger(S3ExpressAsyncStorageHandler.class.getName() + "-" + topic);
+
     this.requestExecutor = Executors.newCachedThreadPool(new DaemonThreadFactory());
     this.executionTimer = Executors.newSingleThreadScheduledExecutor(new DaemonThreadFactory());
-    this.s3RetryCounters = registry.counter("output.s3express.retries");
-    this.retryTimeoutMillis = Integer
-        .parseInt(outputHandlerConfig.getProperty("retryTimeoutMillis", "5000"));
-    this.maxAttempts = Integer.parseInt(outputHandlerConfig.getProperty("retryCount", "2")) + 1;
-    this.maxS3Attempts = Integer.parseInt(outputHandlerConfig.getProperty("retryCount500s", "3")) + 1;
     ConnectionProvider provider = ConnectionProvider.builder("s3express").maxConnections(10)
         .maxIdleTime(Duration.ofSeconds(20)).maxLifeTime(Duration.ofSeconds(60))
         .pendingAcquireTimeout(Duration.ofSeconds(60)).evictInBackground(Duration.ofSeconds(120))
         .build();
-
     this.secureClient = HttpClient.create(provider).option(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
         .option(ChannelOption.SO_LINGER, 0).secure();
     logger.fine("Session Credentials: " + SessionTokenManager.getInstance().fetchCredentials(bucket));
@@ -184,13 +199,13 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   
   @Override
   public boolean reconfigure(Properties outputHandlerConfig) {
-    int newRetryTimeoutMillis = Integer
-        .parseInt(outputHandlerConfig.getProperty("retryTimeoutMillis", "5000"));
+    int newRetryTimeoutMillis = Integer.parseInt(
+        outputHandlerConfig.getProperty("retryTimeoutMillis", DEFAULT_RETRY_TIMEOUT_MILLIS));
     if (newRetryTimeoutMillis != retryTimeoutMillis) {
       retryTimeoutMillis = newRetryTimeoutMillis;
     }
-
-    int newMaxAttempts = Integer.parseInt(outputHandlerConfig.getProperty("retryCount", "2")) + 1;
+    int newMaxAttempts = Integer.parseInt(
+        outputHandlerConfig.getProperty("retryCount", DEFAULT_RETRY_COUNT)) + 1;
     if (newMaxAttempts != maxAttempts) {
       maxAttempts = newMaxAttempts;
     }
@@ -200,7 +215,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   @Override
   public void initReader(Properties properties, MetricRegistry registry) throws Exception {
     super.initReader(properties, registry);
-    this.bucket = properties.getProperty("bucket");
+    this.bucket = properties.getProperty(BUCKET);
     if (bucket == null) {
       throw new ConfigurationException("Missing S3 bucket name");
     }
@@ -220,6 +235,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
       final int currentRetryTimeoutMs = retryTimeoutMillis;
 
       int contentLength = batchHeader.writerIndex() + objectSize;
+      // TODO: calculate contentMD5
       String contentMD5 = null;
       UploadResult result = null;
       boolean hasSucceeded = false;
@@ -352,17 +368,14 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     SdkHttpFullRequest req = SdkHttpFullRequest.builder().method(SdkHttpMethod.PUT)
         .appendHeader("x-amz-s3session-token", credentials.token)
         .appendHeader(CONTENT_LENGTH, String.valueOf(contentLength))
-        .uri(URI.create(
-            baseConnStr + key))
+        .uri(URI.create(baseConnStr + key))
         .build();
     final SdkHttpFullRequest req1 = signer.sign(req,
         AwsS3V4SignerParams.builder().awsCredentials(new AwsCredentials() {
-
           @Override
           public String secretAccessKey() {
             return credentials.secret;
           }
-
           @Override
           public String accessKeyId() {
             return credentials.key;
