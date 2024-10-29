@@ -235,7 +235,6 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
       final int currentRetryTimeoutMs = retryTimeoutMillis;
 
       int contentLength = batchHeader.writerIndex() + objectSize;
-      // TODO: calculate contentMD5
       String contentMD5 = null;
       UploadResult result = null;
       boolean hasSucceeded = false;
