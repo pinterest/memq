@@ -42,7 +42,6 @@ import java.util.stream.Collectors;
 
 import javax.naming.ConfigurationException;
 
-import org.apache.commons.codec.digest.DigestUtils;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscription;
 
@@ -93,16 +92,10 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   private static final int SUCCESS_CODE = 200;
   private static final String SLASH = "/";
   private static final String CONTENT_LENGTH = "Content-Length";
-  private static final String APPLICATION_OCTET_STREAM = "application/octet-stream";
   private static final String CONTENT_MD5 = "Content-MD5";
-  private static final String CONTENT_TYPE = "Content-Type";
   private static final String E_TAG = "ETag";
   private static final String SEPARATOR = "_";
   private static final int LAST_ATTEMPT_TIMEOUT = 60_000;
-
-  static {
-    java.security.Security.setProperty("networkaddress.cache.ttl", "1");
-  }
   private Logger logger = Logger.getLogger(S3ExpressAsyncStorageHandler.class.getName());
   private String path;
   private String bucket;
@@ -111,7 +104,6 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   @SuppressWarnings("unused")
   private boolean dryrun;
   private boolean disableNotifications;
-  private boolean enableHashing;
   private boolean enableMD5;
   private volatile int maxAttempts;
   private volatile int maxS3Attempts;
@@ -120,7 +112,6 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   private MetricRegistry registry;
   private ExecutorService requestExecutor;
   private ScheduledExecutorService executionTimer;
-
   private Timer s3PutLatencyTimer;
   private Timer s3PutInternalLatencyTimer;
   private Timer notificationPublishingTimer;
@@ -128,8 +119,11 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   private Counter s3RequestCounter;
   private Counter notificationFailureCounter;
   private Counter timeoutExceptionCounter;
-  
   private String baseConnStr = null;
+
+  static {
+    java.security.Security.setProperty("networkaddress.cache.ttl", "1");
+  }
 
   public S3ExpressAsyncStorageHandler() {
   }
@@ -158,7 +152,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     this.s3PutInternalLatencyTimer = MiscUtils.oneMinuteWindowTimer(registry,
         "output.s3express.internalPutobjectlatency");
     this.region = Region.of(outputHandlerConfig.getProperty("region", "us-east-1").toLowerCase());
-    
+
     this.bucket = outputHandlerConfig.getProperty("bucket");
     if (bucket == null) {
       throw new ConfigurationException("Missing S3 bucket name");
@@ -167,12 +161,6 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     this.enableMD5 = Boolean.parseBoolean(outputHandlerConfig.getProperty("enableMD5", "true"));
     if (!enableMD5) {
       logger.warning("MD5 hashes for uploads have been disabled");
-    }
-
-    this.enableHashing = Boolean
-        .parseBoolean(outputHandlerConfig.getProperty("enableHashing", "true"));
-    if (!enableHashing) {
-      logger.warning("Hashing has been disabled for object uploads");
     }
 
     this.path = outputHandlerConfig.getProperty("path", topic);
@@ -190,9 +178,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
 
     this.secureClient = HttpClient.create(provider).option(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
         .option(ChannelOption.SO_LINGER, 0).secure();
-
-    SessionCreds session = SessionTokenManager.getInstance().fetchCredentials(bucket);
-    logger.info("Tested fetch credentials:" + session);
+    logger.fine("Session Credentials: " + SessionTokenManager.getInstance().fetchCredentials(bucket));
     baseConnStr = S3ExpressHelper.generateBucketUrl(bucket);
   }
   
@@ -408,7 +394,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
           responseCode = ERROR_CODE;
         }
       } catch (Exception e) {
-        logger.log(Level.SEVERE, "Unable to parse the returnedetag", e);
+        logger.log(Level.SEVERE, "Unable to parse the returned etag", e);
       }
     }
     return new UploadResult(key, responseCode, responseHeaders, internalLatency.stop(), count);
@@ -463,7 +449,8 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
 
   /**
    * Create upload path for s3 express data object
-   * Example: 21-01-01-01/topic/1_1_0
+   * Example: 241029-17/topic/1_1_0
+   * You can override this method to customize the key
    * @param firstMessageClientRequestId
    * @param firstMessageServerRequestId
    * @param attempt

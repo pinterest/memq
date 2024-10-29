@@ -42,7 +42,7 @@ import org.w3c.dom.Node;
 import io.netty.channel.ChannelOption;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
-import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider;
 import software.amazon.awssdk.auth.signer.AwsS3V4Signer;
@@ -66,7 +66,9 @@ public class SessionTokenManager {
   private static final int DEFAULT_PENDING_ACQUIRE_TIMEOUT_SECOND = 60;
   private static final int DEFAULT_EVICT_IN_BACKGROUND_SECOND = 120;
   private static final int FETCH_CREDENTIALS_INTERVAL_MS = 100;
-  private static final boolean USE_DEFAULT_CREDENTIAL_PROVIDER = false;
+  private static final int SOCKET_SEND_BUFFER_BYTES = 4 * 1024 * 1024;
+  private static final int MAX_CREDS_PER_BUCKET = 2;
+  private String credentialProviderType = "instance";
   private Map<String, ConcurrentLinkedDeque<SessionCreds>> bucketCredentialMap = new ConcurrentHashMap<>();
   private ScheduledExecutorService es = Executors.newScheduledThreadPool(1, new ThreadFactory() {
     @Override
@@ -84,8 +86,9 @@ public class SessionTokenManager {
 
   public SessionTokenManager(Properties props) {
     ConnectionProvider connectionProvider = getConnectionProvider(props);
-    secureClient = HttpClient.create(connectionProvider).option(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
-            .option(ChannelOption.SO_LINGER, 0).secure();
+    secureClient = HttpClient.create(connectionProvider)
+        .option(ChannelOption.SO_SNDBUF, SOCKET_SEND_BUFFER_BYTES)
+        .option(ChannelOption.SO_LINGER, 0).secure();
   }
 
   public static SessionTokenManager getInstance() {
@@ -114,8 +117,10 @@ public class SessionTokenManager {
 
   /**
    * Running credentials fetcher for the given bucket.
+   * Each bucket has a deque of credentials.
+   * The deque makes sure new credentials are added periodically while the old one is still valid.
    * @param bucketName
-   * @return SessionCreds
+   * @return SessionCreds session credentials
    * @throws InterruptedException
    */
   public SessionCreds getCredentials(final String bucketName) throws InterruptedException {
@@ -131,7 +136,7 @@ public class SessionTokenManager {
             try {
               SessionCreds fetchCredentials = fetchCredentials(bucketName);
               concurrentLinkedDequeRef.add(fetchCredentials);
-              if (concurrentLinkedDequeRef.size() == 2) {
+              if (concurrentLinkedDequeRef.size() == MAX_CREDS_PER_BUCKET) {
                 // purge existing credentials
                 concurrentLinkedDequeRef.poll();
               }
@@ -150,6 +155,34 @@ public class SessionTokenManager {
   }
 
   /**
+   * Set the credential provider type
+   * @param credentialProviderType
+   */
+  public void setCredentialProviderType(String credentialProviderType) {
+    this.credentialProviderType = credentialProviderType;
+  }
+
+  /**
+   * Get the credential provider based on the type.
+   * Default credential provider is mainly used when testing.
+   * Instance credential provider is mainly used when the service is deployed to EC2 instances.
+   * @return AwsCredentialsProvider
+   * @throws IllegalArgumentException
+   */
+  public AwsCredentialsProvider getAwsCredentialsProvider() throws IllegalArgumentException {
+    if (credentialProviderType.equals("default")) {
+      return DefaultCredentialsProvider
+          .builder().asyncCredentialUpdateEnabled(true).build();
+    } else if (credentialProviderType.equals("instance")) {
+      return InstanceProfileCredentialsProvider
+          .builder().asyncCredentialUpdateEnabled(true).asyncThreadName(CREDENTIAL_PROVIDER_THREAD_NAME)
+          .build();
+    } else {
+        throw new IllegalArgumentException("Unsupported credential provider type: " + credentialProviderType);
+    }
+  }
+
+  /**
    * Fetch the session credentials for the given bucket
    * @param bucketName
    * @return SessionCreds
@@ -157,8 +190,10 @@ public class SessionTokenManager {
    */
   protected SessionCreds fetchCredentials(String bucketName) throws Exception {
     SdkHttpFullRequest createSessionRequest = generateCreateSessionRequest(bucketName);
+    AwsCredentialsProvider credentialsProvider = getAwsCredentialsProvider();
     Region region = Region.of(S3ExpressHelper.getRegionFromBucket(bucketName));
-    SdkHttpFullRequest signedCreateSessionRequest = signRequest(createSessionRequest, region);
+    SdkHttpFullRequest signedCreateSessionRequest = signRequest(
+        createSessionRequest, credentialsProvider, region);
     Map<String, List<String>> signedCreateSessionRequestHeaders = signedCreateSessionRequest.headers();
     String awsResponse = secureClient.headers(headers -> {
       for (Entry<String, List<String>> entry : signedCreateSessionRequestHeaders.entrySet()) {
@@ -171,27 +206,15 @@ public class SessionTokenManager {
 
   /**
    * Sign the request with instance credentials.
-   * Override this method to use different credential provider.
    * @param req
    * @param region
    * @return SdkHttpFullRequest signed request
    */
-  public static SdkHttpFullRequest signRequest(SdkHttpFullRequest req, Region region) {
+  public static SdkHttpFullRequest signRequest(SdkHttpFullRequest req, AwsCredentialsProvider credentialProvider, Region region) {
     AwsS3V4Signer signer = AwsS3V4Signer.create();
-    if (USE_DEFAULT_CREDENTIAL_PROVIDER) {
-      DefaultCredentialsProvider credentialProvider = DefaultCredentialsProvider
-              .builder().asyncCredentialUpdateEnabled(true).build();
-      return signer.sign(req,
-              AwsS3V4SignerParams.builder().awsCredentials(credentialProvider.resolveCredentials())
-                      .signingName(S3_EXPRESS).signingRegion(region).build());
-    } else {
-      InstanceProfileCredentialsProvider credentialProvider = InstanceProfileCredentialsProvider
-              .builder().asyncCredentialUpdateEnabled(true).asyncThreadName(CREDENTIAL_PROVIDER_THREAD_NAME)
-              .build();
-      return signer.sign(req,
-              AwsS3V4SignerParams.builder().awsCredentials(credentialProvider.resolveCredentials())
-                      .signingName(S3_EXPRESS).signingRegion(region).build());
-    }
+    return signer.sign(req,
+            AwsS3V4SignerParams.builder().awsCredentials(credentialProvider.resolveCredentials())
+                    .signingName(S3_EXPRESS).signingRegion(region).build());
   }
 
   /**
@@ -220,24 +243,24 @@ public class SessionTokenManager {
     Document xmlDocument = builder.parse(new ByteArrayInputStream(awsResponse.getBytes()));
     XPath xPath = XPathFactory.newInstance().newXPath();
 
-    SessionCreds creds = new SessionCreds();
     String expression = "/CreateSessionResult/Credentials/SessionToken";
-    creds.token = ((Node) (xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE)))
+    String token = ((Node) (xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE)))
             .getTextContent();
 
     expression = "/CreateSessionResult/Credentials/SecretAccessKey";
-    creds.secret = ((Node) (xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE)))
+    String secret = ((Node) (xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE)))
             .getTextContent();
 
     expression = "/CreateSessionResult/Credentials/AccessKeyId";
-    creds.key = ((Node) (xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE)))
+    String key = ((Node) (xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE)))
             .getTextContent();
 
-    return creds;
+    return new SessionCreds(key, secret, token);
   }
 
   public static void main(String[] args) throws Exception {
     SessionTokenManager token = new SessionTokenManager();
-    token.fetchCredentials("test");
+    String bucketName = args[0];
+    token.fetchCredentials(bucketName);
   }
 }

@@ -16,11 +16,44 @@
 package com.pinterest.memq.commons.storage.s3express;
 
 /**
- * POJO for holding session credentials
+ * Hold AWS Session Credentials
  */
 public class SessionCreds {
 
   public String key, secret, token;
+
+  public SessionCreds() {
+  }
+
+  public SessionCreds(String key, String secret, String token) {
+    this.key = key;
+    this.secret = secret;
+    this.token = token;
+  }
+
+  public void setKey(String key) {
+    this.key = key;
+  }
+
+  public void setSecret(String secret) {
+      this.secret = secret;
+  }
+
+  public void setToken(String token) {
+      this.token = token;
+  }
+
+  public String getKey() {
+      return key;
+  }
+
+  public String getSecret() {
+      return secret;
+  }
+
+  public String getToken() {
+      return token;
+  }
 
   @Override
   public String toString() {
