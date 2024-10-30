@@ -211,6 +211,7 @@ public class ReactorNettyRequestClient implements RequestClient {
     try {
       return tryObjectGetInterAsStream(request.getUri(), request.headers());
     } catch (Exception use) {
+      logger.error("Error fetching object: " + request.getUri());
       throw new IOException(use);
     }
   }
