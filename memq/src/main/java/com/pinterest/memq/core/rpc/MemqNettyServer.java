@@ -131,8 +131,7 @@ public class MemqNettyServer {
           pipeline.addLast(new IdleStateHandler(0, 0, idleTimeoutSec, TimeUnit.SECONDS));
           pipeline.addLast(new ServerConnectionLifecycleHandler());
           pipeline.addLast(trafficShapingHandler);
-          logger.info("[TEST] Adding traffic shaping handler with writeLimit:" + writeLimit
-              + " readLimit:" + readLimit);
+          logger.info("[TEST] Adding ExperimentGlobalTrafficShapingHandler to channel: " + channel.id());
           if (sslConfig != null) {
             KeyManagerFactory kmf = MemqUtils.extractKMFFromSSLConfig(sslConfig);
             TrustManagerFactory tmf = MemqUtils.extractTMPFromSSLConfig(sslConfig);

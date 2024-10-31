@@ -39,10 +39,14 @@ public class ExperimentGlobalTrafficShapingHandler extends GlobalTrafficShapingH
         Channel channel = ctx.channel();
         ChannelConfig config = channel.config();
         boolean autoReadStartState = config.isAutoRead();
+        long before = System.currentTimeMillis();
         super.channelRead(ctx, msg);
         boolean autoReadEndState = config.isAutoRead();
+        long now = System.currentTimeMillis();
         if (autoReadStartState != autoReadEndState) {
-            logger.info("[TEST] Channel " + channel.id() + "autoRead state changed from " + autoReadStartState + " to " + autoReadEndState + " after channelRead");
+            logger.info(String.format(
+                "[TEST] Channel %s autoRead state changed from %s to %s after channelRead, took %d ms, before: %d, after: %d",
+                channel.id(), autoReadStartState, autoReadEndState, now - before, before, now));
         }
     }
 }
