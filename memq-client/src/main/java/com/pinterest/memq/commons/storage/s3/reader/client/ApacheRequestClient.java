@@ -30,6 +30,7 @@ import io.netty.buffer.PooledByteBufAllocator;
 import com.codahale.metrics.MetricRegistry;
 
 import org.apache.commons.compress.utils.IOUtils;
+import org.apache.commons.lang3.NotImplementedException;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.ServiceUnavailableRetryStrategy;
 import org.apache.http.client.methods.CloseableHttpResponse;
@@ -40,6 +41,8 @@ import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.protocol.HttpContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import software.amazon.awssdk.http.SdkHttpFullRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
@@ -155,5 +158,15 @@ public class ApacheRequestClient implements RequestClient {
     public long getRetryInterval() {
       return 100;
     }
+  }
+
+  @Override
+  public InputStream tryObjectGet(SdkHttpFullRequest request) throws IOException {
+    throw new NotImplementedException();
+  }
+
+  @Override
+  public ByteBuf tryObjectGetAsBuffer(SdkHttpFullRequest request) throws IOException {
+    throw new NotImplementedException();
   }
 }

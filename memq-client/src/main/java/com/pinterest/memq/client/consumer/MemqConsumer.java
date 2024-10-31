@@ -420,7 +420,7 @@ public final class MemqConsumer<K, V> implements Closeable {
       notificationSourceProps.setProperty(ConsumerConfig.GROUP_ID_CONFIG, groupId);
       notificationSourceProps.putAll(storageProperties);
       storageHandler = StorageHandlerTable.getClass(topicMetadata.getStorageHandlerName())
-          .newInstance();
+              .getDeclaredConstructor().newInstance();
       storageHandler.initReader(storageProperties, metricRegistry);
     }
     if (notificationSource == null) {
