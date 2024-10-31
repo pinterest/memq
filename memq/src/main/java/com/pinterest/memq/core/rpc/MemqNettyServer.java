@@ -108,9 +108,11 @@ public class MemqNettyServer {
 
       long writeLimit = 0;
       long readLimit = 1024 * 1024 * 5;
+      long checkIntervalMs = 10000;
       ExperimentGlobalTrafficShapingHandler trafficShapingHandler =
-          new ExperimentGlobalTrafficShapingHandler(childGroup, writeLimit, readLimit);
-      logger.info("[TEST] Initialize ExperimentGlobalTrafficShapingHandler");
+          new ExperimentGlobalTrafficShapingHandler(childGroup, writeLimit, readLimit, checkIntervalMs);
+      logger.info("[TEST] Initialize ExperimentGlobalTrafficShapingHandler with writeLimit:" + writeLimit
+          + " readLimit:" + readLimit + " checkIntervalMs:" + checkIntervalMs);
 
       if (useEpoll) {
         serverBootstrap.channel(EpollServerSocketChannel.class);
