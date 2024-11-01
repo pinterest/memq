@@ -19,8 +19,18 @@ import java.util.Set;
 
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicConfig;
+import com.pinterest.memq.core.config.MemqConfig;
 
 public abstract class BalanceStrategy {
+  protected MemqConfig memqConfig;
 
   public abstract Set<Broker> balance(Set<TopicConfig> topics, Set<Broker> brokers);
+
+  public void setMemqConfig(MemqConfig memqConfig) {
+    this.memqConfig = memqConfig;
+  }
+
+  public MemqConfig getMemqConfig() {
+    return this.memqConfig;
+  }
 }

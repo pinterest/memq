@@ -55,6 +55,8 @@ public class Balancer implements Runnable {
     this.readBalanceStrategy = config.getClusteringConfig().isEnableExpiration()
         ? new ExpirationPartitionBalanceStrategyWithAssignmentFreeze()
         : new PartitionBalanceStrategy();
+    this.writeBalanceStrategy.setMemqConfig(config);
+    this.readBalanceStrategy.setMemqConfig(config);
   }
 
   @Override
