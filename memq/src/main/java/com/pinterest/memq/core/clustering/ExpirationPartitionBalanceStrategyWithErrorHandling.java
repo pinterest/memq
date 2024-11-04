@@ -15,10 +15,16 @@
  */
 package com.pinterest.memq.core.clustering;
 
+import com.codahale.metrics.Metric;
 import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.ScheduledReporter;
+import com.pinterest.memq.commons.mon.OpenTSDBClient;
+import com.pinterest.memq.commons.mon.OpenTSDBReporter;
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicAssignment;
 import com.pinterest.memq.commons.protocol.TopicConfig;
+import com.pinterest.memq.core.config.OpenTsdbConfiguration;
+import com.pinterest.memq.core.utils.MiscUtils;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -29,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
@@ -41,7 +48,7 @@ import java.util.stream.Collectors;
 public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extends BalanceStrategy {
 
   private long defaultExpirationTime = 300_000; // 5 minutes
-  private MetricRegistry registry = new MetricRegistry();
+  private MetricRegistry registry;
   private static final String ALERT_METRIC = "governor.balancer.error";
   private static final int DEFAULT_CAPACITY = 200;
   private static final Logger logger = Logger.getLogger(ExpirationPartitionBalanceStrategyWithErrorHandling.class.getName());
@@ -183,6 +190,41 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
   protected abstract Set<Broker> handleBalancerError(Set<TopicConfig> topics, Set<Broker> brokers);
 
   protected void sendAlert() {
-    registry.counter(ALERT_METRIC).inc();
+    logger.info("Sending alert for balancer error.");
+    if (this.registry == null) {
+      try {
+        initializeMetricsRegistry();
+      } catch (Exception e) {
+        logger.severe("Failed to initialize metricsReporter. Cannot send alert." + e.getMessage());
+        return;
+      }
+    }
+    this.registry.counter(ALERT_METRIC).inc();
+  }
+
+  /**
+   * Initialize the metrics registry and the reporter.
+   * @throws Exception if the reporter cannot be initialized.
+   */
+  protected void initializeMetricsRegistry() throws Exception {
+    logger.info("Initializing metrics registry for balancer error.");
+    this.registry = new MetricRegistry();
+    String localHostname = MiscUtils.getHostname();
+    OpenTsdbConfiguration openTsdbConfiguration = this.memqConfig.getOpenTsdbConfig();
+    OpenTSDBClient openTSDBClient = new OpenTSDBClient(
+        openTsdbConfiguration.getHost(),
+        openTsdbConfiguration.getPort()
+    );
+    ScheduledReporter reporter = OpenTSDBReporter.createReporter(
+        "netty",
+        this.registry,
+        ALERT_METRIC,
+        (String name, Metric metric) -> true,
+        TimeUnit.SECONDS,
+        TimeUnit.SECONDS,
+        openTSDBClient,
+        localHostname
+    );
+    reporter.start(openTsdbConfiguration.getFrequencyInSeconds(), TimeUnit.SECONDS);
   }
 }
