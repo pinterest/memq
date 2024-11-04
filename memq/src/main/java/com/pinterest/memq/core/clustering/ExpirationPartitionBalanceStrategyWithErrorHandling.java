@@ -190,6 +190,7 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
   protected abstract Set<Broker> handleBalancerError(Set<TopicConfig> topics, Set<Broker> brokers);
 
   protected void sendAlert() {
+    logger.info("[TEST] sendAlert called.");
     if (this.registry == null) {
       try {
         initializeMetricsRegistry();
@@ -198,7 +199,9 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
         return;
       }
     }
+    logger.info("[TEST] Sending alert.");
     this.registry.counter(ALERT_METRIC).inc();
+    logger.info("[TEST] Alert sent.");
   }
 
   /**
@@ -206,6 +209,7 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
    * @throws Exception if the reporter cannot be initialized.
    */
   protected void initializeMetricsRegistry() throws Exception {
+    logger.info("[TEST] Start metrics reporter initialization.");
     this.registry = new MetricRegistry();
     String localHostname = MiscUtils.getHostname();
     OpenTsdbConfiguration openTsdbConfiguration = this.memqConfig.getOpenTsdbConfig();
@@ -225,5 +229,6 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
     );
     reporter.start(openTsdbConfiguration.getFrequencyInSeconds(), TimeUnit.SECONDS);
     logger.info("ExpirationPartitionBalance error reporter initialized.");
+    logger.info("[TEST] Finished metrics reporter initialization.");
   }
 }
