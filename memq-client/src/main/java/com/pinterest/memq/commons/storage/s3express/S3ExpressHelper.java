@@ -64,7 +64,9 @@ public class S3ExpressHelper {
     /**
      * Get the current date in the format of "yyMMdd-HH"
      * This is used to generate the hourly folder name. It helps the cleaning job to clean up the old data.
-     * @return the current date in the format of "yyMMdd-HH"
+     * Until 2024/11/05, AWS S3Express does not support object lifecycle policy. We need to clean up the old data manually.
+     * With this setup, we can easily clean up the old data by deleting the hourly folder.
+     * @return the current date in the format of "yyMMdd-HH", e.g. "241105-12" for 2024/11/05 12:00 PM UTC.
      */
     public static String getCurrentDateHr() {
         return new SimpleDateFormat("yyMMdd-HH").format(new java.util.Date());

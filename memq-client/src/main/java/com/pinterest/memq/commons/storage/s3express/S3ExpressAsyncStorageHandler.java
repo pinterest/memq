@@ -87,7 +87,6 @@ import software.amazon.awssdk.regions.Region;
 public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
 
   private static final int HIGH_LATENCY_THRESHOLD = 5;
-  private static final int NANOSECONDS_TO_SECONDS = 1000_000_000;
   private static final int ERROR_CODE = 500;
   private static final int SUCCESS_CODE = 200;
   private static final String SLASH = "/";
@@ -128,6 +127,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   private String baseConnStr = null;
 
   static {
+    // Set the DNS cache TTL to 1 second to avoid stale DNS entries
     java.security.Security.setProperty("networkaddress.cache.ttl", "1");
   }
 
@@ -187,9 +187,12 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
 
     this.requestExecutor = Executors.newCachedThreadPool(new DaemonThreadFactory());
     this.executionTimer = Executors.newSingleThreadScheduledExecutor(new DaemonThreadFactory());
-    ConnectionProvider provider = ConnectionProvider.builder("s3express").maxConnections(10)
-        .maxIdleTime(Duration.ofSeconds(20)).maxLifeTime(Duration.ofSeconds(60))
-        .pendingAcquireTimeout(Duration.ofSeconds(60)).evictInBackground(Duration.ofSeconds(120))
+    ConnectionProvider provider = ConnectionProvider.builder("s3express")
+        .maxConnections(10)
+        .maxIdleTime(Duration.ofSeconds(20))
+        .maxLifeTime(Duration.ofSeconds(60))
+        .pendingAcquireTimeout(Duration.ofSeconds(60))
+        .evictInBackground(Duration.ofSeconds(120))
         .build();
     this.secureClient = HttpClient.create(provider).option(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
         .option(ChannelOption.SO_LINGER, 0).secure();
@@ -334,10 +337,10 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
           publishTime.stop();
         }
       }
-      long latency = timer.stop() / NANOSECONDS_TO_SECONDS;
-      if (latency > HIGH_LATENCY_THRESHOLD) {
+      long latencySec = TimeUnit.NANOSECONDS.toSeconds(timer.stop());
+      if (latencySec > HIGH_LATENCY_THRESHOLD) {
         final String s3path = "s3express://" + bucket + SLASH + result.getKey();
-        logger.info("Uploaded " + s3path + " latency(" + latency + ")s, successful on attempt "
+        logger.info("Uploaded " + s3path + " latency(" + latencySec + ")s, successful on attempt "
             + result.getAttempt() + ", total tasks: " + futureMap.size());
       }
     } catch (Exception e) {
