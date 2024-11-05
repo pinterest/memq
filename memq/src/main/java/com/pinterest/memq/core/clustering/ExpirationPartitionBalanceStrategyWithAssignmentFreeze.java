@@ -3,6 +3,7 @@ package com.pinterest.memq.core.clustering;
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicAssignment;
 import com.pinterest.memq.commons.protocol.TopicConfig;
+import com.pinterest.memq.core.config.MemqConfig;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -14,6 +15,10 @@ public class ExpirationPartitionBalanceStrategyWithAssignmentFreeze extends Expi
 
     private static final Logger logger =
         Logger.getLogger(ExpirationPartitionBalanceStrategyWithAssignmentFreeze.class.getName());
+
+    public ExpirationPartitionBalanceStrategyWithAssignmentFreeze(MemqConfig memqConfig) {
+        super(memqConfig);
+    }
 
     /**
      * Use the existing assignment and send alert.

@@ -23,6 +23,7 @@ import com.pinterest.memq.commons.mon.OpenTSDBReporter;
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicAssignment;
 import com.pinterest.memq.commons.protocol.TopicConfig;
+import com.pinterest.memq.core.config.MemqConfig;
 import com.pinterest.memq.core.config.OpenTsdbConfiguration;
 import com.pinterest.memq.core.utils.MiscUtils;
 
@@ -49,10 +50,14 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
 
   private long defaultExpirationTime = 300_000; // 5 minutes
   private MetricRegistry registry;
-  private static final String ALERT_METRIC = "governor.balancer.error";
+  private static final String ALERT_METRIC = "balancer.error";
   private static final int DEFAULT_CAPACITY = 200;
   private static final Logger logger = Logger.getLogger(ExpirationPartitionBalanceStrategyWithErrorHandling.class.getName());
   private Map<String, Integer> instanceTypeThroughputMap = new HashMap<>();
+
+  public ExpirationPartitionBalanceStrategyWithErrorHandling(MemqConfig memqConfig) {
+    super(memqConfig);
+  }
 
   @Override
   public Set<Broker> balance(Set<TopicConfig> topics, Set<Broker> brokers) {
@@ -196,10 +201,11 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
         initializeMetricsRegistry();
       } catch (Exception e) {
         logger.severe("Failed to initialize metricsReporter. Cannot send alert." + e.getMessage());
-        return;
       }
     }
-    this.registry.counter(ALERT_METRIC).inc();
+    if (this.registry != null) {
+      this.registry.counter(ALERT_METRIC).inc();
+    }
   }
 
   /**
@@ -210,13 +216,22 @@ public abstract class ExpirationPartitionBalanceStrategyWithErrorHandling extend
     logger.info("Initializing metrics registry for balancer error.");
     this.registry = new MetricRegistry();
     String localHostname = MiscUtils.getHostname();
+    if (this.memqConfig == null) {
+      // MemqConfig should not be null. This is an error case.
+      throw new Exception("MemqConfig is null. Cannot initialize metrics reporter.");
+    }
+    if (this.memqConfig.getOpenTsdbConfig() == null) {
+      // MemqConfig may not have OpenTsdbConfig. In that case, we cannot initialize metrics reporter.
+      logger.warning("OpenTsdbConfig is null. Cannot initialize metrics reporter.");
+      return;
+    }
     OpenTsdbConfiguration openTsdbConfiguration = this.memqConfig.getOpenTsdbConfig();
     OpenTSDBClient openTSDBClient = new OpenTSDBClient(
         openTsdbConfiguration.getHost(),
         openTsdbConfiguration.getPort()
     );
     ScheduledReporter reporter = OpenTSDBReporter.createReporter(
-        "netty",
+        "governor",
         this.registry,
         ALERT_METRIC,
         (String name, Metric metric) -> true,
