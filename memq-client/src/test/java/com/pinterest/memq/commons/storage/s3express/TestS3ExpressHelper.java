@@ -3,7 +3,6 @@ package com.pinterest.memq.commons.storage.s3express;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
 
 public class TestS3ExpressHelper {
     @Test
@@ -37,11 +36,5 @@ public class TestS3ExpressHelper {
     public void testGetRegionFromBucket() throws Exception {
         String bucketName = "testbucket--use1-az5--x-s3";
         assertEquals("us-east-1", S3ExpressHelper.getRegionFromBucket(bucketName));
-    }
-
-    @Test
-    public void testGetCurrentDateHr() {
-        String currentDateHr = S3ExpressHelper.getCurrentDateHr();
-        assertTrue(currentDateHr.matches("\\d{2}\\d{2}\\d{2}-\\d{2}"));
     }
 }

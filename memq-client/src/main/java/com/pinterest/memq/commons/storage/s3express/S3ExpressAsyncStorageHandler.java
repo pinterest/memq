@@ -42,6 +42,8 @@ import java.util.stream.Collectors;
 
 import javax.naming.ConfigurationException;
 
+import com.pinterest.memq.commons.storage.s3express.keygenerator.DateHourKeyGenerator;
+import com.pinterest.memq.commons.storage.s3express.keygenerator.S3ExpressObjectKeyGenerator;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscription;
 
@@ -99,7 +101,6 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   private static final String DEFAULT_RETRY_TIMEOUT_MILLIS = "5000";
   private static final String DEFAULT_RETRY_COUNT = "2";
   private static final String DEFAULT_RETRY_COUNT_500S = "3";
-  private static final String SEPARATOR = "_";
   private static final int LAST_ATTEMPT_TIMEOUT = 60_000;
   private Logger logger = Logger.getLogger(S3ExpressAsyncStorageHandler.class.getName());
   private String path;
@@ -125,6 +126,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
   private Counter notificationFailureCounter;
   private Counter timeoutExceptionCounter;
   private String baseConnStr = null;
+  private S3ExpressObjectKeyGenerator keyGenerator;
 
   static {
     // Set the DNS cache TTL to 1 second to avoid stale DNS entries
@@ -174,6 +176,7 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     this.maxAttempts = Integer.parseInt(outputHandlerConfig.getProperty("retryCount", DEFAULT_RETRY_COUNT)) + 1;
     this.maxS3Attempts = Integer.parseInt(outputHandlerConfig.getProperty("retryCount500s", DEFAULT_RETRY_COUNT_500S)) + 1;
     this.path = outputHandlerConfig.getProperty("path", topic);
+    this.keyGenerator = new DateHourKeyGenerator(path);
   }
 
   @Override
@@ -252,8 +255,11 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
             : currentRetryTimeoutMs;
 
         final int k = attempt;
-        final String key = createKey(firstMessage.getClientRequestId(),
-            firstMessage.getServerRequestId(), k).toString();
+        final String key = getKeyGenerator().generateObjectKey(
+            firstMessage.getClientRequestId(),
+            firstMessage.getServerRequestId(),
+            k
+        );
         CompletableFuture<UploadResult> task = new CompletableFuture<>();
         Callable<UploadResult> uploadAttempt = () -> {
           try {
@@ -462,31 +468,6 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
     }
   }
 
-  /**
-   * Create upload path for s3 express data object
-   * Example: 241029-17/topic/1_1_0
-   * You can override this method to customize the key
-   * @param firstMessageClientRequestId
-   * @param firstMessageServerRequestId
-   * @param attempt
-   * @return
-   */
-  private StringBuilder createKey(long firstMessageClientRequestId,
-                                  long firstMessageServerRequestId,
-                                  int attempt) {
-    StringBuilder keyBuilder = new StringBuilder();
-    keyBuilder.append(S3ExpressHelper.getCurrentDateHr());
-    keyBuilder.append(SLASH);
-    keyBuilder.append(path);
-    keyBuilder.append(SLASH);
-    keyBuilder.append(firstMessageClientRequestId);
-    keyBuilder.append(SEPARATOR);
-    keyBuilder.append(firstMessageServerRequestId);
-    keyBuilder.append(SEPARATOR);
-    keyBuilder.append(attempt);
-    return keyBuilder;
-  }
-
   public static List<ByteBuf> messageToBufferList(List<Message> messages) {
     return messages.stream().map(m -> m.getBuf().retainedDuplicate()).collect(Collectors.toList());
   }
@@ -577,6 +558,14 @@ public class S3ExpressAsyncStorageHandler extends AbstractS3StorageHandler {
       throw new IOException(e);
     }
     return credentials;
+  }
+
+  public void setKeyGenerator(S3ExpressObjectKeyGenerator keyGenerator) {
+    this.keyGenerator = keyGenerator;
+  }
+
+  public S3ExpressObjectKeyGenerator getKeyGenerator() {
+    return keyGenerator;
   }
 
   private SdkHttpFullRequest generateFetchRequest(JsonObject nextNotificationToProcess) throws IOException {
