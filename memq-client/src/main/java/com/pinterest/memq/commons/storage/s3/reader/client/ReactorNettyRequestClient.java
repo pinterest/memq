@@ -28,6 +28,7 @@ import io.netty.handler.ssl.SslClosedEngineException;
 import io.netty.handler.timeout.ReadTimeoutException;
 import reactor.netty.http.client.HttpClient;
 import reactor.util.retry.RetrySpec;
+import software.amazon.awssdk.http.SdkHttpFullRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufInputStream;
@@ -203,6 +204,24 @@ public class ReactorNettyRequestClient implements RequestClient {
       } else {
         throw new IOException(e);
       }
+    }
+  }
+  
+  public InputStream tryObjectGet(SdkHttpFullRequest request) throws IOException {
+    try {
+      return tryObjectGetInterAsStream(request.getUri(), request.headers());
+    } catch (Exception exception) {
+      logger.error("Error fetching object via get call: " + request.getUri());
+      throw new IOException(exception);
+    }
+  }
+  
+  public ByteBuf tryObjectGetAsBuffer(SdkHttpFullRequest request) throws IOException {
+    try {
+      return tryObjectGetInternal(request.getUri(), request.headers());
+    } catch (Exception exception) {
+        logger.error("Error fetching object from buffer: " + request.getUri());
+      throw new IOException(exception);
     }
   }
 
