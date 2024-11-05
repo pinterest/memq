@@ -4,7 +4,9 @@ import com.google.common.collect.Sets;
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicAssignment;
 import com.pinterest.memq.commons.protocol.TopicConfig;
+import com.pinterest.memq.core.config.MemqConfig;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 import java.util.Arrays;
 import java.util.HashMap;
@@ -471,7 +473,9 @@ public class TestExpirationPartitionBalanceStrategyWithAssignmentFreeze {
     }
 
     private static BalanceStrategy getExpirationBalanceStrategyWithFreeze(long expirationTime) {
-        ExpirationPartitionBalanceStrategyWithAssignmentFreeze strategy = new ExpirationPartitionBalanceStrategyWithAssignmentFreeze();
+        MemqConfig mockMemqConfig = Mockito.mock(MemqConfig.class);
+        Mockito.when(mockMemqConfig.getOpenTsdbConfig()).thenReturn(null);
+        ExpirationPartitionBalanceStrategyWithAssignmentFreeze strategy = new ExpirationPartitionBalanceStrategyWithAssignmentFreeze(mockMemqConfig);
         strategy.setDefaultExpirationTime(expirationTime); // 500ms
         return strategy;
     }

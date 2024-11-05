@@ -50,10 +50,10 @@ public class Balancer implements Runnable {
     this.client = client;
     this.leaderSelector = leaderSelector;
     this.writeBalanceStrategy = config.getClusteringConfig().isEnableExpiration()
-        ? new ExpirationPartitionBalanceStrategyWithAssignmentFreeze()
+        ? new ExpirationPartitionBalanceStrategyWithAssignmentFreeze(config)
         : new PartitionBalanceStrategy();
     this.readBalanceStrategy = config.getClusteringConfig().isEnableExpiration()
-        ? new ExpirationPartitionBalanceStrategyWithAssignmentFreeze()
+        ? new ExpirationPartitionBalanceStrategyWithAssignmentFreeze(config)
         : new PartitionBalanceStrategy();
   }
 
