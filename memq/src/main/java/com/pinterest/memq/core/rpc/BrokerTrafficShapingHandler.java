@@ -24,8 +24,10 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
         this.registry = registry;
     }
 
-    private void recordAutoReadStateChange(String channelId) {
-        logger.info("Channel " + channelId + " autoRead state changed");
+    private void recordAutoReadStateChange(
+        String channelId, boolean autoReadStartState, boolean autoReadEndState) {
+        logger.info(String.format("Channel %s autoRead state changed from %s to %s",
+            channelId, autoReadStartState, autoReadEndState));
         registry.counter(STATE_CHANGE_METRIC_NAME).inc();
     }
 
@@ -37,7 +39,8 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
         boolean autoReadEndState = channel.config().isAutoRead();
 
         if (autoReadStartState != autoReadEndState) {
-            recordAutoReadStateChange(channel.id().asShortText());
+            recordAutoReadStateChange(
+                channel.id().asShortText(), autoReadStartState, autoReadEndState);
         }
     }
 }
