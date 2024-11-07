@@ -64,7 +64,7 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateHandler;
 
-import static com.pinterest.memq.core.rpc.BrokerTrafficShapingHandler.BROKER_TRAFFIC_THROTTLING_METRIC_NAME;
+import static com.pinterest.memq.core.rpc.BrokerTrafficShapingHandler.BROKER_TRAFFIC_READ_THROTTLING_METRIC_NAME;
 
 public class MemqNettyServer {
 
@@ -182,7 +182,7 @@ public class MemqNettyServer {
         () -> (Gauge<Long>) () -> PooledByteBufAllocator.DEFAULT.metric().directArenas().stream()
             .mapToLong(PoolArenaMetric::numActiveBytes).sum());
 
-    registry.gauge(BROKER_TRAFFIC_THROTTLING_METRIC_NAME,
+    registry.gauge(BROKER_TRAFFIC_READ_THROTTLING_METRIC_NAME,
         () -> (Gauge<Long>) () -> PooledByteBufAllocator.DEFAULT.metric().directArenas().stream()
             .mapToLong(PoolArenaMetric::numActiveBytes).sum());
 

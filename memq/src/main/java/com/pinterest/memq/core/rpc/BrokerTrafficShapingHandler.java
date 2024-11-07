@@ -9,9 +9,9 @@ import java.util.logging.Logger;
 
 public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
 
+    public static String BROKER_TRAFFIC_READ_THROTTLING_METRIC_NAME = "broker.traffic.read.throttling";
     private final MetricRegistry registry;
-    public static String BROKER_TRAFFIC_THROTTLING_METRIC_NAME = "broker.traffic.throttling";
-
+    private final double READ_LIMIT_ALERTING_THRESHOLD = 0.9;
     private static final Logger logger = Logger.getLogger(BrokerTrafficShapingHandler.class.getName());
 
     public BrokerTrafficShapingHandler(ScheduledExecutorService executor,
@@ -23,21 +23,20 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
         this.registry = registry;
     }
 
-    private void recordThrottling() {
-        logger.info("GlobalTrafficShapingHandler throttling detected");
-        registry.counter(BROKER_TRAFFIC_THROTTLING_METRIC_NAME).inc();
+    private void recordReadThrottling() {
+        logger.info("GlobalTrafficShapingHandler channel read throttling detected");
+        registry.counter(BROKER_TRAFFIC_READ_THROTTLING_METRIC_NAME).inc();
     }
 
     @Override
     protected void doAccounting(TrafficCounter counter) {
         super.doAccounting(counter);
-        if (isThrottling(counter)) {
-            recordThrottling();
+        if (isReadThrottled(counter)) {
+            recordReadThrottling();
         }
     }
 
-    private boolean isThrottling(TrafficCounter counter) {
-        return counter.cumulativeReadBytes() > getReadLimit() ||
-            counter.cumulativeWrittenBytes() > getWriteLimit();
+    private boolean isReadThrottled(TrafficCounter counter) {
+        return getReadLimit() * READ_LIMIT_ALERTING_THRESHOLD < counter.lastReadThroughput();
     }
 }
