@@ -98,7 +98,7 @@ public class MemqNettyServer {
     Authorizer authorizer = enableAuthenticationAuthorizationAuditing(configuration);
 
     // TODO: Load from memq config 
-    long readLimit = 1024 * 1024 * 5; // 5MB per second per broker
+    long readLimit = 1024 * 1024 * 55; // 55MB per second per broker
     long checkIntervalMs = 10000;
     boolean enableTrafficShaping = true;
 
