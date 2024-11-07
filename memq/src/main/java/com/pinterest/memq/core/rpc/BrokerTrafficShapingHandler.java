@@ -25,7 +25,7 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
 
     private void recordReadThrottling() {
         logger.info("GlobalTrafficShapingHandler channel read throttling detected");
-        registry.counter(BROKER_TRAFFIC_READ_THROTTLING_METRIC_NAME).inc();
+//        registry.counter(BROKER_TRAFFIC_READ_THROTTLING_METRIC_NAME).inc();
     }
 
     @Override
@@ -37,6 +37,14 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
     }
 
     private boolean isReadThrottled(TrafficCounter counter) {
+        logger.info("[TEST] counter.lastReadThroughput() = "
+            + counter.lastReadThroughput()
+            + "; getReadLimit() = "
+            + getReadLimit()
+            + "; counter.cumulativeReadBytes() = "
+            + counter.cumulativeReadBytes()
+            + "; counter.lastReadBytes() = "
+            + counter.lastReadBytes());
         return getReadLimit() * READ_LIMIT_ALERTING_THRESHOLD < counter.lastReadThroughput();
     }
 }
