@@ -1,9 +1,8 @@
 package com.pinterest.memq.core.rpc;
 
 import com.codahale.metrics.MetricRegistry;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
+import io.netty.handler.traffic.TrafficCounter;
 
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.logging.Logger;
@@ -11,7 +10,7 @@ import java.util.logging.Logger;
 public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
 
     private final MetricRegistry registry;
-    public static String STATE_CHANGE_METRIC_NAME = "autoread.state.change.count";
+    public static String BROKER_TRAFFIC_THROTTLING_METRIC_NAME = "broker.traffic.throttling";
 
     private static final Logger logger = Logger.getLogger(BrokerTrafficShapingHandler.class.getName());
 
@@ -24,23 +23,21 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
         this.registry = registry;
     }
 
-    private void recordAutoReadStateChange(
-        String channelId, boolean autoReadStartState, boolean autoReadEndState) {
-        logger.info(String.format("Channel %s autoRead state changed from %s to %s",
-            channelId, autoReadStartState, autoReadEndState));
-        registry.counter(STATE_CHANGE_METRIC_NAME).inc();
+    private void recordThrottling() {
+        logger.info("GlobalTrafficShapingHandler throttling detected");
+        registry.counter(BROKER_TRAFFIC_THROTTLING_METRIC_NAME).inc();
     }
 
     @Override
-    public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
-        Channel channel = ctx.channel();
-        boolean autoReadStartState = channel.config().isAutoRead();
-        super.channelRead(ctx, msg);
-        boolean autoReadEndState = channel.config().isAutoRead();
-
-        if (autoReadStartState != autoReadEndState) {
-            recordAutoReadStateChange(
-                channel.id().asShortText(), autoReadStartState, autoReadEndState);
+    protected void doAccounting(TrafficCounter counter) {
+        super.doAccounting(counter);
+        if (isThrottling(counter)) {
+            recordThrottling();
         }
+    }
+
+    private boolean isThrottling(TrafficCounter counter) {
+        return counter.cumulativeReadBytes() > getReadLimit() ||
+            counter.cumulativeWrittenBytes() > getWriteLimit();
     }
 }

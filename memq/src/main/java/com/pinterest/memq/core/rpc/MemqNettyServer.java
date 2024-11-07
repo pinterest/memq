@@ -64,7 +64,7 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateHandler;
 
-import static com.pinterest.memq.core.rpc.BrokerTrafficShapingHandler.STATE_CHANGE_METRIC_NAME;
+import static com.pinterest.memq.core.rpc.BrokerTrafficShapingHandler.BROKER_TRAFFIC_THROTTLING_METRIC_NAME;
 
 public class MemqNettyServer {
 
@@ -98,7 +98,7 @@ public class MemqNettyServer {
     Authorizer authorizer = enableAuthenticationAuthorizationAuditing(configuration);
 
     // TODO: Load from memq config 
-    long readLimit = 1024 * 1024 * 350; // 350MB per second per broker
+    long readLimit = 1024 * 1024 * 5; // 5MB per second per broker
     long checkIntervalMs = 10000;
     boolean enableTrafficShaping = true;
 
@@ -182,7 +182,7 @@ public class MemqNettyServer {
         () -> (Gauge<Long>) () -> PooledByteBufAllocator.DEFAULT.metric().directArenas().stream()
             .mapToLong(PoolArenaMetric::numActiveBytes).sum());
 
-    registry.gauge(STATE_CHANGE_METRIC_NAME,
+    registry.gauge(BROKER_TRAFFIC_THROTTLING_METRIC_NAME,
         () -> (Gauge<Long>) () -> PooledByteBufAllocator.DEFAULT.metric().directArenas().stream()
             .mapToLong(PoolArenaMetric::numActiveBytes).sum());
 
