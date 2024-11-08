@@ -10,7 +10,7 @@ import java.util.logging.Logger;
 public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
 
     public static String M1 = "test.broker.traffic.read.throughput";
-    public static String M2 = "broker.traffic..read.limit";
+    public static String M2 = "broker.traffic.read.limit";
     private static final Logger logger = Logger.getLogger(BrokerTrafficShapingHandler.class.getName());
     private final MetricRegistry registry;
 
