@@ -9,7 +9,8 @@ import java.util.logging.Logger;
 
 public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
 
-    public static String BROKER_TRAFFIC_READ_THROTTLING_METRIC_NAME = "broker.traffic.read.throttling.counter";
+    public static String M1 = "test.broker.traffic.read.throughput";
+    public static String M2 = "broker.traffic..read.limit";
     private static final Logger logger = Logger.getLogger(BrokerTrafficShapingHandler.class.getName());
     private final MetricRegistry registry;
 
@@ -22,19 +23,12 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
         this.registry = registry;
     }
 
-    private void recordReadThrottling() {
-        registry.counter(BROKER_TRAFFIC_READ_THROTTLING_METRIC_NAME).inc();
-    }
-
     @Override
     protected void doAccounting(TrafficCounter counter) {
         super.doAccounting(counter);
-        if (isReadThrottled(counter)) {
-            recordReadThrottling();
-        }
-    }
-
-    private boolean isReadThrottled(TrafficCounter counter) {
-        return counter.lastReadThroughput() == 0;
+        long readThroughput = counter.lastReadThroughput();
+        registry.gauge(M1, () -> () -> readThroughput);
+        long readLimit = getReadLimit();
+        registry.gauge(M2, () -> () -> readLimit);
     }
 }
