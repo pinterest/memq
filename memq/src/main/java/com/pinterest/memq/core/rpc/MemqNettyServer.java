@@ -64,6 +64,8 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateHandler;
 
+import static com.pinterest.memq.core.rpc.BrokerTrafficShapingHandler.BROKER_TRAFFIC_READ_THROUGHPUT_METRIC_NAME;
+
 public class MemqNettyServer {
 
   public static final String SSL_HANDLER_NAME = "ssl";
@@ -95,6 +97,14 @@ public class MemqNettyServer {
     MetricRegistry registry = initializeMetrics();
     Authorizer authorizer = enableAuthenticationAuthorizationAuditing(configuration);
 
+    logger.info("[TEST] config: " + configuration.toString());
+    logger.info("[TEST] nettyServerConfig: " + configuration.getNettyServerConfig().toString());
+
+    // TODO: Load from memq config 
+    long readLimit = 1024 * 1024 * 5; // 5MB per second per broker
+    long checkIntervalMs = 1000;
+    boolean enableTrafficShaping = true;
+
     NettyServerConfig nettyServerConfig = configuration.getNettyServerConfig();
     this.useEpoll = Epoll.isAvailable() && nettyServerConfig.isEnableEpoll();
     childGroup = getEventLoopGroup(nettyServerConfig.getNumEventLoopThreads());
@@ -105,6 +115,9 @@ public class MemqNettyServer {
     try {
       ServerBootstrap serverBootstrap = new ServerBootstrap();
       serverBootstrap.group(parentGroup, childGroup);
+
+      BrokerTrafficShapingHandler trafficShapingHandler = new BrokerTrafficShapingHandler(
+          childGroup, 0, readLimit, checkIntervalMs, registry);
       if (useEpoll) {
         serverBootstrap.channel(EpollServerSocketChannel.class);
       } else {
@@ -121,6 +134,10 @@ public class MemqNettyServer {
                   + configuration.getServerConnectionIdleTimeoutSec();
           pipeline.addLast(new IdleStateHandler(0, 0, idleTimeoutSec, TimeUnit.SECONDS));
           pipeline.addLast(new ServerConnectionLifecycleHandler());
+          if (enableTrafficShaping) {
+            pipeline.addLast(trafficShapingHandler);
+            logger.info("Attach traffic shaping handler to channel: " + channel.id().asShortText());
+          }
           if (sslConfig != null) {
             KeyManagerFactory kmf = MemqUtils.extractKMFFromSSLConfig(sslConfig);
             TrustManagerFactory tmf = MemqUtils.extractTMPFromSSLConfig(sslConfig);
@@ -165,6 +182,10 @@ public class MemqNettyServer {
             .mapToLong(PoolArenaMetric::numActiveAllocations).sum());
 
     registry.gauge("pooled.direct.total.active.allocation.bytes",
+        () -> (Gauge<Long>) () -> PooledByteBufAllocator.DEFAULT.metric().directArenas().stream()
+            .mapToLong(PoolArenaMetric::numActiveBytes).sum());
+
+    registry.gauge(BROKER_TRAFFIC_READ_THROUGHPUT_METRIC_NAME,
         () -> (Gauge<Long>) () -> PooledByteBufAllocator.DEFAULT.metric().directArenas().stream()
             .mapToLong(PoolArenaMetric::numActiveBytes).sum());
 

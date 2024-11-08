@@ -303,4 +303,30 @@ public class MemqConfig extends Configuration {
   public int getServerConnectionIdleTimeoutDeltaSec() {
       return serverConnectionIdleTimeoutDeltaSec;
   }
+
+  @Override
+  public String toString() {
+    return "MemqConfig{" +
+        "defaultBufferSize=" + defaultBufferSize +
+        ", defaultRingBufferSize=" + defaultRingBufferSize +
+        ", defaultSlotTimeout=" + defaultSlotTimeout +
+        ", cleanerThreadCount=" + cleanerThreadCount +
+        ", serverConnectionIdleTimeoutSec=" + serverConnectionIdleTimeoutSec +
+        ", serverConnectionIdleTimeoutDeltaSec=" + serverConnectionIdleTimeoutDeltaSec +
+        ", openTsdbConfig=" + openTsdbConfig +
+        ", storageHandlerPackageNames=" + storageHandlerPackageNames +
+        ", nodeTrafficLimitInMB=" + nodeTrafficLimitInMB +
+        ", awsUploadRatePerStreamInMB=" + awsUploadRatePerStreamInMB +
+        ", cluster=" + cluster +
+        ", resetEnabled=" + resetEnabled +
+        ", brokerType=" + brokerType +
+        ", nettyServerConfig=" + nettyServerConfig +
+        ", authorizerConfig=" + authorizerConfig +
+        ", environmentProvider='" + environmentProvider + '\'' +
+        ", topicConfig=" + topicConfig +
+        ", clusteringConfig=" + clusteringConfig +
+        ", topicCacheFile='" + topicCacheFile + '\'' +
+        ", additionalConfigs=" + additionalConfigs +
+        '}';
+  }
 }

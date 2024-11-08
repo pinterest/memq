@@ -24,8 +24,17 @@ public class NettyServerConfig {
   private int numEventLoopThreads = 8;
   private boolean enableEpoll = false;
 
+  private int testConfig = 300;
   // SSL
   private SSLConfig sslConfig;
+
+  public int getTestConfig() {
+    return testConfig;
+  }
+
+  public void setTestConfig(int testConfig) {
+    this.testConfig = testConfig;
+  }
 
   public int getMaxFrameByteLength() {
     return maxFrameByteLength;
@@ -67,4 +76,15 @@ public class NettyServerConfig {
     this.enableEpoll = enableEpoll;
   }
 
+  @Override
+  public String toString() {
+    return "NettyServerConfig{" +
+        "maxFrameByteLength=" + maxFrameByteLength +
+        ", port=" + port +
+        ", numEventLoopThreads=" + numEventLoopThreads +
+        ", enableEpoll=" + enableEpoll +
+        ", sslConfig=" + sslConfig +
+        ", testConfig=" + testConfig +
+        '}';
+  }
 }
