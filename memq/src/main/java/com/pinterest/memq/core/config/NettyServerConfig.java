@@ -23,9 +23,26 @@ public class NettyServerConfig {
   private short port = 9092;
   private int numEventLoopThreads = 8;
   private boolean enableEpoll = false;
-
+  private int maxBrokerInputTrafficMbPerSec = -1; // -1 means no limit by default
+  private int brokerInputTrafficShapingCheckIntervalMs = 1000; // 1 second
   // SSL
   private SSLConfig sslConfig;
+
+  public int getMaxBrokerInputTrafficMbPerSec() {
+    return maxBrokerInputTrafficMbPerSec;
+  }
+
+  public void setMaxBrokerInputTrafficMbPerSec(int maxBrokerInputTrafficMbPerSec) {
+    this.maxBrokerInputTrafficMbPerSec = maxBrokerInputTrafficMbPerSec;
+  }
+
+  public int getBrokerInputTrafficShapingCheckIntervalMs() {
+      return brokerInputTrafficShapingCheckIntervalMs;
+  }
+
+  public void setBrokerInputTrafficShapingCheckIntervalMs(int brokerInputTrafficShapingCheckIntervalMs) {
+      this.brokerInputTrafficShapingCheckIntervalMs = brokerInputTrafficShapingCheckIntervalMs;
+  }
 
   public int getMaxFrameByteLength() {
     return maxFrameByteLength;
