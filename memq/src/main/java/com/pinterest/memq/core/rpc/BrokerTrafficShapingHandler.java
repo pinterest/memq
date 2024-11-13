@@ -28,7 +28,7 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
     @Override
     protected void doAccounting(TrafficCounter counter) {
         super.doAccounting(counter);
-        long readThroughput = counter.lastReadThroughput();
-        brokerTrafficReadThroughputHistogram.update(readThroughput);
+//        long readThroughput = counter.lastReadThroughput();
+//        brokerTrafficReadThroughputHistogram.update(readThroughput);
     }
 }
