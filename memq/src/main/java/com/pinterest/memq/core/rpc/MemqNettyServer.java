@@ -105,6 +105,26 @@ public class MemqNettyServer {
     try {
       ServerBootstrap serverBootstrap = new ServerBootstrap();
       serverBootstrap.group(parentGroup, childGroup);
+
+      boolean isTrafficShapingEnabled = nettyServerConfig.getMaxBrokerInputTrafficMbPerSec() != -1;
+      long readLimit = 0;
+      long checkIntervalMs = nettyServerConfig.getBrokerInputTrafficShapingCheckIntervalMs();
+      if (isTrafficShapingEnabled) {
+        readLimit = nettyServerConfig.getMaxBrokerInputTrafficMbPerSec() * 1024 * 1024;
+        logger.info(String.format(
+            "Broker traffic shaping is enabled with read limit: %d MB/s and check interval: %d ms",
+            nettyServerConfig.getMaxBrokerInputTrafficMbPerSec(),
+            checkIntervalMs
+        ));
+      }
+      BrokerTrafficShapingHandler trafficShapingHandler = new BrokerTrafficShapingHandler(
+                childGroup,
+                0,
+                readLimit,
+                checkIntervalMs,
+                registry
+      );
+
       if (useEpoll) {
         serverBootstrap.channel(EpollServerSocketChannel.class);
       } else {
@@ -121,6 +141,10 @@ public class MemqNettyServer {
                   + configuration.getServerConnectionIdleTimeoutSec();
           pipeline.addLast(new IdleStateHandler(0, 0, idleTimeoutSec, TimeUnit.SECONDS));
           pipeline.addLast(new ServerConnectionLifecycleHandler());
+          if (isTrafficShapingEnabled) {
+            pipeline.addLast(trafficShapingHandler);
+            logger.info("Attach traffic shaping handler to channel: " + channel.id().asShortText());
+          }
           if (sslConfig != null) {
             KeyManagerFactory kmf = MemqUtils.extractKMFFromSSLConfig(sslConfig);
             TrustManagerFactory tmf = MemqUtils.extractTMPFromSSLConfig(sslConfig);
