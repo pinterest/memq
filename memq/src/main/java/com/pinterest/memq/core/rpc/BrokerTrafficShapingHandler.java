@@ -42,8 +42,8 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
 
     public void reportMetrics() {
         long readLimit = this.getReadLimit();
-        long lastReadThroughput = this.trafficCounter.lastReadThroughput();
+        long readThroughput = this.trafficCounter.currentReadBytes();
         registry.gauge(READ_LIMIT_METRIC_NAME, () -> () -> readLimit);
-        registry.gauge(READ_THROUGHPUT_METRIC_NAME, () -> () -> lastReadThroughput);
+        registry.gauge(READ_THROUGHPUT_METRIC_NAME, () -> () -> readThroughput);
     }
 }
