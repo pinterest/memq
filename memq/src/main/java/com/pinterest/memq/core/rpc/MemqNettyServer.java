@@ -197,6 +197,15 @@ public class MemqNettyServer {
         () -> (Gauge<Long>) () -> PooledByteBufAllocator.DEFAULT.metric().directArenas().stream()
             .mapToLong(PoolArenaMetric::numActiveBytes).sum());
 
+    // Register name only, value will be updated by the traffic shaping handler
+    logger.info("[TEST] Registering read limit metric");
+    registry.register(READ_LIMIT_METRIC_NAME, new Gauge<Long>() {
+      @Override
+      public Long getValue() {
+        return 0L;
+      }
+    });
+
     if (client != null) {
       String localHostname = MiscUtils.getHostname();
       for (String metricName : registry.getNames()) {

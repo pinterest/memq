@@ -40,6 +40,6 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
 
     public void reportMetrics() {
         logger.info("[TEST] Reporting metrics");
-        registry.histogram(READ_LIMIT_METRIC_NAME).update(this.getReadLimit());
+        registry.gauge(READ_LIMIT_METRIC_NAME, () -> () -> this.getReadLimit());
     }
 }
