@@ -64,6 +64,8 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateHandler;
 
+import static com.pinterest.memq.core.rpc.BrokerTrafficShapingHandler.READ_LIMIT_METRIC_NAME;
+
 public class MemqNettyServer {
 
   public static final String SSL_HANDLER_NAME = "ssl";
@@ -124,6 +126,9 @@ public class MemqNettyServer {
                 checkIntervalMs,
                 registry
       );
+      if (isTrafficShapingEnabled) {
+        trafficShapingHandler.startPeriodicMetricsReporting(childGroup);
+      }
 
       if (useEpoll) {
         serverBootstrap.channel(EpollServerSocketChannel.class);
