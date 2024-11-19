@@ -10,6 +10,7 @@ import java.util.logging.Logger;
 public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
 
     public static final String READ_LIMIT_METRIC_NAME = "broker.traffic.read.limit";
+    public static final String READ_THROUGHPUT_METRIC_NAME = "broker.traffic.read.throughput";
     private static final Logger logger = Logger.getLogger(BrokerTrafficShapingHandler.class.getName());
     private static int metricsReportingIntervalMinutes = 1;
     private final MetricRegistry registry;
@@ -32,14 +33,17 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
     }
 
     public void startPeriodicMetricsReporting(ScheduledExecutorService executorService) {
-        logger.info("[TEST] Starting periodic metrics reporting");
-        Runnable reportTask = this::reportMetrics; // Using method reference for brevity
+        logger.info(String.format("Starting periodic metrics reporting every %d minutes",
+            metricsReportingIntervalMinutes));
+        Runnable reportTask = this::reportMetrics;
         executorService.scheduleAtFixedRate(
             reportTask, 0, metricsReportingIntervalMinutes, TimeUnit.MINUTES);
     }
 
     public void reportMetrics() {
-        logger.info("[TEST] Reporting metrics");
-        registry.gauge(READ_LIMIT_METRIC_NAME, () -> () -> this.getReadLimit());
+        long readLimit = this.getReadLimit();
+        long lastReadThroughput = this.trafficCounter.lastReadThroughput();
+        registry.gauge(READ_LIMIT_METRIC_NAME, () -> () -> readLimit);
+        registry.gauge(READ_THROUGHPUT_METRIC_NAME, () -> () -> lastReadThroughput);
     }
 }

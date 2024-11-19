@@ -17,6 +17,9 @@ package com.pinterest.memq.core.rpc;
 
 import java.net.UnknownHostException;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
@@ -64,13 +67,15 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateHandler;
 
-import static com.pinterest.memq.core.rpc.BrokerTrafficShapingHandler.READ_LIMIT_METRIC_NAME;
-
 public class MemqNettyServer {
 
   public static final String SSL_HANDLER_NAME = "ssl";
 
   private static final Logger logger = Logger.getLogger(MemqNettyServer.class.getName());
+  private static final List<String> DEPENDENCY_METRIC_NAMES = Arrays.asList(
+      BrokerTrafficShapingHandler.READ_LIMIT_METRIC_NAME,
+      BrokerTrafficShapingHandler.READ_THROUGHPUT_METRIC_NAME
+  );
   private EventLoopGroup childGroup;
   private EventLoopGroup parentGroup;
   private ChannelFuture serverChannelFuture;
@@ -199,17 +204,14 @@ public class MemqNettyServer {
 
     if (client != null) {
       String localHostname = MiscUtils.getHostname();
-      for (String metricName : registry.getNames()) {
+      List<String> metricsNames = new ArrayList<>(registry.getNames());
+      metricsNames.addAll(DEPENDENCY_METRIC_NAMES);
+      for (String metricName : metricsNames) {
         ScheduledReporter reporter = OpenTSDBReporter.createReporter("netty", registry, metricName,
             (String name, Metric metric) -> true, TimeUnit.SECONDS, TimeUnit.SECONDS, client,
             localHostname);
         reporter.start(configuration.getOpenTsdbConfig().getFrequencyInSeconds(), TimeUnit.SECONDS);
       }
-      // Other metrics that needs reporting to OpenTSDB
-      ScheduledReporter reporter = OpenTSDBReporter.createReporter("netty", registry, READ_LIMIT_METRIC_NAME,
-          (String name, Metric metric) -> true, TimeUnit.SECONDS, TimeUnit.SECONDS, client,
-          localHostname);
-      reporter.start(configuration.getOpenTsdbConfig().getFrequencyInSeconds(), TimeUnit.SECONDS);
     }
     return registry;
   }
