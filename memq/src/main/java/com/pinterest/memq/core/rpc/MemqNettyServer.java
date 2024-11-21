@@ -132,6 +132,8 @@ public class MemqNettyServer {
                 registry
       );
       if (isTrafficShapingEnabled) {
+        trafficShapingHandler.setMetricsReportingIntervalSec(
+            nettyServerConfig.getBrokerInputTrafficShapingMetricsReportIntervalSec());
         trafficShapingHandler.startPeriodicMetricsReporting(childGroup);
       }
 
