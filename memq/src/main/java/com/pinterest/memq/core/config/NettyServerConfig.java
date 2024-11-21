@@ -25,8 +25,18 @@ public class NettyServerConfig {
   private boolean enableEpoll = false;
   private int maxBrokerInputTrafficMbPerSec = -1; // -1 means no traffic limit by default
   private int brokerInputTrafficShapingCheckIntervalMs = 1000; // 1 second by default
+  private int brokerInputTrafficShapingMetricsReportIntervalSec = 60; // 1 minute by default
   // SSL
   private SSLConfig sslConfig;
+
+  public int getBrokerInputTrafficShapingMetricsReportIntervalSec() {
+    return brokerInputTrafficShapingMetricsReportIntervalSec;
+  }
+
+  public void setBrokerInputTrafficShapingMetricsReportIntervalSec(
+      int brokerInputTrafficShapingMetricsReportIntervalSec) {
+      this.brokerInputTrafficShapingMetricsReportIntervalSec = brokerInputTrafficShapingMetricsReportIntervalSec;
+  }
 
   public int getMaxBrokerInputTrafficMbPerSec() {
     return maxBrokerInputTrafficMbPerSec;
