@@ -157,6 +157,10 @@ public class NetworkClient implements Closeable {
         }
         ByteBuf buffer = null;
         try {
+          if (!channelFuture.channel().isWritable()) {
+            logger.warn("Channel is not writable, request " + request.getClientRequestId() + " will be dropped");
+            throw new IOException("Channel is not writable");
+          }
           buffer = PooledByteBufAllocator.DEFAULT.buffer(request.getSize(RequestType.PROTOCOL_VERSION));
           request.write(buffer, RequestType.PROTOCOL_VERSION);
           channelFuture.channel().writeAndFlush(buffer);
