@@ -416,9 +416,11 @@ public class Request {
         }
         logger.error("Failed to send request " + clientRequestId, resultException);
         resolve(resultException);
+        payload.release();
       } else {
         logger.error("Failed to send request " + clientRequestId, throwable);
         resolve(throwable);
+        payload.release();
       }
     }
 
