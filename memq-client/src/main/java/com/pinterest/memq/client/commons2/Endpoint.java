@@ -54,4 +54,12 @@ public class Endpoint {
     return new Endpoint(InetSocketAddress.createUnresolved(broker.getBrokerIP(),
         broker.getBrokerPort()), broker.getLocality());
   }
+
+  @Override
+  public String toString() {
+    return "Endpoint{" +
+        "address=" + address +
+        ", locality='" + locality + '\'' +
+        '}';
+  }
 }
