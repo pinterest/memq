@@ -115,9 +115,6 @@ public class MemqCommonClient implements Closeable {
       }
       Endpoint endpoint = endpointsToTry.get(retry);
       try {
-        if (!networkClient.isChannelWritable(endpoint.getAddress())) {
-          continue;
-        }
         future = networkClient.send(endpoint.getAddress(), request,
             Duration.ofMillis(timeoutMillis - elapsed));
         // we keep the endpoint connection for future use

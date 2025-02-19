@@ -183,7 +183,7 @@ public class TestMemqCommonClient {
     RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1, RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
 
     try {
-      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 3000);
+      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 300);
       ResponsePacket resp = respFuture.get();
       fail("should throw timeout exception");
     } catch (ExecutionException ee) {

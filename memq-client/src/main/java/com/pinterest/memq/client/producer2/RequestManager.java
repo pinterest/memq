@@ -24,7 +24,6 @@ import com.codahale.metrics.Counter;
 import com.codahale.metrics.MetricRegistry;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 
 import java.io.Closeable;
@@ -55,7 +54,6 @@ public class RequestManager implements Closeable {
 
   private final AtomicInteger clientIdGenerator = new AtomicInteger(0);
   private final MetricRegistry metricRegistry;
-  private final PooledByteBufAllocator byteBufAllocator = PooledByteBufAllocator.DEFAULT;
   private volatile Request currentRequest;
   private Counter requestCounter;
 
@@ -92,10 +90,6 @@ public class RequestManager implements Closeable {
   @VisibleForTesting
   protected int getAvailablePermits() {
     return maxInflightRequestLock.availablePermits();
-  }
-
-  protected ByteBuf getByteBufFromPool(int capacity) {
-    return byteBufAllocator.buffer(capacity);
   }
 
   private void initializeMetrics() {

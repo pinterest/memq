@@ -30,6 +30,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.pinterest.memq.client.commons2.MemqNettyPooledByteBufAllocator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,7 +47,6 @@ import com.pinterest.memq.commons.protocol.ResponsePacket;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelOption;
@@ -77,7 +77,6 @@ public class NetworkClient implements Closeable {
   private final Bootstrap bootstrap;
   private final EventLoopGroup eventLoopGroup;
   private final AtomicBoolean closed = new AtomicBoolean(false);
-  private final PooledByteBufAllocator byteBufAllocator = PooledByteBufAllocator.DEFAULT;
 
   private volatile ChannelFuture connectFuture;
 
@@ -158,7 +157,10 @@ public class NetworkClient implements Closeable {
         }
         ByteBuf buffer = null;
         try {
-          buffer = byteBufAllocator.buffer(request.getSize(RequestType.PROTOCOL_VERSION));
+          if (!channelFuture.channel().isWritable()) {
+            throw new IOException("Channel is not writable");
+          }
+          buffer = MemqNettyPooledByteBufAllocator.getAllocator().buffer(request.getSize(RequestType.PROTOCOL_VERSION));
           request.write(buffer, RequestType.PROTOCOL_VERSION);
           channelFuture.channel().writeAndFlush(buffer);
         } catch (Exception e) {
