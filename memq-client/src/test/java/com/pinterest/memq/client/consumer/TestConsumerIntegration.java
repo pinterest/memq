@@ -15,41 +15,8 @@
  */
 package com.pinterest.memq.client.consumer;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
-import com.google.common.io.Files;
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.pinterest.memq.client.commons.Compression;
-import com.pinterest.memq.client.commons.ConsumerConfigs;
-import com.pinterest.memq.client.commons.TestUtils;
-import com.pinterest.memq.client.commons.audit.KafkaBackedAuditor;
-import com.pinterest.memq.commons.BatchHeader;
-import com.pinterest.memq.commons.BatchHeader.IndexEntry;
-import com.pinterest.memq.commons.MemqLogMessage;
-import com.pinterest.memq.commons.storage.StorageHandler;
-import com.pinterest.memq.commons.storage.WriteFailedException;
-import com.pinterest.memq.commons.storage.s3.reader.client.ReactorNettyRequestClient;
-import com.pinterest.memq.core.commons.Message;
-import com.salesforce.kafka.test.junit4.SharedKafkaTestResource;
-import com.salesforce.kafka.test.listeners.PlainListener;
-import org.apache.commons.lang3.mutable.MutableInt;
-import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.NewTopic;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.kafka.clients.producer.ProducerConfig;
-import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.serialization.ByteArrayDeserializer;
-import org.apache.kafka.common.serialization.StringSerializer;
-import org.junit.Before;
-import org.junit.ClassRule;
-import org.junit.Test;
-import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.s3.presigner.S3Presigner;
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -65,8 +32,42 @@ import java.util.List;
 import java.util.Properties;
 import java.util.function.BiFunction;
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
+import com.pinterest.memq.commons.storage.s3.reader.client.ReactorNettyRequestClient;
+import org.apache.commons.lang3.mutable.MutableInt;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.StringSerializer;
+import org.junit.Before;
+import org.junit.ClassRule;
+import org.junit.Test;
+
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
+import com.google.common.io.Files;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.pinterest.memq.client.commons.Compression;
+import com.pinterest.memq.client.commons.ConsumerConfigs;
+import com.pinterest.memq.client.commons.TestUtils;
+import com.pinterest.memq.client.commons.audit.KafkaBackedAuditor;
+import com.pinterest.memq.commons.BatchHeader;
+import com.pinterest.memq.commons.BatchHeader.IndexEntry;
+import com.pinterest.memq.commons.MemqLogMessage;
+import com.pinterest.memq.commons.storage.StorageHandler;
+import com.pinterest.memq.commons.storage.WriteFailedException;
+import com.pinterest.memq.core.commons.Message;
+import com.salesforce.kafka.test.junit4.SharedKafkaTestResource;
+import com.salesforce.kafka.test.listeners.PlainListener;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 
 public class TestConsumerIntegration {
 
