@@ -157,9 +157,6 @@ public class NetworkClient implements Closeable {
         }
         ByteBuf buffer = null;
         try {
-          if (!channelFuture.channel().isWritable()) {
-            throw new IOException("Channel is not writable");
-          }
           buffer = MemqNettyPooledByteBufAllocator.getAllocator().buffer(request.getSize(RequestType.PROTOCOL_VERSION));
           request.write(buffer, RequestType.PROTOCOL_VERSION);
           channelFuture.channel().writeAndFlush(buffer);
