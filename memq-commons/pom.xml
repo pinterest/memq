@@ -181,6 +181,8 @@
 				<version>3.0.0-M5</version>
 				<configuration>
 					<argLine>-Xmx4096m -XX:MaxPermSize=256m</argLine>
+					<threadCount>1</threadCount>
+					<reuseForks>false</reuseForks>
 				</configuration>
 			</plugin>
 			<!-- <plugin> -->
