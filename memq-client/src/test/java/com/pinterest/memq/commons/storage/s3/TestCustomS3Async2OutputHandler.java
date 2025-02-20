@@ -19,6 +19,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.io.File;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -27,17 +28,25 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 
+import com.google.common.io.Files;
 import org.junit.Test;
 
 import com.codahale.metrics.MetricRegistry;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 
 public class TestCustomS3Async2OutputHandler {
 
   @Test
   public void testAnyUploadResultOrTimeout() throws Exception {
     CustomS3Async2StorageHandler handler = new CustomS3Async2StorageHandler();
+    CustomS3Async2StorageHandler.setPresigner(S3Presigner.builder().region(Region.US_EAST_1).build());
     Properties props = new Properties();
     props.setProperty("bucket", "test");
+    String serversetFilename = "target/tests3outputhandlerserverset";
+    Files.write("localhost:9092".getBytes(), new File(serversetFilename));
+    props.setProperty(KafkaNotificationSink.NOTIFICATION_SERVERSET, serversetFilename);
+    props.setProperty(KafkaNotificationSink.NOTIFICATION_TOPIC, "testTopic");
     handler.initWriter(props, "test", new MetricRegistry());
     List<CompletableFuture<CustomS3Async2StorageHandler.UploadResult>> tasks = new ArrayList<>();
 

@@ -189,10 +189,6 @@ public class NetworkClient implements Closeable {
     return connectFuture;
   }
 
-  public boolean isChannelWritable(InetSocketAddress socketAddress) throws ExecutionException, InterruptedException {
-    return acquireChannel(socketAddress).channel().isWritable();
-  }
-
   private boolean isChannelUnavailable(InetSocketAddress socketAddress) {
     if (connectFuture == null || !connectFuture.channel().isActive()) return true;
     InetSocketAddress currentAddr = (InetSocketAddress) (connectFuture.channel().remoteAddress());

@@ -21,6 +21,7 @@ import static com.pinterest.memq.commons.storage.s3.AbstractS3StorageHandler.NOT
 import static com.pinterest.memq.commons.storage.s3.AbstractS3StorageHandler.OBJECT_FETCH_ERROR_KEY;
 import static com.pinterest.memq.commons.storage.s3.AbstractS3StorageHandler.UNAVAILABLE_EXCEPTION;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.pinterest.memq.commons.storage.s3.S3Exception;
 
 import com.codahale.metrics.MetricRegistry;
@@ -59,7 +60,7 @@ public class ReactorNettyRequestClient implements RequestClient {
 
   private static final long DEFAULT_READ_TIMEOUT_MS = 10000;
 
-  private final S3Presigner presigner;
+  private static S3Presigner presigner;
   private final MetricRegistry metricRegistry;
 
   private HttpClient client;
@@ -69,7 +70,9 @@ public class ReactorNettyRequestClient implements RequestClient {
 
   public ReactorNettyRequestClient(MetricRegistry metricRegistry) {
     this.metricRegistry = metricRegistry;
-    this.presigner = S3Presigner.builder().build();
+    if (presigner == null) {
+      presigner = S3Presigner.builder().build();
+    }
   }
 
   @Override
@@ -228,5 +231,10 @@ public class ReactorNettyRequestClient implements RequestClient {
   @Override
   public void close() throws IOException {
     presigner.close();
+  }
+
+  @VisibleForTesting
+  public static void setS3Presigner(S3Presigner s3Presigner) {
+    presigner = s3Presigner;
   }
 }

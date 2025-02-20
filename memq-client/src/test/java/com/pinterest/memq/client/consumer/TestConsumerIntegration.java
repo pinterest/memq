@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Properties;
 import java.util.function.BiFunction;
 
+import com.pinterest.memq.commons.storage.s3.reader.client.ReactorNettyRequestClient;
 import org.apache.commons.lang3.mutable.MutableInt;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -65,6 +66,9 @@ import com.pinterest.memq.commons.storage.WriteFailedException;
 import com.pinterest.memq.core.commons.Message;
 import com.salesforce.kafka.test.junit4.SharedKafkaTestResource;
 import com.salesforce.kafka.test.listeners.PlainListener;
+import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 
 public class TestConsumerIntegration {
 
@@ -136,6 +140,7 @@ public class TestConsumerIntegration {
         .send(new ProducerRecord<String, String>(notificationTopic, gson.toJson(payload)));
     notificationProducer.close();
 
+    ReactorNettyRequestClient.setS3Presigner(S3Presigner.builder().region(Region.US_EAST_1).build());
     MemqConsumer<byte[], byte[]> consumer = getConsumer(props, memqBatchData);
     consumer.subscribe(Lists.newArrayList(topic));
     consumer.assign(Lists.newArrayList(0));

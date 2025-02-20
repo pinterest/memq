@@ -39,6 +39,7 @@ import java.util.stream.Collectors;
 
 import javax.naming.ConfigurationException;
 
+import com.google.common.annotations.VisibleForTesting;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
@@ -108,7 +109,7 @@ public class CustomS3Async2StorageHandler extends AbstractS3StorageHandler {
   private boolean enableMD5;
   private volatile int maxAttempts;
   private volatile int retryTimeoutMillis;
-  private S3Presigner signer;
+  private static S3Presigner signer;
   private HttpClient secureClient;
   private MetricRegistry registry;
   private ExecutorService requestExecutor;
@@ -172,10 +173,12 @@ public class CustomS3Async2StorageHandler extends AbstractS3StorageHandler {
     this.maxAttempts = Integer.parseInt(outputHandlerConfig.getProperty("retryCount", "2")) + 1;
     this.secureClient = HttpClient.create().option(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
         .option(ChannelOption.SO_LINGER, 0).secure();
-    signer = S3Presigner.builder()
-        .credentialsProvider(InstanceProfileCredentialsProvider.builder()
-            .asyncCredentialUpdateEnabled(true).asyncThreadName("IamCredentialUpdater").build())
-        .build();
+    if (signer == null) {
+      signer = S3Presigner.builder()
+              .credentialsProvider(InstanceProfileCredentialsProvider.builder()
+                      .asyncCredentialUpdateEnabled(true).asyncThreadName("IamCredentialUpdater").build())
+              .build();
+    }
   }
 
   @Override
@@ -503,4 +506,8 @@ public class CustomS3Async2StorageHandler extends AbstractS3StorageHandler {
     return logger;
   }
 
+  @VisibleForTesting
+  protected static void setPresigner(S3Presigner presigner) {
+    signer = presigner;
+  }
 }
