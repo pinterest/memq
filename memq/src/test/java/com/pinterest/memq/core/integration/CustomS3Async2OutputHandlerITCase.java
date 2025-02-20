@@ -54,7 +54,7 @@ import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
-public class TestCustomS3Async2OutputHandlerIntegration {
+public class CustomS3Async2OutputHandlerITCase {
 
   public static final String INTEGRATION_TEST_BUCKET = System.getProperty("integration.test.bucket");
   public static final String BASEPATH = "testing/integration/memq";

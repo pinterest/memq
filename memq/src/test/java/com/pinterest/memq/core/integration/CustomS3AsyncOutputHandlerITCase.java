@@ -69,7 +69,7 @@ import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
-public class TestCustomS3AsyncOutputHandlerIntegration {
+public class CustomS3AsyncOutputHandlerITCase {
 
   public static final String INTEGRATION_TEST_BUCKET = System.getProperty("integration.test.bucket");
   public static final String BASEPATH = "testing/integration/memq";
