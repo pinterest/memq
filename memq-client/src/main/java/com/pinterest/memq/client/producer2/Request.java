@@ -20,6 +20,7 @@ import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons.audit.Auditor;
 import com.pinterest.memq.client.commons2.MemqCommonClient;
 import com.pinterest.memq.client.commons2.MemqNettyPooledByteBufAllocator;
+import com.pinterest.memq.client.commons2.network.ClosedConnectionException;
 import com.pinterest.memq.client.commons2.retry.RetryStrategy;
 import com.pinterest.memq.client.producer.MemqWriteResult;
 import com.pinterest.memq.commons.protocol.RequestPacket;
@@ -35,6 +36,7 @@ import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufOutputStream;
+import io.netty.buffer.PooledByteBufAllocator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -387,7 +389,7 @@ public class Request {
     }
 
     protected void handleException(Throwable throwable) {
-      if (throwable instanceof IOException) {
+      if (throwable instanceof ClosedConnectionException) {
         Duration nextRetryIntervalDuration = retryStrategy.calculateNextRetryInterval(attempts); // if the next interval is invalid, fail the result future
         if (nextRetryIntervalDuration == null || dispatchTimeoutMs <= nextRetryIntervalDuration.toMillis()) {
           resolve(new TimeoutException("Request timed out after " + sendRequestTimeoutMs + " ms and " + attempts + " retries : " + throwable.getMessage()));
