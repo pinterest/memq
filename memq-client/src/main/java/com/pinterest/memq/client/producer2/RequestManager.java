@@ -15,16 +15,14 @@
  */
 package com.pinterest.memq.client.producer2;
 
-import com.pinterest.memq.client.commons.Compression;
-import com.pinterest.memq.client.commons2.MemqCommonClient;
-import com.pinterest.memq.client.commons2.retry.RetryStrategy;
-import com.pinterest.memq.client.producer.MemqWriteResult;
-
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.MetricRegistry;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import io.netty.buffer.PooledByteBufAllocator;
+import com.pinterest.memq.client.commons.Compression;
+import com.pinterest.memq.client.commons2.MemqCommonClient;
+import com.pinterest.memq.client.commons2.retry.RetryStrategy;
+import com.pinterest.memq.client.producer.MemqWriteResult;
 
 import java.io.Closeable;
 import java.io.IOException;
