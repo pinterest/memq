@@ -31,6 +31,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.pinterest.memq.client.commons2.MemqNettyPooledByteBufAllocator;
+import io.netty.buffer.PooledByteBufAllocator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -157,7 +158,7 @@ public class NetworkClient implements Closeable {
         }
         ByteBuf buffer = null;
         try {
-          buffer = MemqNettyPooledByteBufAllocator.getAllocator().buffer(request.getSize(RequestType.PROTOCOL_VERSION));
+          buffer = PooledByteBufAllocator.DEFAULT.buffer(request.getSize(RequestType.PROTOCOL_VERSION));
           request.write(buffer, RequestType.PROTOCOL_VERSION);
           channelFuture.channel().writeAndFlush(buffer);
         } catch (Exception e) {

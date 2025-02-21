@@ -120,7 +120,7 @@ public class Request {
     this.compression = compression;
     this.metricRegistry = metricRegistry;
     int bufferCapacity = getByteBufCapacity(maxRequestSize, compression);
-    this.byteBuf = MemqNettyPooledByteBufAllocator.getAllocator().buffer(bufferCapacity);
+    this.byteBuf = PooledByteBufAllocator.DEFAULT.buffer(bufferCapacity);
     try {
       initializeOutputStream();
     } catch (IOException ioe) {
