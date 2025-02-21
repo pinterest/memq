@@ -77,8 +77,6 @@ public class NetworkClient implements Closeable {
   private final Bootstrap bootstrap;
   private final EventLoopGroup eventLoopGroup;
   private final AtomicBoolean closed = new AtomicBoolean(false);
-  private final PooledByteBufAllocator byteBufAllocator = PooledByteBufAllocator.DEFAULT;
-
   private volatile ChannelFuture connectFuture;
 
   public NetworkClient() {
@@ -158,7 +156,7 @@ public class NetworkClient implements Closeable {
         }
         ByteBuf buffer = null;
         try {
-          buffer = byteBufAllocator.buffer(request.getSize(RequestType.PROTOCOL_VERSION));
+          buffer = PooledByteBufAllocator.DEFAULT.buffer(request.getSize(RequestType.PROTOCOL_VERSION));
           request.write(buffer, RequestType.PROTOCOL_VERSION);
           channelFuture.channel().writeAndFlush(buffer);
         } catch (Exception e) {
