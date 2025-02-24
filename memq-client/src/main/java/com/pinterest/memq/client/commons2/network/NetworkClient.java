@@ -136,6 +136,9 @@ public class NetworkClient implements Closeable {
 
     // no need to remove listeners since they are removed by Netty after fired
     acquireChannel(socketAddress).addListener((ChannelFutureListener) channelFuture -> {
+      if (!channelFuture.channel().isWritable()) {
+        System.out.println("Channel is not writable");
+      }
       if (channelFuture.isSuccess()) {
         long elapsedMs = System.currentTimeMillis() - startMs;
         responseHandler.addRequest(identifier, returnFuture);
@@ -156,6 +159,9 @@ public class NetworkClient implements Closeable {
         }
         ByteBuf buffer = null;
         try {
+//          if (!channelFuture.channel().isWritable()) {
+//            System.out.println("Channel is not writable");
+//          }
           buffer = PooledByteBufAllocator.DEFAULT.buffer(request.getSize(RequestType.PROTOCOL_VERSION));
           request.write(buffer, RequestType.PROTOCOL_VERSION);
           channelFuture.channel().writeAndFlush(buffer);

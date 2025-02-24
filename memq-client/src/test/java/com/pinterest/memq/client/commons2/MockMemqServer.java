@@ -15,12 +15,11 @@
  */
 package com.pinterest.memq.client.commons2;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.pinterest.memq.commons.protocol.RequestPacket;
 import com.pinterest.memq.commons.protocol.RequestType;
 import com.pinterest.memq.commons.protocol.ResponseCodes;
 import com.pinterest.memq.commons.protocol.ResponsePacket;
-
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
@@ -37,11 +36,13 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
+import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteOrder;
 import java.util.Map;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.function.BiConsumer;
 
 public class MockMemqServer {
@@ -51,13 +52,17 @@ public class MockMemqServer {
   private ChannelFuture channelFuture;
   private final ByteBufAllocator allocator;
 
-  public MockMemqServer(int port, Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> responseMap, boolean useDirect) {
+  public MockMemqServer(int port, Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> responseMap, boolean useDirect,
+                        boolean attachTrafficShapingHandler, long readLimit, long checkInterval) {
     allocator = new PooledByteBufAllocator(useDirect);
     bootstrap = new ServerBootstrap();
     bootstrap.group(new NioEventLoopGroup(1, new ThreadFactoryBuilder().setNameFormat("boss").build()), new NioEventLoopGroup(new ThreadFactoryBuilder().setNameFormat("worker").build()));
     bootstrap.channel(NioServerSocketChannel.class);
     bootstrap.localAddress(port);
     bootstrap.childOption(ChannelOption.ALLOCATOR, allocator);
+    ScheduledThreadPoolExecutor tmpScheduler = new ScheduledThreadPoolExecutor(1);
+    tmpScheduler.setRemoveOnCancelPolicy(true);
+    GlobalTrafficShapingHandler trafficShapingHandler = new GlobalTrafficShapingHandler(tmpScheduler, 0, readLimit, checkInterval);
     bootstrap.childHandler(new ChannelInitializer<SocketChannel>() {
       @Override
       protected void initChannel(SocketChannel ch) throws Exception {
@@ -70,6 +75,9 @@ public class MockMemqServer {
             0,
             0,
             false));
+        if (attachTrafficShapingHandler) {
+          pipeline.addLast(trafficShapingHandler);
+        }
         pipeline.addLast(new MockResponseHandler());
         pipeline.addLast(new MockRequestHandler(responseMap));
       }
@@ -78,7 +86,7 @@ public class MockMemqServer {
   }
 
   public MockMemqServer(int port, Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> responseMap) {
-    this(port, responseMap, true);
+    this(port, responseMap, true, false, -1, -1);
   }
 
   public ChannelFuture start() throws Exception {
@@ -109,6 +117,7 @@ public class MockMemqServer {
       RequestPacket requestPacket = new RequestPacket();
       requestPacket.readFields(inBuffer, (short) 0);
       inBuffer.release();
+      System.out.println("server channelRead for request: " + requestPacket.getRequestType());
       BiConsumer<ChannelHandlerContext, RequestPacket> consumer = responseMap.get(requestPacket.getRequestType());
       if (consumer != null) {
         consumer.accept(ctx, requestPacket);
