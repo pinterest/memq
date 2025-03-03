@@ -24,6 +24,7 @@ public class ResponseCodes {
   public static final short INTERNAL_SERVER_ERROR = 500;
   public static final short BAD_REQUEST = 400;
   public static final short REQUEST_FAILED = 502;
+  public static final short SLOW_DOWN = 501;
   public static final short REDIRECT = 302;
   public static final short NO_DATA = 204;
   

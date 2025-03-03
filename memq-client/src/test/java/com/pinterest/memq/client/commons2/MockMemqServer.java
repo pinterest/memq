@@ -54,7 +54,7 @@ public class MockMemqServer {
 
   public MockMemqServer(int port, Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> responseMap, boolean useDirect,
                         boolean attachTrafficShapingHandler, long readLimit, long checkInterval) {
-    allocator = new PooledByteBufAllocator(useDirect);
+    allocator = new PooledByteBufAllocator(false,3, 0, 8192, 3);
     bootstrap = new ServerBootstrap();
     bootstrap.group(new NioEventLoopGroup(1, new ThreadFactoryBuilder().setNameFormat("boss").build()), new NioEventLoopGroup(new ThreadFactoryBuilder().setNameFormat("worker").build()));
     bootstrap.channel(NioServerSocketChannel.class);
@@ -131,6 +131,7 @@ public class MockMemqServer {
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
       logger.warn("Exception caught on inbound connection: {}", cause.getMessage());
+      cause.printStackTrace();
       ctx.close();
     }
   }

@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.Properties;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
@@ -122,10 +123,10 @@ public class NetworkClient implements Closeable {
   }
 
   public CompletableFuture<ResponsePacket> send(InetSocketAddress socketAddress, RequestPacket request) throws Exception {
-    return send(socketAddress, request, Duration.ofMillis(irresponsiveTimeoutMs));
+    return send(socketAddress, request, Duration.ofMillis(irresponsiveTimeoutMs), null);
   }
 
-  public CompletableFuture<ResponsePacket> send(InetSocketAddress socketAddress, RequestPacket request, Duration timeout)
+  public CompletableFuture<ResponsePacket> send(InetSocketAddress socketAddress, RequestPacket request, Duration timeout, Callable<Void> successfulWriteCallback)
       throws ExecutionException, InterruptedException {
     final long startMs = System.currentTimeMillis();
     if (closed.get()) {
@@ -136,9 +137,6 @@ public class NetworkClient implements Closeable {
 
     // no need to remove listeners since they are removed by Netty after fired
     acquireChannel(socketAddress).addListener((ChannelFutureListener) channelFuture -> {
-      if (!channelFuture.channel().isWritable()) {
-        System.out.println("Channel is not writable");
-      }
       if (channelFuture.isSuccess()) {
         long elapsedMs = System.currentTimeMillis() - startMs;
         responseHandler.addRequest(identifier, returnFuture);
@@ -159,12 +157,14 @@ public class NetworkClient implements Closeable {
         }
         ByteBuf buffer = null;
         try {
-//          if (!channelFuture.channel().isWritable()) {
-//            System.out.println("Channel is not writable");
-//          }
           buffer = PooledByteBufAllocator.DEFAULT.buffer(request.getSize(RequestType.PROTOCOL_VERSION));
           request.write(buffer, RequestType.PROTOCOL_VERSION);
-          channelFuture.channel().writeAndFlush(buffer);
+          ChannelFuture writeAndFlushFuture = channelFuture.channel().writeAndFlush(buffer);
+          writeAndFlushFuture.addListener((ChannelFutureListener) future -> {
+            if (future.isSuccess() && successfulWriteCallback != null) {
+              successfulWriteCallback.call();
+            }
+          });
         } catch (Exception e) {
           logger.warn("Failed to write request " + request.getClientRequestId(), e);
           ReferenceCountUtil.release(buffer);

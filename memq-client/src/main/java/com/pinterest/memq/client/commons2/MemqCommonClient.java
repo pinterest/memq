@@ -30,6 +30,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -97,7 +98,8 @@ public class MemqCommonClient implements Closeable {
   }
 
   public CompletableFuture<ResponsePacket> sendRequestPacketAndReturnResponseFuture(RequestPacket request,
-                                                                                    long timeoutMillis) throws InterruptedException,
+                                                                                    long timeoutMillis,
+                                                                                    Callable<Void> successfulWriteCallback) throws InterruptedException,
                                                                                                         TimeoutException,
                                                                                                         ExecutionException {
     if (endpoints == null) {
@@ -116,7 +118,7 @@ public class MemqCommonClient implements Closeable {
       Endpoint endpoint = endpointsToTry.get(retry);
       try {
         future = networkClient.send(endpoint.getAddress(), request,
-            Duration.ofMillis(timeoutMillis - elapsed));
+            Duration.ofMillis(timeoutMillis - elapsed), successfulWriteCallback);
         // we keep the endpoint connection for future use
         currentEndpoint = endpoint;
         break;
@@ -161,7 +163,7 @@ public class MemqCommonClient implements Closeable {
     Future<ResponsePacket> response = sendRequestPacketAndReturnResponseFuture(
         new RequestPacket(RequestType.PROTOCOL_VERSION, ThreadLocalRandom.current().nextLong(),
             RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket(topic)),
-        timeoutMillis);
+        timeoutMillis, null);
     ResponsePacket responsePacket = response.get(timeoutMillis, TimeUnit.MILLISECONDS);
     if (responsePacket.getResponseCode() == ResponseCodes.NOT_FOUND) {
       throw new TopicNotFoundException("Topic " + topic + " not found");

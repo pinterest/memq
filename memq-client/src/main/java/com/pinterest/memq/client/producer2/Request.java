@@ -352,7 +352,12 @@ public class Request {
       try {
         writeTimestamp = System.currentTimeMillis();
         Timer.Context sendTime = sendTimer.time();
-        CompletableFuture<ResponsePacket> response = client.sendRequestPacketAndReturnResponseFuture(requestPacket, dispatchTimeoutMs);
+        AtomicBoolean requestPacketReleased = new AtomicBoolean(false);
+        CompletableFuture<ResponsePacket> response = client.sendRequestPacketAndReturnResponseFuture(requestPacket, dispatchTimeoutMs, () -> {
+          requestPacket.release();
+          requestPacketReleased.set(true);
+          return null;
+        });
         sendTime.stop();
         writeLatency = (int) (System.currentTimeMillis() - writeTimestamp);
         response
@@ -365,7 +370,9 @@ public class Request {
                 }
               } finally {
                 try {
-                  requestPacket.release();
+                  if (!requestPacketReleased.get()) {
+                    requestPacket.release();
+                  }
                   if (responsePacket != null) {
                     responsePacket.release();
                   }
@@ -462,6 +469,9 @@ public class Request {
           break;
         case ResponseCodes.NOT_FOUND:
           resolve(new Exception("Topic not found: " + topic));
+          break;
+        case ResponseCodes.SLOW_DOWN:
+          resolve(new Exception("Server is too busy: " + topic));
           break;
         case ResponseCodes.INTERNAL_SERVER_ERROR:
           resolve(new Exception("Unknown server error: " + clientRequestId));

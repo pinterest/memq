@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.util.zip.CRC32;
 
 import com.pinterest.memq.client.producer.TaskRequest;
+import com.pinterest.memq.client.producer2.BufferedRequest;
 import com.pinterest.memq.client.producer2.Request;
 import com.pinterest.memq.core.utils.MemqUtils;
 
@@ -40,7 +41,7 @@ public class MemqMessageHeader {
   private byte[] producerAddress;
 
   private TaskRequest taskRequest = null;
-  private Request request = null;
+  private BufferedRequest request = null;
 
   public MemqMessageHeader(ByteBuf byteBuf) {
     headerLength = byteBuf.readShort();
@@ -100,7 +101,7 @@ public class MemqMessageHeader {
     this.taskRequest = taskRequest;
   }
 
-  public MemqMessageHeader(Request request) {
+  public MemqMessageHeader(BufferedRequest request) {
     this.request = request;
   }
 

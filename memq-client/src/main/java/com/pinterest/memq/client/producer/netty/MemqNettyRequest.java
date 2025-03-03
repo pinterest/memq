@@ -110,7 +110,7 @@ public class MemqNettyRequest extends TaskRequest {
                                                                         TimeoutException,
                                                                         Exception {
     Future<ResponsePacket> responseFuture = networkClient
-        .sendRequestPacketAndReturnResponseFuture(requestPacket, requestAckTimeout);
+        .sendRequestPacketAndReturnResponseFuture(requestPacket, requestAckTimeout, null);
 
     // not sure if the dispatch latencies matter
     // TODO add check for how long it takes between dispatch trigger and sync??

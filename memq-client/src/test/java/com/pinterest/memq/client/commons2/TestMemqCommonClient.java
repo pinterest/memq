@@ -90,7 +90,7 @@ public class TestMemqCommonClient {
 
     // not initialized
     try {
-      client.sendRequestPacketAndReturnResponseFuture(null, 10000);
+      client.sendRequestPacketAndReturnResponseFuture(null, 10000, null);
       fail("should fail since not initialized");
     } catch (IllegalStateException ise) {
       // good
@@ -102,7 +102,7 @@ public class TestMemqCommonClient {
     client.initialize(Collections.singletonList(commonEndpoint));
     RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1, RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
     try {
-      client.sendRequestPacketAndReturnResponseFuture(request, 10000);
+      client.sendRequestPacketAndReturnResponseFuture(request, 10000, null);
       fail("should fail since non connection");
     } catch (ExecutionException ee) {
       assertTrue(ee.getCause() instanceof ConnectException);
@@ -133,7 +133,7 @@ public class TestMemqCommonClient {
     mockServer.start();
 
     try {
-      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 10000);
+      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 10000, null);
       ResponsePacket resp = respFuture.get();
       assertEquals(ResponseCodes.OK, resp.getResponseCode());
     } catch (Exception e) {
@@ -183,7 +183,7 @@ public class TestMemqCommonClient {
     RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1, RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
 
     try {
-      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 3000);
+      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 3000, null);
       ResponsePacket resp = respFuture.get();
       fail("should throw timeout exception");
     } catch (ExecutionException ee) {
@@ -228,7 +228,7 @@ public class TestMemqCommonClient {
     RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1, RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
 
     try {
-      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 5000);
+      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 5000, null);
       respFuture.get();
       fail("should fail since connection is dropped");
     } catch (ExecutionException ee) {

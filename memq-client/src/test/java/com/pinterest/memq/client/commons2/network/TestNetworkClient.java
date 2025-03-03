@@ -127,7 +127,7 @@ public class TestNetworkClient {
         RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
     Future<ResponsePacket> pktFuture = client.send(
         InetSocketAddress.createUnresolved(LOCALHOST_STRING, port), mdPkt1,
-        Duration.ofMillis(1000));
+        Duration.ofMillis(1000), null);
 
     try {
       pktFuture.get();

@@ -19,13 +19,18 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
 import com.codahale.metrics.MetricRegistry;
@@ -118,7 +123,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
   }
 
   /**
-   * This test requires the JVM flag -XX:MaxDirectMemorySize=524288 (512mb) to be set in the test config.
+   * This test requires the JVM flag -XX:MaxDirectMemorySize=1048576 (1mb) to be set in the test config.
    * @throws Exception
    */
   @Test
@@ -142,35 +147,57 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
     MemqProducer.Builder<byte[], byte[]> builder = new MemqProducer.Builder<>();
     Properties networkProperties = new Properties();
     byte[] sampleValue = new byte[8192];
+    int maxPayloadBytes = MemqMessageHeader.getHeaderLength() +
+            RawRecord.newInstance(null, null, null, sampleValue,0).calculateEncodedLogMessageLength();
+    System.out.println("maxPayloadBytes: " + maxPayloadBytes);
     builder
             .cluster("prototype")
             .topic("test")
             .bootstrapServers(LOCALHOST_STRING + ":" + port)
             .keySerializer(new ByteArraySerializer())
             .valueSerializer(new ByteArraySerializer())
-            .maxPayloadBytes(
-                    MemqMessageHeader.getHeaderLength() +
-                            RawRecord.newInstance(null, null, null, sampleValue,0).calculateEncodedLogMessageLength())
+            .maxPayloadBytes(maxPayloadBytes)
             .compression(Compression.NONE)
-            .maxInflightRequests(15)
-            .maxPayloadBytes(65536)
+            .maxInflightRequests(120)
             .networkProperties(networkProperties)
             .metricRegistry(new MetricRegistry());
 
     MemqProducer<byte[], byte[]> producer = builder.build();
 
+    List<Future<MemqWriteResult>> futures = new ArrayList<>();
+
     while (true) {
-      ThreadLocalRandom.current().nextBytes(sampleValue);
-      try {
-        Future<MemqWriteResult> r =  producer.write(
-                null,
-                sampleValue
-        );
-        System.out.println("client write");
-        Thread.sleep(100);
-      } catch (IOException e) {
-        System.out.println("exception: " + e);
+      while (futures.size() < 100) {
+        ThreadLocalRandom.current().nextBytes(sampleValue);
+        try {
+          Future<MemqWriteResult> r =  producer.write(
+                  null,
+                  sampleValue
+          );
+          futures.add(r);
+          System.out.println("client write");
+          System.out.println("Direct memory used: " + PooledByteBufAllocator.DEFAULT.metric().usedDirectMemory());
+          Thread.sleep(100);
+        } catch (IOException e) {
+          System.out.println("exception: " + e);
+        }
       }
+
+      int numSuccess = 0;
+      int numFailures = 0;
+      for (Future<MemqWriteResult> future : futures) {
+          try {
+            MemqWriteResult resp = future.get(10000, TimeUnit.MILLISECONDS);
+            System.out.println("resp: " + resp);
+            numSuccess++;
+          } catch (ExecutionException e) {
+            System.out.println("Future exception: " + e);
+            numFailures++;
+          }
+      }
+      System.out.println("numSuccess: " + numSuccess + ", numFailures: " + numFailures);
+      futures.clear();
+
 //      MemqWriteResult resp = r.get();
 //      System.out.println("resp: " + resp);
     }
