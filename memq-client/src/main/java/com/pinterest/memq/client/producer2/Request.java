@@ -19,7 +19,6 @@ import com.pinterest.memq.client.commons.Compression;
 import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons.audit.Auditor;
 import com.pinterest.memq.client.commons2.MemqCommonClient;
-import com.pinterest.memq.client.commons2.MemqNettyPooledByteBufAllocator;
 import com.pinterest.memq.client.commons2.network.ClosedConnectionException;
 import com.pinterest.memq.client.commons2.retry.RetryStrategy;
 import com.pinterest.memq.client.producer.MemqWriteResult;
