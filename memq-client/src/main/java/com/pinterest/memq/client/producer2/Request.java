@@ -19,6 +19,7 @@ import com.pinterest.memq.client.commons.Compression;
 import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons.audit.Auditor;
 import com.pinterest.memq.client.commons2.MemqCommonClient;
+import com.pinterest.memq.client.commons2.MemqPooledByteBufAllocator;
 import com.pinterest.memq.client.commons2.network.ClosedConnectionException;
 import com.pinterest.memq.client.commons2.retry.RetryStrategy;
 import com.pinterest.memq.client.producer.MemqWriteResult;
@@ -119,7 +120,7 @@ public class Request {
     this.compression = compression;
     this.metricRegistry = metricRegistry;
     int bufferCapacity = getByteBufCapacity(maxRequestSize, compression);
-    this.byteBuf = PooledByteBufAllocator.DEFAULT.buffer(bufferCapacity, bufferCapacity);
+    this.byteBuf = MemqPooledByteBufAllocator.buffer(bufferCapacity, bufferCapacity, 1000);
     try {
       initializeOutputStream();
     } catch (IOException ioe) {
