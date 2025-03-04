@@ -35,4 +35,8 @@ public class MemqPooledByteBufAllocator {
     throw new IOException("Failed to allocate buffer with initialCapacity=" + initialCapacity + ", maxCapacity=" + maxCapacity + " within " + maxBlockMs + "ms");
   }
 
+  public static long usedDirectMemory() {
+    return INSTANCE.metric().usedDirectMemory();
+  }
+
 }

@@ -44,12 +44,16 @@ public class RequestPacket extends TransportPacket {
   }
 
   @Override
-  public void write(ByteBuf outBuf, short protocolVersion) {
-    outBuf.writeInt(getSize(protocolVersion));
-    outBuf.writeShort(protocolVersion);
-    outBuf.writeLong(clientRequestId);
-    outBuf.writeByte(requestType.ordinal());
-    payload.write(outBuf, protocolVersion);
+  public void write(ByteBuf outBuf, short protocolVersion) throws IOException {
+    try {
+      outBuf.writeInt(getSize(protocolVersion));
+      outBuf.writeShort(protocolVersion);
+      outBuf.writeLong(clientRequestId);
+      outBuf.writeByte(requestType.ordinal());
+      payload.write(outBuf, protocolVersion);
+    } catch (OutOfMemoryError oom) {
+      throw new IOException("Failed to write RequestPacket", oom);
+    }
   }
 
   @Override

@@ -127,14 +127,14 @@ public class NetworkClient implements Closeable {
     return send(socketAddress, request, Duration.ofMillis(irresponsiveTimeoutMs));
   }
 
-  public CompletableFuture<ResponsePacket> send(InetSocketAddress socketAddress, RequestPacket request, Duration timeout)
+  public CompletableFuture<ResponsePacket> send(InetSocketAddress socketAddress, RequestPacket requestPacket, Duration timeout)
       throws ExecutionException, InterruptedException {
     final long startMs = System.currentTimeMillis();
     if (closed.get()) {
       throw new IllegalStateException("Cannot send since client is closed");
     }
     CompletableFuture<ResponsePacket> returnFuture = new CompletableFuture<>();
-    final TransportPacketIdentifier identifier = new TransportPacketIdentifier(request);
+    final TransportPacketIdentifier identifier = new TransportPacketIdentifier(requestPacket);
 
     // no need to remove listeners since they are removed by Netty after fired
     acquireChannel(socketAddress).addListener((ChannelFutureListener) channelFuture -> {
@@ -158,11 +158,11 @@ public class NetworkClient implements Closeable {
         }
         ByteBuf buffer = null;
         try {
-          buffer = MemqPooledByteBufAllocator.buffer(request.getSize(RequestType.PROTOCOL_VERSION), Integer.MAX_VALUE, 1000);
-          request.write(buffer, RequestType.PROTOCOL_VERSION);
+          buffer = MemqPooledByteBufAllocator.buffer(requestPacket.getSize(RequestType.PROTOCOL_VERSION), Integer.MAX_VALUE, 1000);
+          requestPacket.write(buffer, RequestType.PROTOCOL_VERSION);
           channelFuture.channel().writeAndFlush(buffer);
         } catch (Exception e) {
-          logger.warn("Failed to write request " + request.getClientRequestId(), e);
+          logger.warn("Failed to write request " + requestPacket.getClientRequestId(), e);
           ReferenceCountUtil.release(buffer);
           responseHandler.cancelRequest(identifier, e);
         }

@@ -96,7 +96,7 @@ public class MemqCommonClient implements Closeable {
     }
   }
 
-  public CompletableFuture<ResponsePacket> sendRequestPacketAndReturnResponseFuture(RequestPacket request,
+  public CompletableFuture<ResponsePacket> sendRequestPacketAndReturnResponseFuture(RequestPacket requestPacket,
                                                                                     long timeoutMillis) throws InterruptedException,
                                                                                                         TimeoutException,
                                                                                                         ExecutionException {
@@ -115,7 +115,7 @@ public class MemqCommonClient implements Closeable {
       }
       Endpoint endpoint = endpointsToTry.get(retry);
       try {
-        future = networkClient.send(endpoint.getAddress(), request,
+        future = networkClient.send(endpoint.getAddress(), requestPacket,
             Duration.ofMillis(timeoutMillis - elapsed));
         // we keep the endpoint connection for future use
         currentEndpoint = endpoint;

@@ -23,7 +23,7 @@ public interface Packet {
 
   void readFields(ByteBuf buf, short protocolVersion) throws IOException;
 
-  void write(ByteBuf buf, short protocolVersion);
+  void write(ByteBuf buf, short protocolVersion) throws IOException;
 
   int getSize(short protocolVersion);
 

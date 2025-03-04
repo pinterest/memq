@@ -75,7 +75,7 @@ public class ResponsePacket extends TransportPacket {
   }
 
   @Override
-  public void write(ByteBuf buf, short protocolVersion) {
+  public void write(ByteBuf buf, short protocolVersion) throws IOException {
     buf.writeInt(getSize(protocolVersion) - Integer.BYTES);
     buf.writeShort(protocolVersion);
     buf.writeLong(clientRequestId);

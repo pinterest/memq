@@ -35,6 +35,7 @@ import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.client.commons.Compression;
 import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons.serde.ByteArraySerializer;
+import com.pinterest.memq.client.commons2.MemqPooledByteBufAllocator;
 import com.pinterest.memq.client.commons2.MockMemqServer;
 import com.pinterest.memq.client.commons2.network.netty.ClientChannelInitializer;
 import com.pinterest.memq.client.producer.MemqWriteResult;
@@ -50,6 +51,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.util.internal.OutOfDirectMemoryError;
+import org.junit.Before;
 import org.junit.Test;
 
 public class TestMemqProducerMemory extends TestMemqProducerBase {
@@ -120,24 +122,12 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
    * This test requires the JVM flag -XX:MaxDirectMemorySize=1048576 (1mb) to be set in the test config.
    * @throws Exception
    */
-//  @Test
+  @Test
   public void testDirectMemoryAllocationFailureOnWrite() throws Exception {
     Properties props = System.getProperties();
-    props.setProperty("io.netty.maxDirectMemory", Integer.toString(0));
+    props.setProperty("io.netty.maxDirectMemory", "1048576");
     props.setProperty("io.netty.allocator.numDirectArenas","2");
     props.setProperty("io.netty.allocator.maxOrder","3");
-    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
-
-    setupSimpleTestServerTopicMetadataHandler(map);
-    map.put(RequestType.WRITE, (ctx, req) -> {
-      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(),
-              req.getClientRequestId(), req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
-      ctx.writeAndFlush(resp);
-    });
-
-    MockMemqServer mockServer = new MockMemqServer(port, map, false, true, 65536, 1000);
-    mockServer.start();
-
     MemqProducer.Builder<byte[], byte[]> builder = new MemqProducer.Builder<>();
     Properties networkProperties = new Properties();
     byte[] sampleValue = new byte[8192];
@@ -147,7 +137,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
     builder
             .cluster("prototype")
             .topic("test")
-            .bootstrapServers(LOCALHOST_STRING + ":" + port)
+            .bootstrapServers(LOCALHOST_STRING + ":" + 20000)
             .keySerializer(new ByteArraySerializer())
             .valueSerializer(new ByteArraySerializer())
             .maxPayloadBytes(maxPayloadBytes)
@@ -170,7 +160,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
           );
           futures.add(r);
           System.out.println("client write");
-          System.out.println("Direct memory used: " + PooledByteBufAllocator.DEFAULT.metric().usedDirectMemory());
+          System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
           Thread.sleep(100);
         } catch (IOException e) {
           System.out.println("write exception: " + e);
@@ -197,6 +187,23 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
     }
 
 //    mockServer.stop();
+  }
+
+  public static void main(String[] args) throws Exception {
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
+
+    short port = (short) 20000;
+
+    setupSimpleTestServerTopicMetadataHandler(map, port);
+    map.put(RequestType.WRITE, (ctx, req) -> {
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(),
+              req.getClientRequestId(), req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
+      ctx.writeAndFlush(resp);
+    });
+
+    MockMemqServer mockServer = new MockMemqServer(port, map, false, true, 20000, 1000);
+    mockServer.start();
+
   }
 }
 

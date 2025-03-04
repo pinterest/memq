@@ -92,4 +92,18 @@ public class TestMemqProducerBase {
     });
   }
 
+  protected static void setupSimpleTestServerTopicMetadataHandler(Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map, short port) {
+    map.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+      TopicConfig topicConfig = new TopicConfig("test", "dev");
+      TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
+      Set<Broker> brokers = Collections.singleton(new Broker(LOCALHOST_STRING, port, "n/a", "n/a",
+              BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+              req.getRequestType(), ResponseCodes.OK,
+              new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+                      ImmutableSet.of(), "dev", new Properties())));
+      ctx.writeAndFlush(resp);
+    });
+  }
 }
