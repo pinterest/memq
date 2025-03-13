@@ -159,11 +159,12 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
                   sampleValue
           );
           futures.add(r);
-          System.out.println("client write");
+          System.out.println("client write - request buffer bytes: " + producer.getCurrentBufferSizeBytes());
           System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
           Thread.sleep(100);
-        } catch (IOException e) {
+        } catch (Exception e) {
           System.out.println("write exception: " + e);
+          e.printStackTrace();
         }
       }
 

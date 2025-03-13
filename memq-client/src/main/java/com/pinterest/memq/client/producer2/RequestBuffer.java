@@ -1,11 +1,16 @@
 package com.pinterest.memq.client.producer2;
 
+import com.codahale.metrics.MetricRegistry;
+import com.google.common.annotations.VisibleForTesting;
 import com.pinterest.memq.client.commons.Compression;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.time.Duration;
+import java.util.Map;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -14,9 +19,10 @@ public class RequestBuffer {
     private final long maxSizeBytes;
     private final AtomicLong currentSizeBytes = new AtomicLong(0);
     private final int maxBlockMs;
-    private final ConcurrentLinkedQueue<BufferedRequest> buffer = new ConcurrentLinkedQueue<>();
+    private final ConcurrentSkipListMap<Integer, BufferedRequest> buffer = new ConcurrentSkipListMap<>();
     private final Lock sizeReadLock = new ReentrantLock(true);
-    private final Lock queueReadLock = new ReentrantLock(true);
+//    private final Lock queueReadLock = new ReentrantLock(true);
+    private final AtomicInteger lastPeekRequestId = new AtomicInteger(-1);
 
     public RequestBuffer(long maxSizeBytes, int maxBlockMs) {
         this.maxSizeBytes = maxSizeBytes;
@@ -46,6 +52,7 @@ public class RequestBuffer {
                                           int lingerMs,
                                           boolean disableAcks,
                                           Compression compression,
+                                          MetricRegistry metricRegistry,
                                           @Nullable BufferedRequest request) throws TimeoutException, IOException {
 
         long startTime = System.currentTimeMillis();
@@ -65,11 +72,13 @@ public class RequestBuffer {
                                     lingerMs,
                                     disableAcks,
                                     compression,
-                                    maxBlockMs - (System.currentTimeMillis() - startTime)
+                                    maxBlockMs - (System.currentTimeMillis() - startTime),
+                                    metricRegistry
                             );
                         }
-                        buffer.add(request);
+                        buffer.put(requestId, request);
                         currentSizeBytes.addAndGet(bufferCapacity);
+                        System.out.println("added " + bufferCapacity + " to currentSizeBytes: " + currentSizeBytes.get());
                         return request;
                     }
                 } finally {
@@ -81,14 +90,14 @@ public class RequestBuffer {
     }
 
     /**
-     * Retry a request by re-enqueuing it in the buffer.
+     * Enqueue a request in the buffer. This method is a convenience wrapper around the main enqueueRequest method.
      *
-     * @param request the request to retry
-     * @return the re-enqueued request
-     * @throws IOException if the request's buffer allocation fails within maxBlockMs
-     * @throws TimeoutException if the request cannot be re-enqueued within maxBlockMs
+     * @param request
+     * @return the enqueued request
+     * @throws IOException
+     * @throws TimeoutException
      */
-    public BufferedRequest retryRequest(BufferedRequest request) throws IOException, TimeoutException {
+    private BufferedRequest enqueueRequest(BufferedRequest request) throws IOException, TimeoutException {
         return enqueueRequest(
                 request.getEpoch(),
                 request.getTopic(),
@@ -97,8 +106,22 @@ public class RequestBuffer {
                 request.getLingerMs(),
                 request.isDisableAcks(),
                 request.getCompression(),
+                null,
                 request
         );
+    }
+
+    /**
+     * Retry a request by re-enqueuing it in the buffer.
+     *
+     * @param request the request to retry
+     * @return the re-enqueued request
+     * @throws IOException if the request's buffer allocation fails within maxBlockMs
+     * @throws TimeoutException if the request cannot be re-enqueued within maxBlockMs
+     */
+    public BufferedRequest retryRequest(BufferedRequest request, Duration nextRetryIntervalDuration) throws IOException, TimeoutException {
+        request.retry(nextRetryIntervalDuration);
+        return enqueueRequest(request);
     }
 
     /**
@@ -122,7 +145,8 @@ public class RequestBuffer {
                                                           int lingerMs,
                                                           boolean disableAcks,
                                                           Compression compression,
-                                                          long timeout) throws IOException {
+                                                          long timeout,
+                                                          MetricRegistry metricRegistry) throws IOException {
         BufferedRequest request = new BufferedRequest(
                 epoch,
                 topic,
@@ -130,7 +154,8 @@ public class RequestBuffer {
                 maxPayloadBytes,
                 lingerMs,
                 disableAcks,
-                compression);
+                compression,
+                metricRegistry);
         request.allocateAndInitialize(timeout);   // throws IOException if allocation fails within blocking time
         return request;
     }
@@ -141,34 +166,48 @@ public class RequestBuffer {
      * @return the next request that is ready for dispatch, or null if no request is ready
      */
     public BufferedRequest getReadyRequestForDispatch() {
-        if (!queueReadLock.tryLock()) {
-            throw new IllegalStateException("Unexpected contention on buffer read lock. Only one thread (the RequestDispatcher) should be reading from the buffer.");
-        }
+//        if (!queueReadLock.tryLock()) {
+//            throw new IllegalStateException("Unexpected contention on buffer read lock. Only one thread (the RequestDispatcher) should be reading from the buffer.");
+//        }
         try {
-            BufferedRequest request = buffer.peek();
-            if (request != null) {
-                if (isRequestReadyForDispatch(request)) {
-                    currentSizeBytes.addAndGet(-request.getBufferCapacity());
-                    return buffer.poll();
+            Map.Entry<Integer, BufferedRequest> entry = buffer.higherEntry(lastPeekRequestId.get());
+            if (entry != null) {
+//                System.out.println("lastPeekRequestId: " + lastPeekRequestId.get());
+                BufferedRequest request = entry.getValue();
+                if (request != null) {
+//                    System.out.println("request: " + request.getClientRequestId());
+                    if (request.isReadyForDispatch()) {
+//                        System.out.println("request ready for dispatch: " + request.getClientRequestId());
+                        lastPeekRequestId.set(entry.getKey());
+//                        System.out.println("lastPeekRequestId set to: " + lastPeekRequestId.get());
+                        return request;
+                    }
                 }
             }
         } finally {
-            queueReadLock.unlock();
+//            queueReadLock.unlock();
         }
         return null;
     }
 
-    /**
-     * Check if a request is ready to be dispatched. A request is ready if it is sealed and has no active writes,
-     * or if it has reached linger.ms since creation and there are no active writes.
-     *
-     * If linger.ms has been reached, but there are active writes, the request is not ready for dispatch and
-     * the method will return false.
-     *
-     * @param request
-     * @return true if the request is ready for dispatch, false otherwise
-     */
-    private boolean isRequestReadyForDispatch(BufferedRequest request) {
-        return (request.isSealed() && !request.hasActiveWrites()) || request.maybeTimeThresholdSeal();
+    public void removeRequest(BufferedRequest request) {
+        System.out.println("removing: " + request.getClientRequestId());
+//        if (!queueReadLock.tryLock()) {
+//            System.out.println("here");
+//            throw new IllegalStateException("Unexpected contention on buffer read lock. Only one thread (the RequestDispatcher) should be reading from the buffer.");
+//        }
+        try {
+            System.out.println("removing actually: " + request.getClientRequestId());
+            buffer.remove(request.getClientRequestId());
+            System.out.println("removed: " + request.getClientRequestId() + ", requestBuffer: " + buffer.size());
+            currentSizeBytes.addAndGet(-request.getCapacityBytes());
+        } finally {
+//            queueReadLock.unlock();
+        }
+    }
+
+    @VisibleForTesting
+    public long getCurrentSizeBytes() {
+        return currentSizeBytes.get();
     }
 }

@@ -15,6 +15,8 @@
  */
 package com.pinterest.memq.client.producer2;
 
+import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.Timer;
 import com.pinterest.memq.client.commons.Compression;
 import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons.MemqMessageHeader2;
@@ -32,6 +34,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -50,7 +53,7 @@ public class BufferedRequest {
     private final AtomicBoolean isSealed = new AtomicBoolean(false);
     private final AtomicInteger activeWrites = new AtomicInteger(0);
     private final CompletableFuture<MemqWriteResult> resultFuture = new CompletableFuture<>();
-    private final int bufferCapacity;
+    private final int capacityBytes;
     private final MemqMessageHeader2 header = new MemqMessageHeader2(this);
     private ByteBuf byteBuf;
     private final boolean disableAcks;
@@ -59,13 +62,19 @@ public class BufferedRequest {
     private int messageCount;
     private volatile long startTime;
     private RequestPacket writeRequestPacket = null;
+    private int retries = 0;
+    private long nextRetryTimestamp = -1;
+    private long actualPayloadSizeBytes = -1;
+    private Timer requestWriteTimer;
+
     public BufferedRequest(long epoch,
                            String topic,
                            int clientRequestId,
                            int maxPayloadSize,
                            int lingerMs,
                            boolean disableAcks,
-                           Compression compression) {
+                           Compression compression,
+                           MetricRegistry metricRegistry) {
         this.epoch = epoch;
         this.topic = topic;
         this.clientRequestId = clientRequestId;
@@ -73,15 +82,20 @@ public class BufferedRequest {
         this.lingerMs = lingerMs;
         this.disableAcks = disableAcks;
         this.compression = compression;
-        this.bufferCapacity = getRequestCapacity(maxRequestSize, compression);
+        this.capacityBytes = getRequestCapacity(maxRequestSize, compression);
+        initializeMetrics(metricRegistry);
+    }
+
+    private void initializeMetrics(MetricRegistry metricRegistry) {
+        requestWriteTimer = metricRegistry.timer("requests.write.time");
     }
 
     public Future<MemqWriteResult> getResultFuture() {
         return resultFuture;
     }
 
-    public int getBufferCapacity() {
-        return bufferCapacity;
+    public int getCapacityBytes() {
+        return capacityBytes;
     }
 
     /**
@@ -99,7 +113,7 @@ public class BufferedRequest {
         }
         startTime = System.currentTimeMillis();
         try {
-            this.byteBuf = MemqPooledByteBufAllocator.buffer(bufferCapacity, bufferCapacity, maxBlockMs);
+            this.byteBuf = MemqPooledByteBufAllocator.buffer(capacityBytes, capacityBytes, maxBlockMs);
             initializeOutputStream();
             isInitialized.set(true);
         } catch (IOException ioe) {
@@ -135,7 +149,7 @@ public class BufferedRequest {
 
             // synchronized to ensure bytebuf doesn't get out-of-order writes
             synchronized (byteBuf) {
-                try {
+                try (Timer.Context ctx = requestWriteTimer.time()) {
                     writeMemqLogMessage(record);
                 } finally {
                     record.recycle();
@@ -193,8 +207,8 @@ public class BufferedRequest {
         }
         try {
             header.writeHeader(byteBuf);
-            int payloadSizeBytes = byteBuf.readableBytes();
-            if (payloadSizeBytes == 0) { // don't upload 0 byte payloads
+            actualPayloadSizeBytes = byteBuf.readableBytes();
+            if (actualPayloadSizeBytes == 0) { // don't upload 0 byte payloads
                 resultFuture.complete(new MemqWriteResult(clientRequestId, 0, 0, 0));
                 return null;
             }
@@ -222,6 +236,10 @@ public class BufferedRequest {
             return;
         }
         messageIdHash = MemqUtils.calculateMessageIdHash(messageIdHash, messageIdBytes);
+    }
+
+    protected byte[] getMessageIdHash() {
+        return messageIdHash;
     }
 
     public short getVersion() {
@@ -260,6 +278,34 @@ public class BufferedRequest {
         return disableAcks;
     }
 
+    protected long getActualPayloadSizeBytes() {
+        return actualPayloadSizeBytes;
+    }
+
+    public int getRetries() {
+        return retries;
+    }
+
+    protected void retry(Duration nextRetryIntervalDuration) {
+        nextRetryTimestamp = System.currentTimeMillis() + nextRetryIntervalDuration.toMillis();
+        retries++;
+    }
+
+    /**
+     * Check if this request is ready to be dispatched. A request is ready if it is sealed and has no active writes,
+     * or if it has reached linger.ms since creation and there are no active writes. It also checks if the request
+     * has reached the next retry timestamp.
+     *
+     * If linger.ms has been reached, but there are active writes, the request is not ready for dispatch and
+     * the method will return false.
+     *
+     * @return true if this request is ready for dispatch, false otherwise
+     */
+    protected boolean isReadyForDispatch() {
+        boolean deadlineReached = System.currentTimeMillis() >= nextRetryTimestamp;
+        return deadlineReached && ((isSealed() && !hasActiveWrites()) || maybeTimeThresholdSeal());
+    }
+
     public boolean maybeTimeThresholdSeal() {
         if (hasActiveWrites()) {
             return false;
@@ -270,11 +316,23 @@ public class BufferedRequest {
         return false;
     }
 
-    protected void resolve(MemqWriteResult writeResult) {
+    protected void resolveAndRelease(MemqWriteResult writeResult) {
         resultFuture.complete(writeResult);
+        releaseWriteRequestPacket();
     }
 
-    protected void resolve(Throwable e) {
+    protected void resolveAndRelease(Throwable e) {
         resultFuture.completeExceptionally(e);
+        releaseWriteRequestPacket();
+    }
+
+    private void releaseWriteRequestPacket() {
+        if (writeRequestPacket != null) {
+            try {
+                writeRequestPacket.release();
+            } catch (IOException ex) {
+                logger.warn("Failed to release request packet", ex);
+            }
+        }
     }
 }

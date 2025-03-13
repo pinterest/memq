@@ -15,6 +15,7 @@
  */
 package com.pinterest.memq.client.producer2;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.pinterest.memq.client.commons.Compression;
 import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons.audit.Auditor;
@@ -46,7 +47,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeoutException;
 
 public class MemqProducer<K, V> implements Closeable {
   protected static final Map<String, MemqProducer<?, ?>> clientMap = new HashMap<>();
@@ -60,7 +64,11 @@ public class MemqProducer<K, V> implements Closeable {
 
   private final long epoch = System.currentTimeMillis();
   private final MemqCommonClient client;
-  private final RequestManager requestManager;
+  private final BufferedRequestManager requestManager;
+  private final RequestBuffer requestBuffer;
+
+//  private final RequestManager requestManager;
+
   private final Auditor auditor;
   private final MetricRegistry metricRegistry;
   private Counter writeTooLargeMessagesCounter;
@@ -97,8 +105,12 @@ public class MemqProducer<K, V> implements Closeable {
       } else {
         this.client = new MemqCommonClient(locality, sslConfig, networkProperties);
       }
+      this.requestBuffer = new RequestBuffer(65536, 1000);
+      BufferedRequestDispatcher requestDispatcher = new BufferedRequestDispatcher(client, requestBuffer, this, 1000, sendRequestTimeout, maxInflightRequests, retryStrategy, metricRegistry);
       this.requestManager =
-          new RequestManager(client, topic, this, sendRequestTimeout, retryStrategy, maxPayloadBytes, lingerMs, maxInflightRequests, compression, disableAcks, metricRegistry);
+              new BufferedRequestManager(client, topic, this, requestBuffer, retryStrategy, maxPayloadBytes, lingerMs, compression, disableAcks, metricRegistry);
+//      this.requestManager =
+//          new RequestManager(client, topic, this, sendRequestTimeout, retryStrategy, maxPayloadBytes, lingerMs, maxInflightRequests, compression, disableAcks, metricRegistry);
       if (auditProperties != null) {
         String
             auditorClass =
@@ -110,10 +122,16 @@ public class MemqProducer<K, V> implements Closeable {
       }
       initializeMetrics();
       initializeTopicConnection(bootstrapEndpoints, topic);
+      startDispatcher(requestDispatcher, topic);
     } catch (Exception e) {
       close();
       throw e;
     }
+  }
+
+  private void startDispatcher(BufferedRequestDispatcher requestDispatcher, String topic) {
+    ExecutorService dispatchExecutor = Executors.newSingleThreadExecutor(new ThreadFactoryBuilder().setNameFormat("request-dispatch-" + topic).build());
+    dispatchExecutor.submit(requestDispatcher);
   }
 
   private void initializeMetrics() {
@@ -189,6 +207,10 @@ public class MemqProducer<K, V> implements Closeable {
 
       return requestManager.write(record);
     }
+    catch (InterruptedException | TimeoutException e) {
+        // TODO: throw in method signature instead
+        throw new RuntimeException(e);
+    }
   }
 
   public MetricRegistry getMetricRegistry() {
@@ -216,7 +238,13 @@ public class MemqProducer<K, V> implements Closeable {
 
   @VisibleForTesting
   protected int getAvailablePermits() {
-    return requestManager.getAvailablePermits();
+    return -1;  // TODO: fix this in new implementation
+//    return requestManager.getAvailablePermits();
+  }
+
+  @VisibleForTesting
+  protected long getCurrentBufferSizeBytes() {
+    return requestBuffer.getCurrentSizeBytes();
   }
 
   public String getCluster() {
