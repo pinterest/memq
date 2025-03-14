@@ -161,7 +161,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
           futures.add(r);
           System.out.println("client write - request buffer bytes: " + producer.getCurrentBufferSizeBytes());
           System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
-          Thread.sleep(100);
+//          Thread.sleep(10);
         } catch (Exception e) {
           System.out.println("write exception: " + e);
           e.printStackTrace();
@@ -202,7 +202,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
       ctx.writeAndFlush(resp);
     });
 
-    MockMemqServer mockServer = new MockMemqServer(port, map, false, true, 20000, 1000);
+    MockMemqServer mockServer = new MockMemqServer(port, map, false, true, 50000, 1000);
     mockServer.start();
 
   }

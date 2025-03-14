@@ -63,7 +63,6 @@ public class BufferedRequestManager implements Closeable {
         } else if (!currentRequest.isWritable(record)) {
             // seal the current request and create a new one
             boolean sealed = currentRequest.sealRequest();
-            System.out.println("sealed request: " + currentRequest.getClientRequestId());
             if (!sealed) {
                 throw new IOException("Failed to seal request");
             }

@@ -78,7 +78,6 @@ public class RequestBuffer {
                         }
                         buffer.put(requestId, request);
                         currentSizeBytes.addAndGet(bufferCapacity);
-                        System.out.println("added " + bufferCapacity + " to currentSizeBytes: " + currentSizeBytes.get());
                         return request;
                     }
                 } finally {
@@ -86,7 +85,10 @@ public class RequestBuffer {
                 }
             }
         }
-        throw new TimeoutException("Failed to allocate buffer for request within " + maxBlockMs + "ms");
+        throw new TimeoutException("Failed to allocate " + bufferCapacity + " bytes " +
+                "for requestId=" + requestId + " within maxBlockMs=" + maxBlockMs + "ms. " +
+                "Current buffer size: " + currentSizeBytes.get() + " bytes, " +
+                "Max buffer size: " + maxSizeBytes + " bytes");
     }
 
     /**
@@ -166,44 +168,22 @@ public class RequestBuffer {
      * @return the next request that is ready for dispatch, or null if no request is ready
      */
     public BufferedRequest getReadyRequestForDispatch() {
-//        if (!queueReadLock.tryLock()) {
-//            throw new IllegalStateException("Unexpected contention on buffer read lock. Only one thread (the RequestDispatcher) should be reading from the buffer.");
-//        }
-        try {
-            Map.Entry<Integer, BufferedRequest> entry = buffer.higherEntry(lastPeekRequestId.get());
-            if (entry != null) {
-//                System.out.println("lastPeekRequestId: " + lastPeekRequestId.get());
-                BufferedRequest request = entry.getValue();
-                if (request != null) {
-//                    System.out.println("request: " + request.getClientRequestId());
-                    if (request.isReadyForDispatch()) {
-//                        System.out.println("request ready for dispatch: " + request.getClientRequestId());
-                        lastPeekRequestId.set(entry.getKey());
-//                        System.out.println("lastPeekRequestId set to: " + lastPeekRequestId.get());
-                        return request;
-                    }
+        Map.Entry<Integer, BufferedRequest> entry = buffer.higherEntry(lastPeekRequestId.get());
+        if (entry != null) {
+            BufferedRequest request = entry.getValue();
+            if (request != null) {
+                if (request.isReadyForDispatch()) {
+                    lastPeekRequestId.set(entry.getKey());
+                    return request;
                 }
             }
-        } finally {
-//            queueReadLock.unlock();
         }
         return null;
     }
 
     public void removeRequest(BufferedRequest request) {
-        System.out.println("removing: " + request.getClientRequestId());
-//        if (!queueReadLock.tryLock()) {
-//            System.out.println("here");
-//            throw new IllegalStateException("Unexpected contention on buffer read lock. Only one thread (the RequestDispatcher) should be reading from the buffer.");
-//        }
-        try {
-            System.out.println("removing actually: " + request.getClientRequestId());
-            buffer.remove(request.getClientRequestId());
-            System.out.println("removed: " + request.getClientRequestId() + ", requestBuffer: " + buffer.size());
-            currentSizeBytes.addAndGet(-request.getCapacityBytes());
-        } finally {
-//            queueReadLock.unlock();
-        }
+        buffer.remove(request.getClientRequestId());
+        currentSizeBytes.addAndGet(-request.getCapacityBytes());
     }
 
     @VisibleForTesting

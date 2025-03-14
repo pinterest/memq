@@ -16,6 +16,7 @@ import com.pinterest.memq.core.utils.MiscUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
@@ -80,7 +81,6 @@ public class BufferedRequestDispatcher implements Runnable {
                     maxInflightRequestSemaphore.release();
                     continue;
                 }
-                System.out.println("request: " + request.getClientRequestId());
                 try {
                     RequestPacket requestPacket = request.getOrCreateWriteRequestPacket();  // when should this be released?
                     CompletableFuture<ResponsePacket> responsePacketFuture;
@@ -96,8 +96,7 @@ public class BufferedRequestDispatcher implements Runnable {
                     } catch (Exception e) {
                         // complete the future exceptionally if the request fails
                         logger.error("Failed to send request " + request.getClientRequestId(), e);
-                        request.resolveAndRelease(e);
-                        requestBuffer.removeRequest(request);
+                        cleanup(request, e);
                         continue;   // continue with the next iteration
                     } finally {
                         dispatchTime.stop();
@@ -106,7 +105,6 @@ public class BufferedRequestDispatcher implements Runnable {
                         if (throwable != null) {
                             handleResponsePacketFutureException(request, responsePacket, throwable);
                         } else {
-                            System.out.println("writeLatency: " + writeLatency);
                             handleResponse(request, responsePacket, writeTimestamp, writeLatency);
                         }
                     });
@@ -121,11 +119,10 @@ public class BufferedRequestDispatcher implements Runnable {
         }
     }
 
-
     private void handleResponsePacketFutureException(BufferedRequest request, ResponsePacket responsePacket, Throwable throwable) {
         if (throwable instanceof ClosedConnectionException) {
             // handle closed connection
-            handleClosedConnectionException(request, responsePacket, throwable);
+            maybeRetryRequest(request, responsePacket, throwable, Integer.MAX_VALUE);
         } else if (throwable instanceof Exception){
             // handle other exceptions
             Exception resultException = (Exception) throwable;
@@ -133,30 +130,26 @@ public class BufferedRequestDispatcher implements Runnable {
                 resultException = (Exception) resultException.getCause();
             }
             logger.error("Failed to send request " + request.getClientRequestId(), resultException);
-            request.resolveAndRelease(resultException);
-            tryRelease(responsePacket);
-            requestBuffer.removeRequest(request);
+            cleanupResponseError(request, responsePacket, resultException);
         } else {
             logger.error("Failed to send request " + request.getClientRequestId(), throwable);
-            request.resolveAndRelease(throwable);
-            tryRelease(responsePacket);
-            requestBuffer.removeRequest(request);
+            cleanupResponseError(request, responsePacket, throwable);
         }
     }
 
-    private void handleClosedConnectionException(BufferedRequest request, ResponsePacket responsePacket, Throwable throwable) {
+    private void maybeRetryRequest(BufferedRequest request, ResponsePacket responsePacket, Throwable throwable, int customMaxRetryLimit) {
         Duration nextRetryIntervalDuration = retryStrategy.calculateNextRetryInterval(request.getRetries());
         if (nextRetryIntervalDuration == null || dispatchTimeoutMs <= nextRetryIntervalDuration.toMillis()) {
             request.resolveAndRelease(new TimeoutException("Request timed out after " +  dispatchTimeoutMs + " ms and " + request.getRetries() + " retries : " + throwable.getMessage()));
+        } else if (request.getRetries() >= customMaxRetryLimit) {
+            request.resolveAndRelease(new Exception("Request failed after maximum " + customMaxRetryLimit + " retries: " + throwable.getMessage()));
         } else {
             logger.warn(throwable.getMessage() + ", retrying request after " + nextRetryIntervalDuration.toMillis() + " ms");
             try {
                 requestBuffer.retryRequest(request, nextRetryIntervalDuration);
             } catch (IOException | TimeoutException e) {
                 // retry failed due to buffer full or allocation failure
-                request.resolveAndRelease(e);
-                tryRelease(responsePacket);
-                requestBuffer.removeRequest(request);
+                cleanupResponseError(request, responsePacket, e);
             }
         }
     }
@@ -164,8 +157,7 @@ public class BufferedRequestDispatcher implements Runnable {
     private void handleResponse(BufferedRequest request, ResponsePacket responsePacket, long writeTimestamp, int writeLatency) {
         // handle response
         if (responsePacket == null) {
-            request.resolveAndRelease(new Exception("Response packet is null"));
-            requestBuffer.removeRequest(request);
+            cleanupResponseError(request, responsePacket, new Exception("Response packet is null"));
             return;
         }
         short responseCode = responsePacket.getResponseCode();
@@ -174,17 +166,60 @@ public class BufferedRequestDispatcher implements Runnable {
                 ackedBytesCounter.inc(request.getActualPayloadSizeBytes());
                 sendAuditMessageIfAuditEnabled(request);
                 int ackLatency = (int) (System.currentTimeMillis() - writeTimestamp);
-                logger.info("Request acked in:" + ackLatency + " " + request.getClientRequestId());
-                request.resolveAndRelease(new MemqWriteResult(request.getClientRequestId(), writeLatency, ackLatency, (int) request.getActualPayloadSizeBytes()));
-                requestBuffer.removeRequest(request);
+                logger.debug("Request acked in:" + ackLatency + " " + request.getClientRequestId());
+                cleanupResponseSuccess(request, writeLatency, ackLatency);
+                break;
+            case ResponseCodes.REDIRECT:
+                try {
+                    client.reconnect(request.getTopic(), false);
+                } catch (Exception e) {
+                    cleanupResponseError(request, responsePacket, e);
+                    return;
+                }
+                maybeRetryRequest(request, responsePacket, new Exception("Redirected to another server"), 1);
+                break;
+            case ResponseCodes.BAD_REQUEST:
+                cleanupResponseError(request, responsePacket, new Exception("Bad request, id: " + request.getClientRequestId()));
+                break;
+            case ResponseCodes.NOT_FOUND:
+                cleanupResponseError(request, responsePacket, new Exception("Topic not found: " + request.getTopic()));
+                break;
+            case ResponseCodes.INTERNAL_SERVER_ERROR:
+                cleanupResponseError(request, responsePacket, new Exception("Unknown server error: " + request.getClientRequestId()));
+                break;
+            case ResponseCodes.REQUEST_FAILED:
+                cleanupResponseError(request, responsePacket, new Exception("Request failed: " + request.getClientRequestId()));
+                break;
+            case ResponseCodes.SERVICE_UNAVAILABLE:
+                cleanupResponseError(request, responsePacket, new Exception("Server out of capacity: " + request.getTopic()));
+                break;
+            default:
+                cleanupResponseError(request, responsePacket, new Exception("Unknown response code: " + responseCode));
                 break;
         }
 
     }
 
-    private static void tryRelease(ResponsePacket responsePacket) {
+
+    private void cleanupResponseSuccess(BufferedRequest request, int writeLatency, int ackLatency) {
+        request.resolveAndRelease(new MemqWriteResult(request.getClientRequestId(), writeLatency, ackLatency, (int) request.getActualPayloadSizeBytes()));
+        requestBuffer.removeRequest(request);
+    }
+
+    private void cleanupResponseError(BufferedRequest request, ResponsePacket responsePacket, Throwable throwable) {
+        cleanup(request, throwable);
+        tryRelease(responsePacket);
+    }
+
+    private void cleanup(BufferedRequest request, Throwable throwable) {
+        request.resolveAndRelease(throwable);
+        requestBuffer.removeRequest(request);
+    }
+
+    private static void tryRelease(@Nullable ResponsePacket responsePacket) {
         try {
-            responsePacket.release();
+            if (responsePacket != null)
+                responsePacket.release();
         } catch (IOException ex) {
             logger.warn("Failed to release response packet", ex);
         }

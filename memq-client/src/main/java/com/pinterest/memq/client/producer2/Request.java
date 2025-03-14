@@ -430,7 +430,7 @@ public class Request {
           ackedBytesCounter.inc(payloadSizeBytes);
           sendAuditMessageIfAuditEnabled();
           int ackLatency = (int) (System.currentTimeMillis() - writeTimestamp);
-          logger.info("Request acked in:" + ackLatency + " " + clientRequestId);
+          logger.debug("Request acked in:" + ackLatency + " " + clientRequestId);
           resolve(new MemqWriteResult(clientRequestId, writeLatency, ackLatency, payloadSizeBytes));
           break;
         case ResponseCodes.REDIRECT:
