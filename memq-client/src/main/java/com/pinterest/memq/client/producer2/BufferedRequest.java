@@ -159,11 +159,13 @@ public class BufferedRequest {
         activeWrites.getAndIncrement();
         try {
             if (isSealed.get()) {
+                logger.debug("Request is sealed, cannot write to request " + clientRequestId);
                 return null;
             }
             // synchronized to ensure bytebuf doesn't get out-of-order writes
             synchronized (byteBuf) {
                 if (payloadSize > byteBuf.writableBytes()) {
+                    logger.debug("Payload size exceed buffer capacity, sealing request " + clientRequestId);
                     sealRequest();
                     return null;
                 }
@@ -197,8 +199,10 @@ public class BufferedRequest {
             if (isSealed.get()) {
                 return true;
             }
+            logger.debug("Sealing request " + clientRequestId);
             isSealed.set(true);
             try {
+                logger.debug("Closing output stream for request " + clientRequestId);
                 outputStream.close();
             } catch (IOException e) {
                 logger.warn("Failed to close output stream: ", e);

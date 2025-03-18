@@ -8,6 +8,8 @@ import com.pinterest.memq.client.commons2.MemqCommonClient;
 import com.pinterest.memq.client.commons2.retry.RetryStrategy;
 import com.pinterest.memq.client.producer.MemqWriteResult;
 import com.pinterest.memq.core.utils.MemqUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -17,7 +19,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class BufferedRequestManager implements Closeable {
-
+    private static final Logger logger = LoggerFactory.getLogger(BufferedRequestManager.class);
     private final MemqCommonClient client;
     private final String topic;
     private final MemqProducer<?, ?> producer;
@@ -81,35 +83,36 @@ public class BufferedRequestManager implements Closeable {
         if (currentRequest == null || currentRequest.isSealed()) {
             synchronized (this) {
                 if (currentRequest == null || currentRequest.isSealed()) {
+                    if (client.isClosed()) {
+                        throw new IOException("Cannot write to topic " + topic + " when client is closed");
+                    }
+                    logger.debug("Creating new request: " + requestIdGenerator.get());
                     currentRequest = createNewRequestAndAddToBuffer();
                 }
                 return currentRequest;
             }
         }
+        logger.debug("Using existing request: " + currentRequest.getClientRequestId());
         return currentRequest;
     }
 
     private BufferedRequest createNewRequestAndAddToBuffer() throws IOException, TimeoutException {
         // TimeoutException if buffer full, IOException if ByteBuf allocation fails
-        try {
-            BufferedRequest newRequest = requestBuffer.enqueueRequest(
-                    producer.getEpoch(),
-                    scheduler,
-                    topic,
-                    requestIdGenerator.getAndIncrement(),
-                    maxPayloadBytes,
-                    lingerMs,
-                    disableAcks,
-                    compression,
-                    metricRegistry,
-                    null
-            );
-            requestCounter.inc();
-            return newRequest;
-        } catch (IOException | TimeoutException e) {
-            requestIdGenerator.decrementAndGet();
-            throw e;
-        }
+        BufferedRequest newRequest = requestBuffer.enqueueRequest(
+                producer.getEpoch(),
+                scheduler,
+                topic,
+                requestIdGenerator.get(),
+                maxPayloadBytes,
+                lingerMs,
+                disableAcks,
+                compression,
+                metricRegistry,
+                null
+        );
+        requestCounter.inc();
+        requestIdGenerator.incrementAndGet();
+        return newRequest;
     }
 
     public MemqProducer<?, ?> getProducer() {
