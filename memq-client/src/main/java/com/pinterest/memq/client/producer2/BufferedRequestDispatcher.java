@@ -36,6 +36,7 @@ public class BufferedRequestDispatcher implements Runnable {
     private final int maxBlockMs;
     private final RetryStrategy retryStrategy;
     private final MemqProducer<?, ?> producer;
+    private final int maxInflightRequests;
     private Counter sentBytesCounter;
     private Counter ackedBytesCounter;
     private Timer sendTimer;
@@ -57,6 +58,7 @@ public class BufferedRequestDispatcher implements Runnable {
         this.maxBlockMs = maxBlockMs;
         this.running = new AtomicBoolean(true);
         this.dispatchTimeoutMs = dispatchTimeoutMs;     // max time for client dispatch
+        this.maxInflightRequests = maxInflightRequests;
         this.maxInflightRequestSemaphore = new Semaphore(maxInflightRequests);
         this.retryStrategy = retryStrategy;
         initializeMetrics(metricRegistry);
@@ -68,6 +70,7 @@ public class BufferedRequestDispatcher implements Runnable {
         successCounter = metricRegistry.counter("requests.success.count");
         sendTimer = MiscUtils.oneMinuteWindowTimer(metricRegistry, "requests.send.time");
         dispatchTimer = MiscUtils.oneMinuteWindowTimer(metricRegistry, "requests.dispatch.time");
+        metricRegistry.gauge("requests.inflight", () -> () -> maxInflightRequests - maxInflightRequestSemaphore.availablePermits());
     }
 
 

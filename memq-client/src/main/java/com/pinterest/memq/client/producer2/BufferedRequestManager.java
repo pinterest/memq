@@ -28,7 +28,7 @@ public class BufferedRequestManager implements Closeable {
     private final RetryStrategy retryStrategy;
     private final MetricRegistry metricRegistry;
     private final AtomicInteger requestIdGenerator = new AtomicInteger(0);
-    private final Counter requestCounter = new Counter();
+    private Counter requestCounter;
     private final RequestBuffer requestBuffer;
     private final ScheduledThreadPoolExecutor scheduler;
     private volatile BufferedRequest currentRequest;
@@ -54,6 +54,13 @@ public class BufferedRequestManager implements Closeable {
         this.compression = compression;
         this.disableAcks = disableAcks;
         this.metricRegistry = metricRegistry;
+        initializeMetrics();
+    }
+
+    private void initializeMetrics() {
+        requestCounter = metricRegistry.counter("requests.created");
+        metricRegistry.gauge("request.buffer.size.bytes", () -> requestBuffer::getCurrentSizeBytes);
+        metricRegistry.gauge("request.buffer.size.count", () -> requestBuffer::getRequestCount);
     }
 
     public Future<MemqWriteResult> write(RawRecord record) throws IOException, InterruptedException, TimeoutException {
