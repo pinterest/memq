@@ -193,16 +193,18 @@ public class BufferedRequest {
     }
 
     public boolean sealRequest() {
-        if (isSealed.get()) {
-            return true;
+        synchronized (this) {
+            if (isSealed.get()) {
+                return true;
+            }
+            isSealed.set(true);
+            try {
+                outputStream.close();
+            } catch (IOException e) {
+                logger.warn("Failed to close output stream: ", e);
+            }
+            return isSealed.get();
         }
-        isSealed.set(true);
-        try {
-            outputStream.close();
-        } catch (IOException e) {
-            logger.warn("Failed to close output stream: ", e);
-        }
-        return isSealed.get();
     }
 
     public void writeMemqLogMessage(RawRecord record) throws IOException {

@@ -22,6 +22,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.pinterest.memq.client.commons.Compression;
 import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons.serde.ByteArraySerializer;
@@ -54,6 +55,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -61,6 +63,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -274,25 +277,29 @@ public class TestMemqProducer extends TestMemqProducerBase {
 
     MemqProducer<byte[], byte[]> producer = builder.build();
 
-    ExecutorService es = Executors.newFixedThreadPool(120);
+    ScheduledExecutorService es = Executors.newScheduledThreadPool(
+            20,
+            new ThreadFactoryBuilder().setNameFormat("Processor: %d").build());
     Future<?>[] results = new Future[120];
     Future<?>[] tasks = new Future[120];
 
     for (int i = 0; i < 120; i++) {
       final int idx = i;
-      Future<?> task = es.submit(() -> {
+      long initialDelay = Math.abs(new Random().nextLong()) % 300;
+      Future<?> task = es.schedule(() -> {
         try {
           int numWritten = 0;
           while (numWritten < 10000) {
             Future<MemqWriteResult> r = producer.write(null, ("test" + idx).getBytes());
             results[idx] = r;
             numWritten++;
+//            System.out.println("Written " + numWritten + " for " + idx);
           }
         } catch (Exception e) {
           e.printStackTrace();
           fail("Failed to write for " + idx);
         }
-      });
+      }, initialDelay, TimeUnit.MILLISECONDS);
       tasks[i] = task;
     }
 

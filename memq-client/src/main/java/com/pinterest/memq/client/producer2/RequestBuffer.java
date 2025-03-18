@@ -168,6 +168,7 @@ public class RequestBuffer {
             }
         }
         Map.Entry<Integer, BufferedRequest> entry = buffer.higherEntry(lastReadyRequestId.get());
+        // TODO: what if requestId exceeds Integer.MAX_VALUE?
         if (entry != null) {
             BufferedRequest request = entry.getValue();
             if (request != null && request.isReadyForDispatch()) {
