@@ -62,6 +62,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -140,7 +141,8 @@ public class TestMemqProducer extends TestMemqProducerBase {
     assertNull(r);
     producer.close();
     assertEquals(producer.getAvailablePermits(), 30);
-
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
     mockServer.stop();
   }
 
@@ -165,7 +167,9 @@ public class TestMemqProducer extends TestMemqProducerBase {
     producer.close();
 
     assertEquals(1, writeCount.get());
-//    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
     mockServer.stop();
   }
 
@@ -198,7 +202,9 @@ public class TestMemqProducer extends TestMemqProducerBase {
     producer.close();
 
     assertEquals(1, writeCount.get());
-//    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
     mockServer.stop();
   }
 
@@ -248,7 +254,9 @@ public class TestMemqProducer extends TestMemqProducerBase {
     producer.close();
 
     assertEquals(1, writeCount.get());
-//    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
     mockServer.stop();
   }
 
@@ -291,7 +299,9 @@ public class TestMemqProducer extends TestMemqProducerBase {
 
     assertEquals(3, writeCount.get());
     Thread.sleep(500);
-//    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
     mockServer.stop();
   }
 
@@ -334,7 +344,9 @@ public class TestMemqProducer extends TestMemqProducerBase {
       assertEquals("Cannot send since client is closed", e.getCause().getMessage());
     }
     Thread.sleep(500);
-//    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
 
     mockServer.stop();
   }
@@ -389,7 +401,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
       r2.get();
       fail("Should fail since more than 1 redirection");
     } catch (ExecutionException ee) {
-      assertEquals("Request failed after maximum 2 retries: Redirected to another server", ee.getCause().getMessage());
+      assertEquals("Request 2 failed after maximum 2 retries: Redirected to another server", ee.getCause().getMessage());
     } catch (Exception e) {
       fail("should throw execution exception");
     }
@@ -397,7 +409,9 @@ public class TestMemqProducer extends TestMemqProducerBase {
 
     assertEquals(2 + 2 + 3, writeCount.get());
     assertEquals(1 + 1 + 3, redirectCount.get());
-//    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
     mockServer.stop();
   }
 
@@ -487,6 +501,8 @@ public class TestMemqProducer extends TestMemqProducerBase {
     assertEquals(0, writeCount1.get());
     assertEquals(3, writeCount2.get());
     assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
     mockserver1.stop();
     mockserver2.stop();
   }
@@ -547,8 +563,10 @@ public class TestMemqProducer extends TestMemqProducerBase {
     } catch (Exception e) {
       fail("Should throw timeout exception wrapped in execution exception");
     }
-    assertEquals(producer.getAvailablePermits(), 30);
     producer.close();
+    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
     mockServer.stop();
   }
 
@@ -609,10 +627,14 @@ public class TestMemqProducer extends TestMemqProducerBase {
     Future<?> consumptionTask = es.submit(() -> {
       while (!results.isEmpty() || !done.get()) {
         try {
-          results.take().get();
+          Future<MemqWriteResult> future = results.poll();
+          if (future == null) {
+            continue;
+          }
+          future.get();
           resultCount.incrementAndGet();
         } catch (Exception e) {
-          System.err.println(e);
+          fail("Should not fail: " + e);
         }
       }
       if (!done.get()) {
@@ -648,7 +670,10 @@ public class TestMemqProducer extends TestMemqProducerBase {
         producer.getMetricRegistry().getCounters().get("requests.success.count").getCount(),
         resultCount.get());
     assertEquals(resultSet.size(), resultCount.get());
+    assertEquals(NUM_OF_WRITES, resultCount.get());
     assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
     mockServer.stop();
   }
 
@@ -707,9 +732,13 @@ public class TestMemqProducer extends TestMemqProducerBase {
     Future<?> consumptionTask = es.submit(() -> {
       while (!results.isEmpty() || !done.get()) {
         try {
-          results.take().get();
+          Future<MemqWriteResult> future = results.poll();
+          if (future == null) {
+            continue;
+          }
+          future.get();
         } catch (Exception e) {
-          throw new RuntimeException(e.getCause());
+          fail("Should not fail: " + e);
         }
       }
       if (!done.get()) {
@@ -747,6 +776,8 @@ public class TestMemqProducer extends TestMemqProducerBase {
         successCount.get());
     assertEquals(resultSet.size(), resultCount.get());
     assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
     mockServer.stop();
   }
 }

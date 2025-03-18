@@ -118,8 +118,8 @@ public class MockMemqServer {
       RequestPacket requestPacket = new RequestPacket();
       requestPacket.readFields(inBuffer, (short) 0);
       inBuffer.release();
-      System.out.println("server channelRead for request: " + requestPacket.getRequestType());
-      System.out.println("requestId: " + requestPacket.getClientRequestId());
+//      System.out.println("server channelRead for request: " + requestPacket.getRequestType());
+//      System.out.println("requestId: " + requestPacket.getClientRequestId());
       BiConsumer<ChannelHandlerContext, RequestPacket> consumer = responseMap.get(requestPacket.getRequestType());
       if (consumer != null) {
         consumer.accept(ctx, requestPacket);

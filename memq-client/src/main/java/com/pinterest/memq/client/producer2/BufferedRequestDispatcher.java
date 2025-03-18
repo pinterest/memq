@@ -86,6 +86,7 @@ public class BufferedRequestDispatcher implements Runnable {
                     CompletableFuture<ResponsePacket> responsePacketFuture;
                     sentBytesCounter.inc(request.getActualPayloadSizeBytes());
                     Timer.Context dispatchTime = dispatchTimer.time();
+                    request.setDispatchTimeMs(System.currentTimeMillis());
                     long writeTimestamp = System.currentTimeMillis();
                     Timer.Context sendTime = sendTimer.time();
                     int writeLatency;
@@ -97,6 +98,7 @@ public class BufferedRequestDispatcher implements Runnable {
                         // complete the future exceptionally if the request fails
                         logger.error("Failed to send request " + request.getClientRequestId(), e);
                         cleanup(request, e);
+                        maxInflightRequestSemaphore.release();
                         continue;   // continue with the next iteration
                     } finally {
                         dispatchTime.stop();
@@ -107,15 +109,14 @@ public class BufferedRequestDispatcher implements Runnable {
                         } else {
                             handleResponse(request, responsePacket, writeTimestamp, writeLatency);
                         }
+                        maxInflightRequestSemaphore.release();
                     });
                 } catch (Exception e) {
                     logger.error("Unexpected exception in request dispatcher during inflight request processing", e);
-                    continue;
-                } finally {
                     maxInflightRequestSemaphore.release();
                 }
-                // otherwise, max inflight requests reached, wait for the next iteration
             }
+            // otherwise, max inflight requests reached, wait for the next iteration
         }
     }
 
@@ -139,12 +140,12 @@ public class BufferedRequestDispatcher implements Runnable {
 
     private void maybeRetryRequest(BufferedRequest request, ResponsePacket responsePacket, Throwable throwable, int customMaxRetryLimit) {
         Duration nextRetryIntervalDuration = retryStrategy.calculateNextRetryInterval(request.getRetries());
-        if (nextRetryIntervalDuration == null || dispatchTimeoutMs <= nextRetryIntervalDuration.toMillis()) {
-            request.resolveAndRelease(new TimeoutException("Request timed out after " +  dispatchTimeoutMs + " ms and " + request.getRetries() + " retries : " + throwable.getMessage()));
+        if (nextRetryIntervalDuration == null || request.getDispatchTimeMs() + dispatchTimeoutMs <= System.currentTimeMillis() + nextRetryIntervalDuration.toMillis()) {
+            cleanupResponseError(request, responsePacket, new TimeoutException("Request " + request.getClientRequestId() + " timed out after " + dispatchTimeoutMs + " ms and " + request.getRetries() + " retries : " + throwable.getMessage()));
         } else if (request.getRetries() >= customMaxRetryLimit) {
-            request.resolveAndRelease(new Exception("Request failed after maximum " + customMaxRetryLimit + " retries: " + throwable.getMessage()));
+            cleanupResponseError(request, responsePacket, new Exception("Request " + request.getClientRequestId() + " failed after maximum " + customMaxRetryLimit + " retries: " + throwable.getMessage()));
         } else {
-            logger.warn(throwable.getMessage() + ", retrying request after " + nextRetryIntervalDuration.toMillis() + " ms");
+            logger.warn(throwable.getMessage() + ", retrying request " + request.getClientRequestId() + " after " + nextRetryIntervalDuration.toMillis() + " ms");
             try {
                 requestBuffer.retryRequest(request, nextRetryIntervalDuration);
             } catch (IOException | TimeoutException e) {
@@ -166,7 +167,7 @@ public class BufferedRequestDispatcher implements Runnable {
                 ackedBytesCounter.inc(request.getActualPayloadSizeBytes());
                 sendAuditMessageIfAuditEnabled(request);
                 int ackLatency = (int) (System.currentTimeMillis() - writeTimestamp);
-                logger.debug("Request acked in:" + ackLatency + " " + request.getClientRequestId());
+                logger.debug("Request " + request.getClientRequestId() + " acked in:" + ackLatency + "ms");
                 cleanupResponseSuccess(request, writeLatency, ackLatency);
                 break;
             case ResponseCodes.REDIRECT:
@@ -202,6 +203,7 @@ public class BufferedRequestDispatcher implements Runnable {
 
 
     private void cleanupResponseSuccess(BufferedRequest request, int writeLatency, int ackLatency) {
+        successCounter.inc();
         request.resolveAndRelease(new MemqWriteResult(request.getClientRequestId(), writeLatency, ackLatency, (int) request.getActualPayloadSizeBytes()));
         requestBuffer.removeRequest(request);
     }
@@ -245,5 +247,26 @@ public class BufferedRequestDispatcher implements Runnable {
                 logger.error("Failed to log audit record for topic:" + request.getTopic(), e);
             }
         }
+    }
+
+    protected int getAvailablePermits() {
+        return maxInflightRequestSemaphore.availablePermits();
+    }
+
+    public void flush() {
+        int pendingRequests = requestBuffer.getRequestCount();
+        logger.info("Flushing " + pendingRequests + " pending requests in buffer");
+        long startTime = System.currentTimeMillis();
+        while (requestBuffer.getRequestCount() > 0) {
+            // busy wait while flushing
+        }
+        logger.info("Flushed " + pendingRequests + " requests in buffer in " + (System.currentTimeMillis() - startTime) + " ms");
+    }
+
+    public void close() {
+        flush();
+        running.set(false);
+        int permitsDrained = maxInflightRequestSemaphore.drainPermits();
+        maxInflightRequestSemaphore.release(permitsDrained);
     }
 }

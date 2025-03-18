@@ -72,10 +72,12 @@ public class MemqProducer<K, V> implements Closeable {
   private final Auditor auditor;
   private final MetricRegistry metricRegistry;
   private final int maxBlockMs;
+  private final BufferedRequestDispatcher requestDispatcher;
   private Counter writeTooLargeMessagesCounter;
   private Histogram writeMessageSizeHistogram;
   private Counter writeMessageCounter;
   private Timer writeTimer;
+  private ExecutorService dispatchExecutor;
 
   protected MemqProducer(String cluster,
                          String topic,
@@ -111,7 +113,7 @@ public class MemqProducer<K, V> implements Closeable {
         this.client = new MemqCommonClient(locality, sslConfig, networkProperties);
       }
       this.requestBuffer = new RequestBuffer(maxBufferSizeBytes, maxBlockMs);
-      BufferedRequestDispatcher requestDispatcher = new BufferedRequestDispatcher(client, requestBuffer, this, 1000, sendRequestTimeout, maxInflightRequests, retryStrategy, metricRegistry);
+      this.requestDispatcher = new BufferedRequestDispatcher(client, requestBuffer, this, 1000, sendRequestTimeout, maxInflightRequests, retryStrategy, metricRegistry);
       this.requestManager =
               new BufferedRequestManager(client, topic, this, requestBuffer, retryStrategy, maxPayloadBytes, lingerMs, compression, disableAcks, metricRegistry);
 //      this.requestManager =
@@ -127,15 +129,15 @@ public class MemqProducer<K, V> implements Closeable {
       }
       initializeMetrics();
       initializeTopicConnection(bootstrapEndpoints, topic);
-      startDispatcher(requestDispatcher, topic);
+      startDispatcher(topic);
     } catch (Exception e) {
       close();
       throw e;
     }
   }
 
-  private void startDispatcher(BufferedRequestDispatcher requestDispatcher, String topic) {
-    ExecutorService dispatchExecutor = Executors.newSingleThreadExecutor(new ThreadFactoryBuilder().setNameFormat("request-dispatch-" + topic).build());
+  private void startDispatcher(String topic) {
+    dispatchExecutor = Executors.newSingleThreadExecutor(new ThreadFactoryBuilder().setNameFormat("request-dispatch-" + topic).build());
     dispatchExecutor.submit(requestDispatcher);
   }
 
@@ -223,13 +225,23 @@ public class MemqProducer<K, V> implements Closeable {
   }
 
   public void flush() {
+    // the order here matters - requestManager must be flushed first to seal any open requests,
+    // then requestDispatcher must be flushed to ensure all sealed requests are dispatched
     requestManager.flush();
+    requestDispatcher.flush();
   }
 
   @Override
   public void close() throws IOException {
+    logger.info("Closing MemqProducer");
     if (requestManager != null) {
       requestManager.close();
+    }
+    if (requestDispatcher != null) {
+      requestDispatcher.close();
+    }
+    if (dispatchExecutor != null) {
+      dispatchExecutor.shutdownNow();
     }
 
     if (client != null) {
@@ -243,8 +255,17 @@ public class MemqProducer<K, V> implements Closeable {
 
   @VisibleForTesting
   protected int getAvailablePermits() {
-    return -1;  // TODO: fix this in new implementation
-//    return requestManager.getAvailablePermits();
+    return requestDispatcher.getAvailablePermits();
+  }
+
+  @VisibleForTesting
+  protected long getRequestBufferSizeBytes() {
+    return requestBuffer.getCurrentSizeBytes();
+  }
+
+  @VisibleForTesting
+  protected int getRequestCount() {
+    return requestBuffer.getRequestCount();
   }
 
   @VisibleForTesting

@@ -142,7 +142,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
             .maxPayloadBytes(maxPayloadBytes)
             .maxBufferSizeBytes(65536)
             .compression(Compression.NONE)
-            .maxInflightRequests(120)
+            .maxInflightRequests(20)
             .maxBlockMs(1000)
             .sendRequestTimeout(5000)
             .networkProperties(networkProperties)
@@ -161,6 +161,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
                   sampleValue
           );
           futures.add(r);
+          System.out.println("available permits: " + producer.getAvailablePermits());
 //          System.out.println("Request buffer bytes: " + producer.getCurrentBufferSizeBytes());
 //          System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
 //          Thread.sleep(10);

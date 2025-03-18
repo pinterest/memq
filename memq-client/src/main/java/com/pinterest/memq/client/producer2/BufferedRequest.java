@@ -69,6 +69,7 @@ public class BufferedRequest {
     private long nextRetryTimestamp = -1;
     private long actualPayloadSizeBytes = -1;
     private Timer requestWriteTimer;
+    private long dispatchTimeMs = -1;
 
     public BufferedRequest(long epoch,
                            ScheduledThreadPoolExecutor scheduler,
@@ -295,6 +296,20 @@ public class BufferedRequest {
 
     public int getRetries() {
         return retries;
+    }
+
+    public long getStartTimeMs() {
+        return startTime;
+    }
+
+    public long getDispatchTimeMs() {
+        return dispatchTimeMs;
+    }
+
+    public void setDispatchTimeMs(long dispatchTimeMs) {
+        if (this.dispatchTimeMs < 0) {
+            this.dispatchTimeMs = dispatchTimeMs;
+        }
     }
 
     protected void retry(Duration nextRetryIntervalDuration) {

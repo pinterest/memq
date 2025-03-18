@@ -113,11 +113,11 @@ public class BufferedRequestManager implements Closeable {
         if (currentRequest != null) {
             currentRequest.sealRequest();
         }
-        // TODO: implement force flush
     }
 
     @Override
     public void close() throws IOException {
         flush();
+        scheduler.shutdown();
     }
 }
