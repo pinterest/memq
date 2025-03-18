@@ -74,4 +74,14 @@ public class RequestPacket extends TransportPacket {
     payload.release();
     super.release();
   }
+
+  @Override
+  public ByteBuf getData() {
+    return payload.getData();
+  }
+
+  @Override
+  public void resetReaderIndex() {
+    payload.resetReaderIndex();
+  }
 }

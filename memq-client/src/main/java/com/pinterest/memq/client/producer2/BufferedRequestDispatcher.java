@@ -171,13 +171,12 @@ public class BufferedRequestDispatcher implements Runnable {
                 break;
             case ResponseCodes.REDIRECT:
                 try {
-                    System.out.println("reconnecting");
                     client.reconnect(request.getTopic(), false);
                 } catch (Exception e) {
                     cleanupResponseError(request, responsePacket, e);
                     return;
                 }
-                maybeRetryRequest(request, responsePacket, new Exception("Redirected to another server"), 1);
+                maybeRetryRequest(request, responsePacket, new Exception("Redirected to another server"), 2);
                 break;
             case ResponseCodes.BAD_REQUEST:
                 cleanupResponseError(request, responsePacket, new Exception("Bad request, id: " + request.getClientRequestId()));

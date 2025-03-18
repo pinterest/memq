@@ -172,15 +172,17 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
 
       int numSuccess = 0;
       int numFailures = 0;
+      int i = 0;
       for (Future<MemqWriteResult> future : futures) {
         try {
-          MemqWriteResult resp = future.get(10000, TimeUnit.MILLISECONDS);
-//          System.out.println("resp: " + resp);
+          MemqWriteResult resp = future.get(1500, TimeUnit.MILLISECONDS);
+//          System.out.println(i + " resp: " + resp);
           numSuccess++;
-        } catch (ExecutionException e) {
-          System.out.println("Future exception: " + e);
+        } catch (Exception e) {
+          System.out.println(i + " future exception: " + e);
           numFailures++;
         }
+        i++;
       }
       System.out.println("numSuccess: " + numSuccess + ", numFailures: " + numFailures);
       futures.clear();

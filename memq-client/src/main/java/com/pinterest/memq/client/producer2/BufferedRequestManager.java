@@ -84,20 +84,25 @@ public class BufferedRequestManager implements Closeable {
 
     private BufferedRequest createNewRequestAndAddToBuffer() throws IOException, TimeoutException {
         // TimeoutException if buffer full, IOException if ByteBuf allocation fails
-        BufferedRequest newRequest = requestBuffer.enqueueRequest(
-                producer.getEpoch(),
-                scheduler,
-                topic,
-                requestIdGenerator.getAndIncrement(),
-                maxPayloadBytes,
-                lingerMs,
-                disableAcks,
-                compression,
-                metricRegistry,
-                null
-        );
-        requestCounter.inc();
-        return newRequest;
+        try {
+            BufferedRequest newRequest = requestBuffer.enqueueRequest(
+                    producer.getEpoch(),
+                    scheduler,
+                    topic,
+                    requestIdGenerator.getAndIncrement(),
+                    maxPayloadBytes,
+                    lingerMs,
+                    disableAcks,
+                    compression,
+                    metricRegistry,
+                    null
+            );
+            requestCounter.inc();
+            return newRequest;
+        } catch (IOException | TimeoutException e) {
+            requestIdGenerator.decrementAndGet();
+            throw e;
+        }
     }
 
     public MemqProducer<?, ?> getProducer() {
@@ -108,7 +113,7 @@ public class BufferedRequestManager implements Closeable {
         if (currentRequest != null) {
             currentRequest.sealRequest();
         }
-        // implement force flush
+        // TODO: implement force flush
     }
 
     @Override

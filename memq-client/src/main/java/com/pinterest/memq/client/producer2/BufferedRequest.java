@@ -213,6 +213,7 @@ public class BufferedRequest {
             throw new IllegalStateException("BufferedRequest is not sealed");
         }
         if (writeRequestPacket != null) {
+            writeRequestPacket.resetReaderIndex();
             return writeRequestPacket;
         }
         try {
@@ -222,14 +223,14 @@ public class BufferedRequest {
                 resultFuture.complete(new MemqWriteResult(clientRequestId, 0, 0, 0));
                 return null;
             }
-            writeRequestPacket = createWriteRequestPacket(byteBuf.asReadOnly().retainedDuplicate());
+            writeRequestPacket = createRequestPacket(byteBuf.asReadOnly().retainedDuplicate());
             return writeRequestPacket;
         } finally {
             byteBuf.release();
         }
     }
 
-    private RequestPacket createWriteRequestPacket(ByteBuf payload) {
+    private RequestPacket createRequestPacket(ByteBuf payload) {
         CRC32 crc32 = new CRC32();
         crc32.update(payload.duplicate().nioBuffer());
         int checksum = (int) crc32.getValue();
@@ -338,7 +339,7 @@ public class BufferedRequest {
         if (hasActiveWrites()) {
             return false;
         }
-        if (lingerMs == 0 || System.currentTimeMillis() - startTime > lingerMs) {
+        if (lingerMs == 0 || System.currentTimeMillis() - startTime >= lingerMs) {
             return sealRequest();
         }
         return false;

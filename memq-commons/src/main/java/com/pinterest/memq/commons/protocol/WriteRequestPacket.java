@@ -18,6 +18,7 @@ package com.pinterest.memq.commons.protocol;
 import java.io.IOException;
 import java.nio.charset.Charset;
 
+import com.google.common.annotations.VisibleForTesting;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 
@@ -97,6 +98,11 @@ public class WriteRequestPacket implements Packet {
 
   public int getDataLength() {
     return dataLength;
+  }
+
+  @Override
+  public void resetReaderIndex() {
+    data.resetReaderIndex();
   }
 
   public ByteBuf getData() {

@@ -31,4 +31,12 @@ public interface Packet {
 
   }
 
+  default ByteBuf getData() {
+    return null;
+  }
+
+  default void resetReaderIndex() {
+
+  }
+
 }
