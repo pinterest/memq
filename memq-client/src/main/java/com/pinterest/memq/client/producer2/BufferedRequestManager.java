@@ -25,7 +25,6 @@ public class BufferedRequestManager implements Closeable {
     private final int lingerMs;
     private final Compression compression;
     private final boolean disableAcks;
-    private final RetryStrategy retryStrategy;
     private final MetricRegistry metricRegistry;
     private final AtomicInteger requestIdGenerator = new AtomicInteger(0);
     private Counter requestCounter;
@@ -48,7 +47,6 @@ public class BufferedRequestManager implements Closeable {
         this.topic = topic;
         this.producer = producer;
         this.requestBuffer = requestBuffer;
-        this.retryStrategy = retryStrategy;
         this.maxPayloadBytes = maxPayloadBytes;
         this.lingerMs = lingerMs;
         this.compression = compression;
@@ -67,26 +65,28 @@ public class BufferedRequestManager implements Closeable {
         if (client.isClosed()) {
             throw new IOException("Cannot write to topic " + topic + " when client is closed");
         }
+        BufferedRequest request = getAvailableRequest();
+        while (request != null) {
+            Future<MemqWriteResult> returnFuture = request.write(record);
+            if (returnFuture != null) {
+                return returnFuture;
+            } else {
+                request = getAvailableRequest();
+            }
+        }
+        return null;
+    }
+
+    private BufferedRequest getAvailableRequest() throws IOException, TimeoutException {
         if (currentRequest == null || currentRequest.isSealed()) {
-            // create a new request and add it to the buffer
             synchronized (this) {
                 if (currentRequest == null || currentRequest.isSealed()) {
                     currentRequest = createNewRequestAndAddToBuffer();
                 }
-            }
-        } else if (!currentRequest.isWritable(record)) {
-            // seal the current request and create a new one
-            synchronized (this) {
-                if (!currentRequest.isWritable(record)) {
-                    boolean sealed = currentRequest.sealRequest();
-                    if (!sealed) {
-                        throw new IOException("Failed to seal request");
-                    }
-                    currentRequest = createNewRequestAndAddToBuffer();
-                }
+                return currentRequest;
             }
         }
-        return currentRequest.write(record);
+        return currentRequest;
     }
 
     private BufferedRequest createNewRequestAndAddToBuffer() throws IOException, TimeoutException {

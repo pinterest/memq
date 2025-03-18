@@ -261,6 +261,59 @@ public class TestMemqProducer extends TestMemqProducerBase {
   }
 
   @Test
+  public void testConcurrentWritesLargeVolume() throws Exception {
+    AtomicInteger writeCount = new AtomicInteger(0);
+    MockMemqServer mockServer = newSimpleTestServer(writeCount);
+    mockServer.start();
+
+    Properties networkProperties = new Properties();
+    MemqProducer.Builder<byte[], byte[]> builder = new MemqProducer.Builder<>();
+    builder.cluster("prototype").topic("test").bootstrapServers(LOCALHOST_STRING + ":" + port)
+            .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
+            .networkProperties(networkProperties);
+
+    MemqProducer<byte[], byte[]> producer = builder.build();
+
+    ExecutorService es = Executors.newFixedThreadPool(60);
+    Future<?>[] results = new Future[60];
+    Future<?>[] tasks = new Future[60];
+
+    for (int i = 0; i < 60; i++) {
+      final int idx = i;
+      Future<?> task = es.submit(() -> {
+        try {
+          int numWritten = 0;
+          while (numWritten < 10000) {
+            Future<MemqWriteResult> r = producer.write(null, ("test" + idx).getBytes());
+            results[idx] = r;
+            numWritten++;
+          }
+        } catch (Exception e) {
+          e.printStackTrace();
+          fail("Failed to write for " + idx);
+        }
+      });
+      tasks[i] = task;
+    }
+
+    for (Future<?> f : tasks) {
+      f.get();
+    }
+
+    producer.flush();
+
+    for (Future<?> f : results) {
+      f.get();
+    }
+    producer.close();
+
+    assertEquals(producer.getAvailablePermits(), 30);
+    assertEquals(0, producer.getRequestCount());
+    assertEquals(0, producer.getRequestBufferSizeBytes());
+    mockServer.stop();
+  }
+
+  @Test
   public void testMultipleDispatchedRequests() throws Exception {
     AtomicInteger writeCount = new AtomicInteger(0);
     MockMemqServer mockServer = newSimpleTestServer(writeCount);

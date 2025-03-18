@@ -161,9 +161,9 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
                   sampleValue
           );
           futures.add(r);
-          System.out.println("available permits: " + producer.getAvailablePermits());
+//          System.out.println("available permits: " + producer.getAvailablePermits());
 //          System.out.println("Request buffer bytes: " + producer.getCurrentBufferSizeBytes());
-//          System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
+          System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
 //          Thread.sleep(10);
         } catch (Exception e) {
 //          System.out.println("write exception: " + e);

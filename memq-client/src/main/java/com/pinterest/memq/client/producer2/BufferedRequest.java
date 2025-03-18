@@ -155,11 +155,18 @@ public class BufferedRequest {
         if (!isInitialized.get()) {
             throw new IllegalStateException("BufferedRequest is not initialized");
         }
+        int payloadSize = record.calculateEncodedLogMessageLength();
         activeWrites.getAndIncrement();
         try {
-
+            if (isSealed.get()) {
+                return null;
+            }
             // synchronized to ensure bytebuf doesn't get out-of-order writes
             synchronized (byteBuf) {
+                if (payloadSize > byteBuf.writableBytes()) {
+                    sealRequest();
+                    return null;
+                }
                 try (Timer.Context ctx = requestWriteTimer.time()) {
                     writeMemqLogMessage(record);
                 } finally {
