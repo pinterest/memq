@@ -192,20 +192,16 @@ public class BufferedRequest {
         return isSealed.get();
     }
 
-    public boolean isWritable(RawRecord record) {
-        return record.calculateEncodedLogMessageLength() <= byteBuf.writableBytes();
-    }
-
     public boolean sealRequest() {
         if (isSealed.get()) {
             return true;
         }
+        isSealed.set(true);
         try {
             outputStream.close();
         } catch (IOException e) {
             logger.warn("Failed to close output stream: ", e);
         }
-        isSealed.set(true);
         return isSealed.get();
     }
 

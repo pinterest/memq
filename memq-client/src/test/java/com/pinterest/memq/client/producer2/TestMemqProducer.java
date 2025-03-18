@@ -274,11 +274,11 @@ public class TestMemqProducer extends TestMemqProducerBase {
 
     MemqProducer<byte[], byte[]> producer = builder.build();
 
-    ExecutorService es = Executors.newFixedThreadPool(60);
-    Future<?>[] results = new Future[60];
-    Future<?>[] tasks = new Future[60];
+    ExecutorService es = Executors.newFixedThreadPool(120);
+    Future<?>[] results = new Future[120];
+    Future<?>[] tasks = new Future[120];
 
-    for (int i = 0; i < 60; i++) {
+    for (int i = 0; i < 120; i++) {
       final int idx = i;
       Future<?> task = es.submit(() -> {
         try {
