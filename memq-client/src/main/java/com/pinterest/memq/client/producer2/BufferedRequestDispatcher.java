@@ -90,6 +90,7 @@ public class BufferedRequestDispatcher implements Runnable {
                     Timer.Context sendTime = sendTimer.time();
                     int writeLatency;
                     try {
+                        System.out.println("Sending request " + request.getClientRequestId());
                         responsePacketFuture = client.sendRequestPacketAndReturnResponseFuture(requestPacket, dispatchTimeoutMs);
                         sendTime.stop();
                         writeLatency = (int) (System.currentTimeMillis() - writeTimestamp);

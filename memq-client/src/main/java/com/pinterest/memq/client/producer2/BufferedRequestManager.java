@@ -12,6 +12,7 @@ import com.pinterest.memq.core.utils.MemqUtils;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -29,6 +30,7 @@ public class BufferedRequestManager implements Closeable {
     private final AtomicInteger requestIdGenerator = new AtomicInteger(0);
     private final Counter requestCounter = new Counter();
     private final RequestBuffer requestBuffer;
+    private final ScheduledThreadPoolExecutor scheduler;
     private volatile BufferedRequest currentRequest;
 
     public BufferedRequestManager(MemqCommonClient client,
@@ -42,6 +44,7 @@ public class BufferedRequestManager implements Closeable {
                                   boolean disableAcks,
                                   MetricRegistry metricRegistry) {
         this.client = client;
+        this.scheduler = new ScheduledThreadPoolExecutor(1);
         this.topic = topic;
         this.producer = producer;
         this.requestBuffer = requestBuffer;
@@ -59,14 +62,22 @@ public class BufferedRequestManager implements Closeable {
         }
         if (currentRequest == null || currentRequest.isSealed()) {
             // create a new request and add it to the buffer
-            currentRequest = createNewRequestAndAddToBuffer();
+            synchronized (this) {
+                if (currentRequest == null || currentRequest.isSealed()) {
+                    currentRequest = createNewRequestAndAddToBuffer();
+                }
+            }
         } else if (!currentRequest.isWritable(record)) {
             // seal the current request and create a new one
-            boolean sealed = currentRequest.sealRequest();
-            if (!sealed) {
-                throw new IOException("Failed to seal request");
+            synchronized (this) {
+                if (!currentRequest.isWritable(record)) {
+                    boolean sealed = currentRequest.sealRequest();
+                    if (!sealed) {
+                        throw new IOException("Failed to seal request");
+                    }
+                    currentRequest = createNewRequestAndAddToBuffer();
+                }
             }
-            currentRequest = createNewRequestAndAddToBuffer();
         }
         return currentRequest.write(record);
     }
@@ -75,6 +86,7 @@ public class BufferedRequestManager implements Closeable {
         // TimeoutException if buffer full, IOException if ByteBuf allocation fails
         BufferedRequest newRequest = requestBuffer.enqueueRequest(
                 producer.getEpoch(),
+                scheduler,
                 topic,
                 requestIdGenerator.getAndIncrement(),
                 maxPayloadBytes,

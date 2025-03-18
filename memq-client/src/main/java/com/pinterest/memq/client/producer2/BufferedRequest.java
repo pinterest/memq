@@ -37,12 +37,15 @@ import java.io.OutputStream;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.CRC32;
 
 public class BufferedRequest {
     private static final Logger logger = LoggerFactory.getLogger(BufferedRequest.class);
+    private final ScheduledThreadPoolExecutor scheduler;
     private final long epoch;
     private final String topic;
     private final int clientRequestId;
@@ -59,7 +62,7 @@ public class BufferedRequest {
     private final boolean disableAcks;
     private OutputStream outputStream;
     private byte[] messageIdHash;
-    private int messageCount;
+    private int messageCount = 0;
     private volatile long startTime;
     private RequestPacket writeRequestPacket = null;
     private int retries = 0;
@@ -68,6 +71,7 @@ public class BufferedRequest {
     private Timer requestWriteTimer;
 
     public BufferedRequest(long epoch,
+                           ScheduledThreadPoolExecutor scheduler,
                            String topic,
                            int clientRequestId,
                            int maxPayloadSize,
@@ -76,6 +80,7 @@ public class BufferedRequest {
                            Compression compression,
                            MetricRegistry metricRegistry) {
         this.epoch = epoch;
+        this.scheduler = scheduler;
         this.topic = topic;
         this.clientRequestId = clientRequestId;
         this.maxRequestSize = maxPayloadSize;
@@ -87,6 +92,10 @@ public class BufferedRequest {
     }
 
     private void initializeMetrics(MetricRegistry metricRegistry) {
+        if (metricRegistry == null) {
+            logger.debug("MetricRegistry is null, metrics will not be recorded");
+            return;
+        }
         requestWriteTimer = metricRegistry.timer("requests.write.time");
     }
 
@@ -116,6 +125,7 @@ public class BufferedRequest {
             this.byteBuf = MemqPooledByteBufAllocator.buffer(capacityBytes, capacityBytes, maxBlockMs);
             initializeOutputStream();
             isInitialized.set(true);
+            scheduleTimeThresholdSeal();
         } catch (IOException ioe) {
             // release bytebuf if exception happened to avoid bytebuf leaks
             if (this.byteBuf != null) {
@@ -303,14 +313,32 @@ public class BufferedRequest {
      */
     protected boolean isReadyForDispatch() {
         boolean deadlineReached = System.currentTimeMillis() >= nextRetryTimestamp;
-        return deadlineReached && ((isSealed() && !hasActiveWrites()) || maybeTimeThresholdSeal());
+        return deadlineReached && ((isSealed() && !hasActiveWrites()));
+    }
+
+    private void scheduleTimeThresholdSeal() {
+        if (lingerMs == 0) {
+            maybeTimeThresholdSeal();
+            return;
+        }
+        scheduler.schedule(() -> {
+            if (!Thread.interrupted()) {
+                if (System.currentTimeMillis() - startTime >= lingerMs) {
+                    // if seal() returns true, the payload was sealed due to time threshold, so we should try to dispatch
+                    // if it was false, it means that a write has been initiated and sealed the payload, so the dispatching is on that write
+                    synchronized (this) {
+                        maybeTimeThresholdSeal();
+                    }
+                }
+            }
+        }, lingerMs, TimeUnit.MILLISECONDS);
     }
 
     public boolean maybeTimeThresholdSeal() {
         if (hasActiveWrites()) {
             return false;
         }
-        if (System.currentTimeMillis() - startTime > lingerMs) {
+        if (lingerMs == 0 || System.currentTimeMillis() - startTime > lingerMs) {
             return sealRequest();
         }
         return false;

@@ -8,7 +8,11 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -20,9 +24,9 @@ public class RequestBuffer {
     private final AtomicLong currentSizeBytes = new AtomicLong(0);
     private final int maxBlockMs;
     private final ConcurrentSkipListMap<Integer, BufferedRequest> buffer = new ConcurrentSkipListMap<>();
+    private final ConcurrentSkipListSet<Integer> retriesRequestIds = new ConcurrentSkipListSet<>();
     private final Lock sizeReadLock = new ReentrantLock(true);
-//    private final Lock queueReadLock = new ReentrantLock(true);
-    private final AtomicInteger lastPeekRequestId = new AtomicInteger(-1);
+    private final AtomicInteger lastReadyRequestId = new AtomicInteger(-1);
 
     public RequestBuffer(long maxSizeBytes, int maxBlockMs) {
         this.maxSizeBytes = maxSizeBytes;
@@ -46,6 +50,7 @@ public class RequestBuffer {
      * @throws IOException if the request's buffer allocation fails within maxBlockMs
      */
     public BufferedRequest enqueueRequest(long epoch,
+                                          ScheduledThreadPoolExecutor scheduler,
                                           String topic,
                                           int requestId,
                                           int maxPayloadBytes,
@@ -66,6 +71,7 @@ public class RequestBuffer {
                             // create and initialize a new request
                             request = createAndInitializeNewRequest(
                                     epoch,
+                                    scheduler,
                                     topic,
                                     requestId,
                                     maxPayloadBytes,
@@ -92,38 +98,19 @@ public class RequestBuffer {
     }
 
     /**
-     * Enqueue a request in the buffer. This method is a convenience wrapper around the main enqueueRequest method.
-     *
-     * @param request
-     * @return the enqueued request
-     * @throws IOException
-     * @throws TimeoutException
-     */
-    private BufferedRequest enqueueRequest(BufferedRequest request) throws IOException, TimeoutException {
-        return enqueueRequest(
-                request.getEpoch(),
-                request.getTopic(),
-                request.getClientRequestId(),
-                request.getMaxRequestSize(),
-                request.getLingerMs(),
-                request.isDisableAcks(),
-                request.getCompression(),
-                null,
-                request
-        );
-    }
-
-    /**
      * Retry a request by re-enqueuing it in the buffer.
      *
      * @param request the request to retry
-     * @return the re-enqueued request
      * @throws IOException if the request's buffer allocation fails within maxBlockMs
      * @throws TimeoutException if the request cannot be re-enqueued within maxBlockMs
      */
-    public BufferedRequest retryRequest(BufferedRequest request, Duration nextRetryIntervalDuration) throws IOException, TimeoutException {
+    public void retryRequest(BufferedRequest request, Duration nextRetryIntervalDuration) throws IOException, TimeoutException {
+        if (this.retriesRequestIds.contains(request.getClientRequestId())) {
+            // request already queued for retry; ignore
+            return;
+        }
+        this.retriesRequestIds.add(request.getClientRequestId());
         request.retry(nextRetryIntervalDuration);
-        return enqueueRequest(request);
     }
 
     /**
@@ -141,6 +128,7 @@ public class RequestBuffer {
      * @throws IOException if the ByteBuf allocation fails after maxBlockMs
      */
     private BufferedRequest createAndInitializeNewRequest(long epoch,
+                                                          ScheduledThreadPoolExecutor scheduler,
                                                           String topic,
                                                           int requestId,
                                                           int maxPayloadBytes,
@@ -151,6 +139,7 @@ public class RequestBuffer {
                                                           MetricRegistry metricRegistry) throws IOException {
         BufferedRequest request = new BufferedRequest(
                 epoch,
+                scheduler,
                 topic,
                 requestId,
                 maxPayloadBytes,
@@ -168,26 +157,63 @@ public class RequestBuffer {
      * @return the next request that is ready for dispatch, or null if no request is ready
      */
     public BufferedRequest getReadyRequestForDispatch() {
-        Map.Entry<Integer, BufferedRequest> entry = buffer.higherEntry(lastPeekRequestId.get());
-        if (entry != null) {
-            BufferedRequest request = entry.getValue();
-            if (request != null) {
-                if (request.isReadyForDispatch()) {
-                    lastPeekRequestId.set(entry.getKey());
+        if (!retriesRequestIds.isEmpty()) {
+            Integer requestId = retriesRequestIds.first();
+            if (requestId != null) {
+                BufferedRequest request = buffer.get(requestId);
+                if (request != null && request.isReadyForDispatch()) {
+                    retriesRequestIds.remove(requestId);
                     return request;
                 }
+            }
+        }
+        Map.Entry<Integer, BufferedRequest> entry = buffer.higherEntry(lastReadyRequestId.get());
+        if (entry != null) {
+            BufferedRequest request = entry.getValue();
+            if (request != null && request.isReadyForDispatch()) {
+                lastReadyRequestId.set(entry.getKey());
+                return request;
             }
         }
         return null;
     }
 
     public void removeRequest(BufferedRequest request) {
-        buffer.remove(request.getClientRequestId());
-        currentSizeBytes.addAndGet(-request.getCapacityBytes());
+        removeRequest(request.getClientRequestId());
+    }
+
+    public void removeRequest(int requestId) {
+        if (retriesRequestIds.contains(requestId)) {
+            throw new IllegalStateException("Cannot remove request " + requestId + " from buffer while it is queued for retry");
+        }
+        BufferedRequest request = buffer.remove(requestId);
+        if (request != null) {
+            currentSizeBytes.addAndGet(-request.getCapacityBytes());
+        }
     }
 
     @VisibleForTesting
     public long getCurrentSizeBytes() {
         return currentSizeBytes.get();
+    }
+
+    @VisibleForTesting
+    public long getMaxSizeBytes() {
+        return maxSizeBytes;
+    }
+
+    @VisibleForTesting
+    public int getRequestCount() {
+        return buffer.size();
+    }
+
+    @VisibleForTesting
+    public Set<Integer> getRequestIds() {
+        return buffer.keySet();
+    }
+
+    @VisibleForTesting
+    public Set<Integer> getRetriesRequestIds() {
+        return retriesRequestIds;
     }
 }

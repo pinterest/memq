@@ -161,6 +161,7 @@ public class NetworkClient implements Closeable {
           buffer = MemqPooledByteBufAllocator.buffer(requestPacket.getSize(RequestType.PROTOCOL_VERSION), Integer.MAX_VALUE, 1000);
           requestPacket.write(buffer, RequestType.PROTOCOL_VERSION);
           channelFuture.channel().writeAndFlush(buffer);
+          System.out.println("Request sent " + requestPacket.getClientRequestId());
         } catch (Exception e) {
           logger.warn("Failed to write request " + requestPacket.getClientRequestId(), e);
           ReferenceCountUtil.release(buffer);

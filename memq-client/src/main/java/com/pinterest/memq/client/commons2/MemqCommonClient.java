@@ -177,8 +177,9 @@ public class MemqCommonClient implements Closeable {
   }
 
   public synchronized void reconnect(String topic, boolean isConsumer) throws Exception {
-    logger.debug("Reconnecting topic " + topic);
+    logger.info("Reconnecting topic " + topic);
     TopicMetadata md = getTopicMetadata(topic, connectTimeout);
+    System.out.println("md: " + md);
     networkClient.reset();
     Set<Broker> brokers = null;
     if (isConsumer) {

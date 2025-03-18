@@ -41,7 +41,7 @@ public class ResponseHandler implements Closeable {
       future.complete(responsePacket);
     } else {
       // no handler for response skipping
-      logger.error("No handler for request:" + responsePacket.getRequestType());
+      logger.error("No handler for request:" + responsePacket.getRequestType() + ": " + responsePacket.getClientRequestId());
     }
   }
 

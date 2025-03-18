@@ -133,7 +133,6 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
     byte[] sampleValue = new byte[8192];
     int maxPayloadBytes = MemqMessageHeader.getHeaderLength() +
             RawRecord.newInstance(null, null, null, sampleValue,0).calculateEncodedLogMessageLength();
-    System.out.println("maxPayloadBytes: " + maxPayloadBytes);
     builder
             .cluster("prototype")
             .topic("test")
@@ -141,8 +140,11 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
             .keySerializer(new ByteArraySerializer())
             .valueSerializer(new ByteArraySerializer())
             .maxPayloadBytes(maxPayloadBytes)
+            .maxBufferSizeBytes(65536)
             .compression(Compression.NONE)
             .maxInflightRequests(120)
+            .maxBlockMs(1000)
+            .sendRequestTimeout(5000)
             .networkProperties(networkProperties)
             .metricRegistry(new MetricRegistry());
 
@@ -159,11 +161,11 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
                   sampleValue
           );
           futures.add(r);
-          System.out.println("client write - request buffer bytes: " + producer.getCurrentBufferSizeBytes());
-          System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
+//          System.out.println("Request buffer bytes: " + producer.getCurrentBufferSizeBytes());
+//          System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
 //          Thread.sleep(10);
         } catch (Exception e) {
-          System.out.println("write exception: " + e);
+//          System.out.println("write exception: " + e);
           e.printStackTrace();
         }
       }
@@ -173,7 +175,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
       for (Future<MemqWriteResult> future : futures) {
         try {
           MemqWriteResult resp = future.get(10000, TimeUnit.MILLISECONDS);
-          System.out.println("resp: " + resp);
+//          System.out.println("resp: " + resp);
           numSuccess++;
         } catch (ExecutionException e) {
           System.out.println("Future exception: " + e);

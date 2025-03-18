@@ -58,7 +58,7 @@ public class MemqProducer<K, V> implements Closeable {
 
   private final String cluster;
   private final int maxPayloadBytes;
-
+  private final int maxBufferSizeBytes;
   private final Serializer<K> keySerializer;
   private final Serializer<V> valueSerializer;
 
@@ -71,6 +71,7 @@ public class MemqProducer<K, V> implements Closeable {
 
   private final Auditor auditor;
   private final MetricRegistry metricRegistry;
+  private final int maxBlockMs;
   private Counter writeTooLargeMessagesCounter;
   private Histogram writeMessageSizeHistogram;
   private Counter writeMessageCounter;
@@ -88,6 +89,8 @@ public class MemqProducer<K, V> implements Closeable {
                          long sendRequestTimeout,
                          RetryStrategy retryStrategy,
                          int maxPayloadBytes,
+                         int maxBufferSizeBytes,
+                         int maxBlockMs,
                          int lingerMs,
                          int maxInflightRequests,
                          Compression compression,
@@ -96,6 +99,8 @@ public class MemqProducer<K, V> implements Closeable {
                          MemqCommonClient memqCommonClient) throws Exception {
     this.cluster = cluster;
     this.maxPayloadBytes = maxPayloadBytes;
+    this.maxBufferSizeBytes = maxBufferSizeBytes;
+    this.maxBlockMs = maxBlockMs;
     this.keySerializer = keySerializer;
     this.valueSerializer = valueSerializer;
     this.metricRegistry = metricRegistry;
@@ -105,7 +110,7 @@ public class MemqProducer<K, V> implements Closeable {
       } else {
         this.client = new MemqCommonClient(locality, sslConfig, networkProperties);
       }
-      this.requestBuffer = new RequestBuffer(65536, 1000);
+      this.requestBuffer = new RequestBuffer(maxBufferSizeBytes, maxBlockMs);
       BufferedRequestDispatcher requestDispatcher = new BufferedRequestDispatcher(client, requestBuffer, this, 1000, sendRequestTimeout, maxInflightRequests, retryStrategy, metricRegistry);
       this.requestManager =
               new BufferedRequestManager(client, topic, this, requestBuffer, retryStrategy, maxPayloadBytes, lingerMs, compression, disableAcks, metricRegistry);
@@ -281,6 +286,8 @@ public class MemqProducer<K, V> implements Closeable {
     private MetricRegistry metricRegistry = null;
     private MemqCommonClient client = null;
     private boolean memoize = false;
+    private int maxBufferSizeBytes = 32 * 1024 * 1024;  // 32 MB
+    private int maxBlockMs = 1000;  // 1 second
 
     public Builder() {
 
@@ -300,6 +307,8 @@ public class MemqProducer<K, V> implements Closeable {
       sendRequestTimeout = builder.sendRequestTimeout;
       retryStrategy = builder.retryStrategy;
       maxPayloadBytes = builder.maxPayloadBytes;
+      maxBufferSizeBytes = builder.maxBufferSizeBytes;
+      maxBlockMs = builder.maxBlockMs;
       lingerMs = builder.lingerMs;
       maxInflightRequests = builder.maxPayloadBytes;
       compression = builder.compression;
@@ -371,6 +380,16 @@ public class MemqProducer<K, V> implements Closeable {
 
     public Builder<K, V> maxPayloadBytes(int maxPayloadBytes) {
       this.maxPayloadBytes = maxPayloadBytes;
+      return this;
+    }
+
+    public Builder<K, V> maxBufferSizeBytes(int maxBufferSizeBytes) {
+      this.maxBufferSizeBytes = maxBufferSizeBytes;
+      return this;
+    }
+
+    public Builder<K, V> maxBlockMs(int maxBlockMs) {
+      this.maxBlockMs = maxBlockMs;
       return this;
     }
 
@@ -448,6 +467,8 @@ public class MemqProducer<K, V> implements Closeable {
           sendRequestTimeout,
           retryStrategy,
           maxPayloadBytes,
+          maxBufferSizeBytes,
+          maxBlockMs,
           lingerMs,
           maxInflightRequests,
           compression,
