@@ -775,6 +775,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
         producer.getMetricRegistry().getCounters().get("requests.success.count").getCount(),
         successCount.get());
     assertEquals(resultSet.size(), resultCount.get());
+    assertEquals(successCount.get(), resultCount.get());
     assertEquals(producer.getAvailablePermits(), 30);
     assertEquals(0, producer.getRequestCount());
     assertEquals(0, producer.getRequestBufferSizeBytes());
