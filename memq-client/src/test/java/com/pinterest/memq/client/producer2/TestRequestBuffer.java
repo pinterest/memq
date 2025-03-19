@@ -6,10 +6,10 @@ import org.junit.Test;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeoutException;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -20,11 +20,12 @@ public class TestRequestBuffer {
     @Test
     public void testSimpleEnqueueDequeue() throws IOException, TimeoutException, InterruptedException {
         RequestBuffer buffer = new RequestBuffer(8192, 1000);
+        Semaphore semaphore = new Semaphore(100);
         enqueueRequests(buffer, 0, 4, 1024, 0);
-        assertEquals(4 * 1024, buffer.getCurrentSizeBytes());
-        assertEquals(4, buffer.getRequestCount());
 
         Thread.sleep(2);  // wait for linger to expire
+        assertEquals(4 * 1024, buffer.getCurrentSizeBytes());
+        assertEquals(4, buffer.getRequestCount());
 
         BufferedRequest readyRequest = buffer.getReadyRequestForDispatch();
         assertEquals(0, readyRequest.getClientRequestId());
@@ -34,9 +35,6 @@ public class TestRequestBuffer {
         assertEquals(2, readyRequest.getClientRequestId());
         readyRequest = buffer.getReadyRequestForDispatch();
         assertEquals(3, readyRequest.getClientRequestId());
-
-        assertNull(buffer.getReadyRequestForDispatch());
-        assertNull(buffer.getReadyRequestForDispatch());
 
         enqueueRequests(buffer, 4, 1, 1024, 0);
 
@@ -67,22 +65,24 @@ public class TestRequestBuffer {
         buffer.removeRequest(3);
         assertEquals(0, buffer.getCurrentSizeBytes());
         assertEquals(0, buffer.getRequestCount());
+
+        semaphore.release(semaphore.drainPermits());
     }
 
     @Test
     public void testLinger() throws IOException, TimeoutException, InterruptedException {
         RequestBuffer buffer = new RequestBuffer(8192, 1000);
-        enqueueRequests(buffer, 0, 4, 1024, 500);  // 500ms linger
-        assertEquals(4 * 1024, buffer.getCurrentSizeBytes());
-        assertEquals(4, buffer.getRequestCount());
+        Semaphore semaphore = new Semaphore(100);
 
-        BufferedRequest readyRequest = buffer.getReadyRequestForDispatch();
-        assertNull(readyRequest);
+        enqueueRequests(buffer, 0, 4, 1024, 500);  // 500ms linger
 
         Thread.sleep(600);  // wait for linger to expire
 
+        assertEquals(4 * 1024, buffer.getCurrentSizeBytes());
+        assertEquals(4, buffer.getRequestCount());
+
         // all requests should be ready now
-        readyRequest = buffer.getReadyRequestForDispatch();
+        BufferedRequest readyRequest = buffer.getReadyRequestForDispatch();
         assertEquals(0, readyRequest.getClientRequestId());
         readyRequest = buffer.getReadyRequestForDispatch();
         assertEquals(1, readyRequest.getClientRequestId());
@@ -90,13 +90,25 @@ public class TestRequestBuffer {
         assertEquals(2, readyRequest.getClientRequestId());
         readyRequest = buffer.getReadyRequestForDispatch();
         assertEquals(3, readyRequest.getClientRequestId());
-        assertNull(buffer.getReadyRequestForDispatch());
+
+        buffer.removeRequest(0);
+        buffer.removeRequest(1);
+        buffer.removeRequest(2);
+        buffer.removeRequest(3);
+
+        assertEquals(0, buffer.getCurrentSizeBytes());
+        assertEquals(0, buffer.getRequestCount());
+
+        semaphore.release(semaphore.drainPermits());
     }
 
     @Test
-    public void testMaxSize() throws IOException, TimeoutException {
+    public void testMaxSize() throws IOException, TimeoutException, InterruptedException {
         RequestBuffer buffer = new RequestBuffer(8192, 1000);
+        Semaphore semaphore = new Semaphore(100);
+
         enqueueRequests(buffer, 0, 8, 1024, 0);
+        Thread.sleep(2);    // wait for linger to expire
         assertEquals(8 * 1024, buffer.getCurrentSizeBytes());
         assertEquals(8, buffer.getRequestCount());
 
@@ -116,6 +128,7 @@ public class TestRequestBuffer {
         assertEquals(7, buffer.getRequestCount());
 
         enqueueRequests(buffer, 8, 1, 1024, 0); // success
+        Thread.sleep(2);    // wait for linger to expire
         assertEquals(8 * 1024, buffer.getCurrentSizeBytes());
         assertEquals(8, buffer.getRequestCount());
     }
@@ -123,7 +136,10 @@ public class TestRequestBuffer {
     @Test
     public void testRetry() throws IOException, TimeoutException, InterruptedException {
         RequestBuffer buffer = new RequestBuffer(8192, 1000);
+        Semaphore semaphore = new Semaphore(100);
         enqueueRequests(buffer, 0, 4, 1024, 0);
+
+        Thread.sleep(2);  // wait for linger to expire
 
         BufferedRequest readyRequest = buffer.getReadyRequestForDispatch();
         assertEquals(0, readyRequest.getClientRequestId());
@@ -134,64 +150,58 @@ public class TestRequestBuffer {
         buffer.retryRequest(retryRequest, Duration.ofMillis(0));
 
         readyRequest = buffer.getReadyRequestForDispatch();
-        assertEquals(1, readyRequest.getClientRequestId());
-
-        readyRequest = buffer.getReadyRequestForDispatch();
         assertEquals(2, readyRequest.getClientRequestId());
 
         readyRequest = buffer.getReadyRequestForDispatch();
         assertEquals(3, readyRequest.getClientRequestId());
 
-        assertNull(buffer.getReadyRequestForDispatch());
+        readyRequest = buffer.getReadyRequestForDispatch();
+        assertEquals(1, readyRequest.getClientRequestId());
+
         assertEquals(3, buffer.getRequestCount());
 
-        buffer.removeRequest(1);
         buffer.removeRequest(2);
+        buffer.removeRequest(3);
 
         buffer.retryRequest(readyRequest, Duration.ofMillis(100));
-
         assertEquals(1, buffer.getRequestCount());
-        assertNull(buffer.getReadyRequestForDispatch());    // request 3 with retry=100ms is not ready yet
 
         Thread.sleep(100);
         readyRequest = buffer.getReadyRequestForDispatch();
-        assertEquals(3, readyRequest.getClientRequestId());
+        assertEquals(1, readyRequest.getClientRequestId());
 
-        assertNull(buffer.getReadyRequestForDispatch());
         assertEquals(1, buffer.getRequestCount());
 
         buffer.retryRequest(readyRequest, Duration.ofMillis(200));
-        assertEquals(1, buffer.getRetriesRequestIds().size());
+        Thread.sleep(250);  // wait for retry deadline
         try {
-            buffer.removeRequest(3);
+            buffer.removeRequest(1);
             fail("Should throw IllegalStateException");
         } catch (Exception e) {
             assertEquals(IllegalStateException.class, e.getClass());
-            assertTrue(e.getMessage().contains("Cannot remove request 3"));
+            assertTrue(e.getMessage().contains("Cannot remove request 1"));
         }
-        assertNull(buffer.getReadyRequestForDispatch());
 
         Thread.sleep(200);
         readyRequest = buffer.getReadyRequestForDispatch();
-        assertEquals(3, readyRequest.getClientRequestId());
-        assertEquals(0, buffer.getRetriesRequestIds().size());
+        assertEquals(1, readyRequest.getClientRequestId());
 
         // idempotence of retry set prior to removal. this shouldn't add a new retry (even though this situation shouldn't happen)
         buffer.retryRequest(readyRequest, Duration.ofMillis(0));
         buffer.retryRequest(readyRequest, Duration.ofMillis(0));
-        assertEquals(1, buffer.getRetriesRequestIds().size());
 
         readyRequest = buffer.getReadyRequestForDispatch();
-        assertEquals(3, readyRequest.getClientRequestId());
-        assertEquals(0, buffer.getRetriesRequestIds().size());
+        assertEquals(1, readyRequest.getClientRequestId());;
 
-        buffer.removeRequest(3);
+        buffer.removeRequest(1);
         assertEquals(0, buffer.getRequestCount());
+
+        semaphore.release(semaphore.drainPermits());
     }
 
     private static void enqueueRequests(RequestBuffer buffer, int startingRequestId, int numRequests, int maxPayloadBytes, int lingerMs) throws IOException, TimeoutException {
         for (int requestId = startingRequestId; requestId < startingRequestId + numRequests; requestId++) {
-            buffer.enqueueRequest(0, scheduler, "topic", requestId, maxPayloadBytes, lingerMs, false, Compression.ZSTD, null, null);
+            BufferedRequest request = buffer.createAndAllocateNewRequest(0, scheduler, "topic", requestId, maxPayloadBytes, lingerMs, false, Compression.ZSTD, null, null);
         }
     }
 }

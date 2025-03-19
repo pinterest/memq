@@ -3,11 +3,9 @@ package com.pinterest.memq.client.producer2;
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.client.commons.Compression;
-import com.pinterest.memq.client.commons.audit.Auditor;
 import com.pinterest.memq.client.commons2.MemqCommonClient;
 import com.pinterest.memq.client.commons2.retry.RetryStrategy;
 import com.pinterest.memq.client.producer.MemqWriteResult;
-import com.pinterest.memq.core.utils.MemqUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -86,7 +84,7 @@ public class BufferedRequestManager implements Closeable {
                     if (client.isClosed()) {
                         throw new IOException("Cannot write to topic " + topic + " when client is closed");
                     }
-                    currentRequest = createNewRequestAndAddToBuffer();
+                    currentRequest = createNewRequest();
                 }
                 return currentRequest;
             }
@@ -94,9 +92,9 @@ public class BufferedRequestManager implements Closeable {
         return currentRequest;
     }
 
-    private BufferedRequest createNewRequestAndAddToBuffer() throws IOException, TimeoutException {
+    private BufferedRequest createNewRequest() throws IOException, TimeoutException {
         // TimeoutException if buffer full, IOException if ByteBuf allocation fails
-        BufferedRequest newRequest = requestBuffer.enqueueRequest(
+        BufferedRequest newRequest = requestBuffer.createAndAllocateNewRequest(
                 producer.getEpoch(),
                 scheduler,
                 topic,

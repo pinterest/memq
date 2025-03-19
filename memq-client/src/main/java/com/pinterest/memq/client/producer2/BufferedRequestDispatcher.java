@@ -77,49 +77,50 @@ public class BufferedRequestDispatcher implements Runnable {
     @Override
     public void run() {
         while (running.get()) {
-            if (acquireInflightRequestPermit()) {
-                final BufferedRequest request = requestBuffer.getReadyRequestForDispatch();
-                if (request == null) {
-                    // no request is ready yet, proceed to next iteration
-                    maxInflightRequestSemaphore.release();
+            try {
+                boolean inflightPermitAcquired = maxInflightRequestSemaphore.tryAcquire(maxBlockMs, TimeUnit.MILLISECONDS);
+                if (!inflightPermitAcquired) {
+                    logger.warn("Failed to acquire inflight request permit within " + maxBlockMs + "ms");
                     continue;
                 }
+                BufferedRequest request = requestBuffer.getReadyRequestForDispatch(); // this should block until one is available
+                RequestPacket requestPacket = request.getOrCreateWriteRequestPacket();  // when should this be released?
+                CompletableFuture<ResponsePacket> responsePacketFuture;
+                sentBytesCounter.inc(request.getActualPayloadSizeBytes());
+                Timer.Context dispatchTime = dispatchTimer.time();
+                request.setDispatchTimeMs(System.currentTimeMillis());
+                long writeTimestamp = System.currentTimeMillis();
+                Timer.Context sendTime = sendTimer.time();
+                int writeLatency;
                 try {
-                    RequestPacket requestPacket = request.getOrCreateWriteRequestPacket();  // when should this be released?
-                    CompletableFuture<ResponsePacket> responsePacketFuture;
-                    sentBytesCounter.inc(request.getActualPayloadSizeBytes());
-                    Timer.Context dispatchTime = dispatchTimer.time();
-                    request.setDispatchTimeMs(System.currentTimeMillis());
-                    long writeTimestamp = System.currentTimeMillis();
-                    Timer.Context sendTime = sendTimer.time();
-                    int writeLatency;
-                    try {
-                        responsePacketFuture = client.sendRequestPacketAndReturnResponseFuture(requestPacket, dispatchTimeoutMs);
-                        sendTime.stop();
-                        writeLatency = (int) (System.currentTimeMillis() - writeTimestamp);
-                    } catch (Exception e) {
-                        // complete the future exceptionally if the request fails
-                        logger.error("Failed to send request " + request.getClientRequestId(), e);
-                        cleanup(request, e);
-                        maxInflightRequestSemaphore.release();
-                        continue;   // continue with the next iteration
-                    } finally {
-                        dispatchTime.stop();
-                    }
-                    responsePacketFuture.whenCompleteAsync((responsePacket, throwable) -> {
-                        if (throwable != null) {
-                            handleResponsePacketFutureException(request, responsePacket, throwable);
-                        } else {
-                            handleResponse(request, responsePacket, writeTimestamp, writeLatency);
-                        }
-                        maxInflightRequestSemaphore.release();
-                    });
+                    responsePacketFuture = client.sendRequestPacketAndReturnResponseFuture(requestPacket, dispatchTimeoutMs);
+                    sendTime.stop();
+                    writeLatency = (int) (System.currentTimeMillis() - writeTimestamp);
                 } catch (Exception e) {
-                    logger.error("Unexpected exception in request dispatcher during inflight request processing", e);
+                    // complete the future exceptionally if the request fails
+                    logger.error("Failed to send request " + request.getClientRequestId(), e);
+                    cleanup(request, e);
                     maxInflightRequestSemaphore.release();
+                    continue;   // continue with the next iteration
+                } finally {
+                    dispatchTime.stop();
                 }
+                responsePacketFuture.whenCompleteAsync((responsePacket, throwable) -> {
+                    if (throwable != null) {
+                        handleResponsePacketFutureException(request, responsePacket, throwable);
+                    } else {
+                        handleResponse(request, responsePacket, writeTimestamp, writeLatency);
+                    }
+//                    System.out.println("Releasing semaphore response complete");
+                    maxInflightRequestSemaphore.release();
+                });
+            } catch (Exception e) {
+                if (e instanceof InterruptedException) {
+                    logger.warn("Interrupted while waiting for ready request, exiting loop");
+                    running.set(false);
+                }
+                maxInflightRequestSemaphore.release();
             }
-            // otherwise, max inflight requests reached, wait for the next iteration
         }
     }
 
@@ -208,7 +209,7 @@ public class BufferedRequestDispatcher implements Runnable {
     private void cleanupResponseSuccess(BufferedRequest request, int writeLatency, int ackLatency) {
         successCounter.inc();
         request.resolveAndRelease(new MemqWriteResult(request.getClientRequestId(), writeLatency, ackLatency, (int) request.getActualPayloadSizeBytes()));
-        requestBuffer.removeRequest(request);
+        requestBuffer.removeRequest(request.getClientRequestId());
     }
 
     private void cleanupResponseError(BufferedRequest request, ResponsePacket responsePacket, Throwable throwable) {
@@ -218,7 +219,7 @@ public class BufferedRequestDispatcher implements Runnable {
 
     private void cleanup(BufferedRequest request, Throwable throwable) {
         request.resolveAndRelease(throwable);
-        requestBuffer.removeRequest(request);
+        requestBuffer.removeRequest(request.getClientRequestId());
     }
 
     private static void tryRelease(@Nullable ResponsePacket responsePacket) {
@@ -228,15 +229,6 @@ public class BufferedRequestDispatcher implements Runnable {
         } catch (IOException ex) {
             logger.warn("Failed to release response packet", ex);
         }
-    }
-
-    private boolean acquireInflightRequestPermit() {
-        try {
-            return maxInflightRequestSemaphore.tryAcquire(maxBlockMs, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            logger.warn("Interrupted while waiting for inflight request semaphore", e);
-        }
-        return false;
     }
 
     private void sendAuditMessageIfAuditEnabled(BufferedRequest request) {
@@ -257,19 +249,13 @@ public class BufferedRequestDispatcher implements Runnable {
     }
 
     public void flush() {
-        int pendingRequests = requestBuffer.getRequestCount();
-        logger.info("Flushing " + pendingRequests + " pending requests in buffer");
-        long startTime = System.currentTimeMillis();
-        while (requestBuffer.getRequestCount() > 0) {
-            // busy wait while flushing
-        }
-        logger.info("Flushed " + pendingRequests + " requests in buffer in " + (System.currentTimeMillis() - startTime) + " ms");
+        requestBuffer.flush();
     }
 
     public void close() {
+        logger.info("Closing RequestDispatcher");
         flush();
         running.set(false);
-        int permitsDrained = maxInflightRequestSemaphore.drainPermits();
-        maxInflightRequestSemaphore.release(permitsDrained);
+
     }
 }

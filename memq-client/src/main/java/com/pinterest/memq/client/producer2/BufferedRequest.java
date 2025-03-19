@@ -26,7 +26,6 @@ import com.pinterest.memq.commons.protocol.RequestPacket;
 import com.pinterest.memq.commons.protocol.RequestType;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
 import com.pinterest.memq.core.utils.MemqUtils;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufOutputStream;
 import org.slf4j.Logger;
@@ -59,6 +58,7 @@ public class BufferedRequest {
     private final CompletableFuture<MemqWriteResult> resultFuture = new CompletableFuture<>();
     private final int capacityBytes;
     private final MemqMessageHeader2 header = new MemqMessageHeader2(this);
+    private final RequestBuffer requestBuffer;
     private ByteBuf byteBuf;
     private final boolean disableAcks;
     private OutputStream outputStream;
@@ -76,6 +76,7 @@ public class BufferedRequest {
 
     public BufferedRequest(long epoch,
                            ScheduledThreadPoolExecutor scheduler,
+                           RequestBuffer requestBuffer,
                            String topic,
                            int clientRequestId,
                            int maxPayloadSize,
@@ -85,6 +86,7 @@ public class BufferedRequest {
                            MetricRegistry metricRegistry) {
         this.epoch = epoch;
         this.scheduler = scheduler;
+        this.requestBuffer = requestBuffer;
         this.topic = topic;
         this.clientRequestId = clientRequestId;
         this.maxRequestSize = maxPayloadSize;
@@ -211,6 +213,7 @@ public class BufferedRequest {
                         logger.warn("Failed to close output stream: ", e);
                     }
                     readyForDispatch = true;
+                    requestBuffer.enqueueRequest(this);
                 }
             }
         }

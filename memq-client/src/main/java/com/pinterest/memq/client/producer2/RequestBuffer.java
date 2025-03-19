@@ -3,34 +3,38 @@ package com.pinterest.memq.client.producer2;
 import com.codahale.metrics.MetricRegistry;
 import com.google.common.annotations.VisibleForTesting;
 import com.pinterest.memq.client.commons.Compression;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.time.Duration;
-import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class RequestBuffer {
+    private static final Logger logger = LoggerFactory.getLogger(RequestBuffer.class);
     private final long maxSizeBytes;
     private final AtomicLong currentSizeBytes = new AtomicLong(0);
     private final int maxBlockMs;
-    private final ConcurrentSkipListMap<Integer, BufferedRequest> buffer = new ConcurrentSkipListMap<>();
-    private final ConcurrentSkipListSet<Integer> retriesRequestIds = new ConcurrentSkipListSet<>();
+    private final ConcurrentHashMap<Integer, BufferedRequest> requests = new ConcurrentHashMap<>();
+    private final BlockingQueue<Integer> queue = new LinkedBlockingQueue<>();
     private final Lock sizeReadLock = new ReentrantLock(true);
-    private final AtomicInteger lastReadyRequestId = new AtomicInteger(-1);
+    private final Lock lock = new ReentrantLock(true);
+    private final ScheduledThreadPoolExecutor retryScheduler;
 
     public RequestBuffer(long maxSizeBytes, int maxBlockMs) {
         this.maxSizeBytes = maxSizeBytes;
         this.maxBlockMs = maxBlockMs;
+        this.retryScheduler = new ScheduledThreadPoolExecutor(1);
     }
 
     /**
@@ -49,24 +53,24 @@ public class RequestBuffer {
      * @throws TimeoutException if the request cannot be added to the buffer within maxBlockMs
      * @throws IOException if the request's buffer allocation fails within maxBlockMs
      */
-    public BufferedRequest enqueueRequest(long epoch,
-                                          ScheduledThreadPoolExecutor scheduler,
-                                          String topic,
-                                          int requestId,
-                                          int maxPayloadBytes,
-                                          int lingerMs,
-                                          boolean disableAcks,
-                                          Compression compression,
-                                          MetricRegistry metricRegistry,
-                                          @Nullable BufferedRequest request) throws TimeoutException, IOException {
+    public BufferedRequest createAndAllocateNewRequest(long epoch,
+                                                       ScheduledThreadPoolExecutor scheduler,
+                                                       String topic,
+                                                       int requestId,
+                                                       int maxPayloadBytes,
+                                                       int lingerMs,
+                                                       boolean disableAcks,
+                                                       Compression compression,
+                                                       MetricRegistry metricRegistry,
+                                                       @Nullable BufferedRequest request) throws TimeoutException, IOException {
 
         long startTime = System.currentTimeMillis();
-        int bufferCapacity = BufferedRequest.getRequestCapacity(maxPayloadBytes, compression);
+        int requestCapacity = BufferedRequest.getRequestCapacity(maxPayloadBytes, compression);
         while (System.currentTimeMillis() - startTime < maxBlockMs) {
             if (sizeReadLock.tryLock()) {
                 try {
                     // lock acquired, check buffer capacity
-                    if (currentSizeBytes.get() + bufferCapacity <= maxSizeBytes) {
+                    if (currentSizeBytes.get() + requestCapacity <= maxSizeBytes) {
                         if (request == null) {
                             // create and initialize a new request
                             request = createAndInitializeNewRequest(
@@ -82,8 +86,6 @@ public class RequestBuffer {
                                     metricRegistry
                             );
                         }
-                        buffer.put(requestId, request);
-                        currentSizeBytes.addAndGet(bufferCapacity);
                         return request;
                     }
                 } finally {
@@ -91,27 +93,12 @@ public class RequestBuffer {
                 }
             }
         }
-        throw new TimeoutException("Failed to allocate " + bufferCapacity + " bytes " +
+        throw new TimeoutException("Failed to allocate " + requestCapacity + " bytes " +
                 "for requestId=" + requestId + " within maxBlockMs=" + maxBlockMs + "ms. " +
                 "Current buffer size: " + currentSizeBytes.get() + " bytes, " +
                 "Max buffer size: " + maxSizeBytes + " bytes");
     }
 
-    /**
-     * Retry a request by re-enqueuing it in the buffer.
-     *
-     * @param request the request to retry
-     * @throws IOException if the request's buffer allocation fails within maxBlockMs
-     * @throws TimeoutException if the request cannot be re-enqueued within maxBlockMs
-     */
-    public void retryRequest(BufferedRequest request, Duration nextRetryIntervalDuration) throws IOException, TimeoutException {
-        if (this.retriesRequestIds.contains(request.getClientRequestId())) {
-            // request already queued for retry; ignore
-            return;
-        }
-        this.retriesRequestIds.add(request.getClientRequestId());
-        request.retry(nextRetryIntervalDuration);
-    }
 
     /**
      * Create and initialize a new request with the given parameters.
@@ -140,6 +127,7 @@ public class RequestBuffer {
         BufferedRequest request = new BufferedRequest(
                 epoch,
                 scheduler,
+                this,
                 topic,
                 requestId,
                 maxPayloadBytes,
@@ -151,46 +139,84 @@ public class RequestBuffer {
         return request;
     }
 
+    public void enqueueRequest(BufferedRequest request) {
+        lock.lock();
+        try {
+            requests.put(request.getClientRequestId(), request);
+            queue.add(request.getClientRequestId());
+            currentSizeBytes.getAndAdd(request.getCapacityBytes());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Retry a request by re-enqueuing it in the buffer.
+     *
+     * @param request the request to retry
+     * @throws IOException if the request's buffer allocation fails within maxBlockMs
+     * @throws TimeoutException if the request cannot be re-enqueued within maxBlockMs
+     */
+    public void retryRequest(BufferedRequest request, Duration nextRetryIntervalDuration) throws IOException, TimeoutException {
+        retryScheduler.schedule(() -> {
+            lock.lock();
+            try {
+                if (queue.contains(request.getClientRequestId())) {
+                    // request is already in the queue
+                    return;
+                }
+                request.retry(nextRetryIntervalDuration);
+                queue.add(request.getClientRequestId());
+            } finally {
+                lock.unlock();
+            }
+        }, nextRetryIntervalDuration.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
     /**
      * Get the next request that is ready for dispatch from the buffer, or null if no request is ready.
      *
      * @return the next request that is ready for dispatch, or null if no request is ready
      */
-    public BufferedRequest getReadyRequestForDispatch() {
-        if (!retriesRequestIds.isEmpty()) {
-            Integer requestId = retriesRequestIds.first();
-            if (requestId != null) {
-                BufferedRequest request = buffer.get(requestId);
-                if (request != null && request.isReadyForDispatch()) {
-                    retriesRequestIds.remove(requestId);
-                    return request;
-                }
+    public BufferedRequest getReadyRequestForDispatch() throws InterruptedException {
+        int requestId = queue.take();
+        lock.lock();
+        try {
+            BufferedRequest request = requests.get(requestId);
+            if (request == null) {
+                throw new IllegalStateException("Request " + requestId + " is not in the buffer");
             }
+            return request;
+        } finally {
+            lock.unlock();
         }
-        Map.Entry<Integer, BufferedRequest> entry = buffer.higherEntry(lastReadyRequestId.get());
-        // TODO: what if requestId exceeds Integer.MAX_VALUE?
-        if (entry != null) {
-            BufferedRequest request = entry.getValue();
-            if (request != null && request.isReadyForDispatch()) {
-                lastReadyRequestId.set(entry.getKey());
-                return request;
-            }
-        }
-        return null;
-    }
-
-    public void removeRequest(BufferedRequest request) {
-        removeRequest(request.getClientRequestId());
     }
 
     public void removeRequest(int requestId) {
-        if (retriesRequestIds.contains(requestId)) {
-            throw new IllegalStateException("Cannot remove request " + requestId + " from buffer while it is queued for retry");
-        }
-        BufferedRequest request = buffer.remove(requestId);
-        if (request != null) {
+        lock.lock();
+        try {
+            if (queue.contains(requestId)) {
+                throw new IllegalStateException("Cannot remove request " + requestId + " from the buffer while it is in the queue");
+            }
+            BufferedRequest request = requests.remove(requestId);
+            if (request == null) {
+                logger.warn("Request " + requestId + " is not in the buffer when attempting to remove it");
+                return;
+            }
             currentSizeBytes.addAndGet(-request.getCapacityBytes());
+        } finally {
+            lock.unlock();
         }
+    }
+
+    protected void flush() {
+        long startTime = System.currentTimeMillis();
+        int pendingRequests = requests.size();
+        logger.info("Flushing " + pendingRequests + " requests from the buffer");
+        while (!requests.isEmpty()) {
+            // waiting to flush
+        }
+        logger.info("Flushed " + pendingRequests + " requests from the buffer in " + (System.currentTimeMillis() - startTime) + "ms");
     }
 
     @VisibleForTesting
@@ -205,16 +231,11 @@ public class RequestBuffer {
 
     @VisibleForTesting
     public int getRequestCount() {
-        return buffer.size();
+        return requests.size();
     }
 
     @VisibleForTesting
     public Set<Integer> getRequestIds() {
-        return buffer.keySet();
-    }
-
-    @VisibleForTesting
-    public Set<Integer> getRetriesRequestIds() {
-        return retriesRequestIds;
+        return requests.keySet();
     }
 }
