@@ -86,13 +86,11 @@ public class BufferedRequestManager implements Closeable {
                     if (client.isClosed()) {
                         throw new IOException("Cannot write to topic " + topic + " when client is closed");
                     }
-                    logger.debug("Creating new request: " + requestIdGenerator.get());
                     currentRequest = createNewRequestAndAddToBuffer();
                 }
                 return currentRequest;
             }
         }
-        logger.debug("Using existing request: " + currentRequest.getClientRequestId());
         return currentRequest;
     }
 
@@ -121,7 +119,7 @@ public class BufferedRequestManager implements Closeable {
 
     public void flush() {
         if (currentRequest != null) {
-            currentRequest.sealRequest();
+            currentRequest.flush();
         }
     }
 

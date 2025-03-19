@@ -264,7 +264,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
   }
 
   @Test
-  public void testConcurrentWritesLargeVolume() throws Exception {
+  public void testConcurrentWritesLargeVolumeAndFlush() throws Exception {
     AtomicInteger writeCount = new AtomicInteger(0);
     MockMemqServer mockServer = newSimpleTestServer(writeCount);
     mockServer.start();
@@ -289,11 +289,15 @@ public class TestMemqProducer extends TestMemqProducerBase {
       Future<?> task = es.schedule(() -> {
         try {
           int numWritten = 0;
-          while (numWritten < 10000) {
-            Future<MemqWriteResult> r = producer.write(null, ("test" + idx).getBytes());
-            results[idx] = r;
-            numWritten++;
-//            System.out.println("Written " + numWritten + " for " + idx);
+          while (numWritten < 10_000) {
+            int cycleNumWritten = 0;
+            while (cycleNumWritten < 1000) {
+              Future<MemqWriteResult> r = producer.write(null, ("test" + idx).getBytes());
+              results[idx] = r;
+              cycleNumWritten++;
+            }
+            producer.flush();
+            numWritten += cycleNumWritten;
           }
         } catch (Exception e) {
           e.printStackTrace();

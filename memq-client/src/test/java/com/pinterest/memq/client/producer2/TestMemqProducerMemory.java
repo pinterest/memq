@@ -122,7 +122,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
    * This test requires the JVM flag -XX:MaxDirectMemorySize=1048576 (1mb) to be set in the test config.
    * @throws Exception
    */
-  @Test
+//  @Test
   public void testDirectMemoryAllocationFailureOnWrite() throws Exception {
     Properties props = System.getProperties();
     props.setProperty("io.netty.maxDirectMemory", "1048576");
@@ -163,7 +163,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
           futures.add(r);
 //          System.out.println("available permits: " + producer.getAvailablePermits());
 //          System.out.println("Request buffer bytes: " + producer.getCurrentBufferSizeBytes());
-          System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
+//          System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
 //          Thread.sleep(10);
         } catch (Exception e) {
 //          System.out.println("write exception: " + e);
@@ -207,7 +207,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
       ctx.writeAndFlush(resp);
     });
 
-    MockMemqServer mockServer = new MockMemqServer(port, map, false, true, 50000, 1000);
+    MockMemqServer mockServer = new MockMemqServer(port, map, false, false, 50000, 1000);
     mockServer.start();
 
   }

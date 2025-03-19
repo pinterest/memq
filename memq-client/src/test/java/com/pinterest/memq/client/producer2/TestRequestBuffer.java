@@ -24,6 +24,8 @@ public class TestRequestBuffer {
         assertEquals(4 * 1024, buffer.getCurrentSizeBytes());
         assertEquals(4, buffer.getRequestCount());
 
+        Thread.sleep(2);  // wait for linger to expire
+
         BufferedRequest readyRequest = buffer.getReadyRequestForDispatch();
         assertEquals(0, readyRequest.getClientRequestId());
         readyRequest = buffer.getReadyRequestForDispatch();
@@ -37,6 +39,8 @@ public class TestRequestBuffer {
         assertNull(buffer.getReadyRequestForDispatch());
 
         enqueueRequests(buffer, 4, 1, 1024, 0);
+
+        Thread.sleep(2);  // wait for linger to expire
 
         readyRequest = buffer.getReadyRequestForDispatch();
         assertEquals(4, readyRequest.getClientRequestId());

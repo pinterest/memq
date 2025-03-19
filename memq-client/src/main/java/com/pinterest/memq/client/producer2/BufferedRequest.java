@@ -37,6 +37,7 @@ import java.io.OutputStream;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -70,6 +71,8 @@ public class BufferedRequest {
     private long actualPayloadSizeBytes = -1;
     private Timer requestWriteTimer;
     private long dispatchTimeMs = -1;
+    private ScheduledFuture<?> timeThresholdSealTask;
+    private volatile boolean readyForDispatch = false;
 
     public BufferedRequest(long epoch,
                            ScheduledThreadPoolExecutor scheduler,
@@ -126,7 +129,7 @@ public class BufferedRequest {
             this.byteBuf = MemqPooledByteBufAllocator.buffer(capacityBytes, capacityBytes, maxBlockMs);
             initializeOutputStream();
             isInitialized.set(true);
-            scheduleTimeThresholdSeal();
+            scheduleTimeBasedDispatch();
         } catch (IOException ioe) {
             // release bytebuf if exception happened to avoid bytebuf leaks
             if (this.byteBuf != null) {
@@ -159,18 +162,19 @@ public class BufferedRequest {
         activeWrites.getAndIncrement();
         try {
             if (isSealed.get()) {
-                logger.debug("Request is sealed, cannot write to request " + clientRequestId);
                 return null;
             }
             // synchronized to ensure bytebuf doesn't get out-of-order writes
             synchronized (byteBuf) {
                 if (payloadSize > byteBuf.writableBytes()) {
-                    logger.debug("Payload size exceed buffer capacity, sealing request " + clientRequestId);
                     sealRequest();
                     return null;
                 }
                 try (Timer.Context ctx = requestWriteTimer.time()) {
                     writeMemqLogMessage(record);
+                } catch (IOException e) {
+                    logger.error("Failed to write record to output stream in request " + clientRequestId, e);
+                    throw e;
                 } finally {
                     record.recycle();
                 }
@@ -183,6 +187,9 @@ public class BufferedRequest {
             return resultFuture;
         } finally {
             activeWrites.decrementAndGet();
+            if (isSealed() && !hasActiveWrites()) {
+                prepareDispatch();
+            }
         }
     }
 
@@ -193,22 +200,35 @@ public class BufferedRequest {
     public boolean isSealed() {
         return isSealed.get();
     }
-
-    public boolean sealRequest() {
-        synchronized (this) {
-            if (isSealed.get()) {
-                return true;
+    
+    public void prepareDispatch() {
+        if (!readyForDispatch) {
+            synchronized (this) {
+                if (!readyForDispatch) {
+                    try {
+                        outputStream.close();
+                    } catch (IOException e) {
+                        logger.warn("Failed to close output stream: ", e);
+                    }
+                    readyForDispatch = true;
+                }
             }
-            logger.debug("Sealing request " + clientRequestId);
-            isSealed.set(true);
-            try {
-                logger.debug("Closing output stream for request " + clientRequestId);
-                outputStream.close();
-            } catch (IOException e) {
-                logger.warn("Failed to close output stream: ", e);
-            }
-            return isSealed.get();
         }
+    }
+
+    public boolean isReadyForDispatch() {
+        if (System.currentTimeMillis() < nextRetryTimestamp) {
+            return false;
+        }
+        return readyForDispatch;
+    }
+
+    /**
+     * Seal the request. This method is idempotent.
+     * @return true if the request was sealed by this call, false if the request was already sealed
+     */
+    public boolean sealRequest() {
+        return !isSealed.getAndSet(true);
     }
 
     public void writeMemqLogMessage(RawRecord record) throws IOException {
@@ -326,47 +346,34 @@ public class BufferedRequest {
         retries++;
     }
 
-    /**
-     * Check if this request is ready to be dispatched. A request is ready if it is sealed and has no active writes,
-     * or if it has reached linger.ms since creation and there are no active writes. It also checks if the request
-     * has reached the next retry timestamp.
-     *
-     * If linger.ms has been reached, but there are active writes, the request is not ready for dispatch and
-     * the method will return false.
-     *
-     * @return true if this request is ready for dispatch, false otherwise
-     */
-    protected boolean isReadyForDispatch() {
-        boolean deadlineReached = System.currentTimeMillis() >= nextRetryTimestamp;
-        return deadlineReached && ((isSealed() && !hasActiveWrites()));
+    private boolean isLingerMsReached() {
+        return System.currentTimeMillis() - startTime >= lingerMs;
     }
 
-    private void scheduleTimeThresholdSeal() {
-        if (lingerMs == 0) {
-            maybeTimeThresholdSeal();
-            return;
+    private void scheduleTimeBasedDispatch() {
+        if (timeThresholdSealTask != null) {
+            timeThresholdSealTask.cancel(true);
         }
-        scheduler.schedule(() -> {
+        timeThresholdSealTask = scheduler.schedule(() -> {
             if (!Thread.interrupted()) {
-                if (System.currentTimeMillis() - startTime >= lingerMs) {
-                    // if seal() returns true, the payload was sealed due to time threshold, so we should try to dispatch
+                if (isLingerMsReached()) {
+                    // if sealRequest() returns true, the payload was sealed due to time threshold, so we should try to dispatch
                     // if it was false, it means that a write has been initiated and sealed the payload, so the dispatching is on that write
                     synchronized (this) {
-                        maybeTimeThresholdSeal();
+                        if (sealRequest() && !hasActiveWrites()) {
+                            prepareDispatch();
+                        }
                     }
                 }
             }
         }, lingerMs, TimeUnit.MILLISECONDS);
     }
 
-    public boolean maybeTimeThresholdSeal() {
-        if (hasActiveWrites()) {
-            return false;
+
+    public void flush() {
+        if (sealRequest() && !hasActiveWrites()) {
+            prepareDispatch();
         }
-        if (lingerMs == 0 || System.currentTimeMillis() - startTime >= lingerMs) {
-            return sealRequest();
-        }
-        return false;
     }
 
     protected void resolveAndRelease(MemqWriteResult writeResult) {
