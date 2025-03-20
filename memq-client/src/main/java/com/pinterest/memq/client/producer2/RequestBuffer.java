@@ -30,11 +30,13 @@ public class RequestBuffer {
     private final Lock sizeReadLock = new ReentrantLock(true);
     private final Lock lock = new ReentrantLock(true);
     private final ScheduledThreadPoolExecutor retryScheduler;
+    private final long allocationBaseRetryIntervalMs;
 
     public RequestBuffer(long maxSizeBytes, int maxBlockMs) {
         this.maxSizeBytes = maxSizeBytes;
         this.maxBlockMs = maxBlockMs;
         this.retryScheduler = new ScheduledThreadPoolExecutor(1);
+        this.allocationBaseRetryIntervalMs = Math.max(5, maxBlockMs / 100);
     }
 
     /**
@@ -66,6 +68,7 @@ public class RequestBuffer {
 
         long startTime = System.currentTimeMillis();
         int requestCapacity = BufferedRequest.getRequestCapacity(maxPayloadBytes, compression);
+        long allocationRetryIntervalMs = allocationBaseRetryIntervalMs;
         while (System.currentTimeMillis() - startTime < maxBlockMs) {
             if (sizeReadLock.tryLock()) {
                 try {
@@ -91,6 +94,13 @@ public class RequestBuffer {
                 } finally {
                     sizeReadLock.unlock();
                 }
+            }
+            // buffer full, retry allocation
+            try {
+                Thread.sleep(allocationRetryIntervalMs);
+                allocationRetryIntervalMs = Math.min(allocationRetryIntervalMs * 2, maxBlockMs / 10);
+            } catch (InterruptedException e) {
+                // do nothing
             }
         }
         throw new TimeoutException("Failed to allocate " + requestCapacity + " bytes " +

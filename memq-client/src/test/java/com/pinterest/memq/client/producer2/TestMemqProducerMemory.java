@@ -143,7 +143,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
             .maxBufferSizeBytes(65536)
             .compression(Compression.NONE)
             .maxInflightRequests(20)
-            .maxBlockMs(200)
+            .maxBlockMs(1000)
             .sendRequestTimeout(5000)
             .networkProperties(networkProperties)
             .metricRegistry(new MetricRegistry());
@@ -164,6 +164,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
           System.out.println("available permits: " + producer.getAvailablePermits());
           System.out.println("Request buffer bytes: " + producer.getCurrentBufferSizeBytes());
           System.out.println("Direct memory used: " + MemqPooledByteBufAllocator.usedDirectMemory());
+          System.out.println("inflight requests: " + producer.getMetricRegistry().getGauges().get("requests.inflight").getValue());
 //          Thread.sleep(10);
         } catch (Exception e) {
 //          System.out.println("write exception: " + e);
@@ -207,7 +208,7 @@ public class TestMemqProducerMemory extends TestMemqProducerBase {
       ctx.writeAndFlush(resp);
     });
 
-    MockMemqServer mockServer = new MockMemqServer(port, map, false, false, 50000, 1000);
+    MockMemqServer mockServer = new MockMemqServer(port, map, false, true, 50000, 1000);
     mockServer.start();
 
   }
