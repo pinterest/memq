@@ -21,6 +21,7 @@ import io.netty.buffer.ByteBuf;
 
 public class RequestPacket extends TransportPacket {
   private Packet payload;
+  private ByteBuf preAllocOutBuf;
 
   public RequestPacket() {
   }
@@ -31,6 +32,10 @@ public class RequestPacket extends TransportPacket {
                        Packet payload) {
     super(protocolVersion, clientRequestId, requestType);
     this.payload = payload;
+  }
+
+  public static int getHeaderSize() {
+    return Integer.BYTES + Short.BYTES + Long.BYTES + Byte.BYTES;
   }
 
   @Override
@@ -45,16 +50,29 @@ public class RequestPacket extends TransportPacket {
 
   @Override
   public void write(ByteBuf outBuf, short protocolVersion) {
-    outBuf.writeInt(getSize(protocolVersion));
-    outBuf.writeShort(protocolVersion);
-    outBuf.writeLong(clientRequestId);
-    outBuf.writeByte(requestType.ordinal());
+    writeHeader(outBuf, protocolVersion);
     payload.write(outBuf, protocolVersion);
+  }
+
+  public void setPreAllocOutBuf(ByteBuf preAllocOutBuf) {
+    this.preAllocOutBuf = preAllocOutBuf;
+  }
+
+  public ByteBuf getPreAllocOutBuf() {
+    return preAllocOutBuf;
   }
 
   @Override
   public int getSize(short protocolVersion) {
     return Short.BYTES + Long.BYTES + Byte.BYTES + payload.getSize(protocolVersion);
+  }
+
+  @Override
+  public void writeHeader(ByteBuf headerBuf, short protocolVersion) {
+    headerBuf.writeInt(getSize(protocolVersion));
+    headerBuf.writeShort(protocolVersion);
+    headerBuf.writeLong(clientRequestId);
+    headerBuf.writeByte(requestType.ordinal());
   }
 
   public Packet getPayload() {
@@ -65,9 +83,18 @@ public class RequestPacket extends TransportPacket {
     this.payload = payload;
   }
 
+  public RequestPacket retry() {
+    preAllocOutBuf.retain();
+    return this;
+  }
+
   @Override
   public void release() throws IOException {
-    payload.release();
+    if (preAllocOutBuf != null) {
+      preAllocOutBuf.release();
+    } else {
+      payload.release();
+    }
     super.release();
   }
 }

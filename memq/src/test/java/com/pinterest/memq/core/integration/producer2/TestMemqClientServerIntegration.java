@@ -128,8 +128,9 @@ public class TestMemqClientServerIntegration {
         .cluster("testcluster")
         .bootstrapServers("localhost:23434")
         .topic("test")
-        .maxInflightRequests(10)
+        .maxInflightRequests(40)
         .maxPayloadBytes(1000000)
+        .maxInflightRequestsMemoryBytes(1024*1024*64)   // 64 MB
         .lingerMs(500)
         .compression(Compression.NONE)
         .disableAcks(false)
@@ -275,8 +276,9 @@ public class TestMemqClientServerIntegration {
         .cluster("testcluster")
         .bootstrapServers("localhost:" + port)
         .topic("test")
-        .maxInflightRequests(30)
+        .maxInflightRequests(120)
         .maxPayloadBytes(1000000)
+        .maxInflightRequestsMemoryBytes(1024*1024*64)   // 64 MB
         .lingerMs(500)
         .compression(Compression.NONE)
         .disableAcks(false)
@@ -340,7 +342,8 @@ public class TestMemqClientServerIntegration {
         .cluster("testcluster")
         .bootstrapServers("localhost:" + port)
         .topic("test")
-        .maxInflightRequests(30)
+        .maxInflightRequests(60)
+        .maxInflightRequestsMemoryBytes(1024*1024*64)   // 64 MB
         .maxPayloadBytes(1000000)
         .lingerMs(500)
         .compression(Compression.NONE)
@@ -434,7 +437,7 @@ public class TestMemqClientServerIntegration {
           wrp = new WriteRequestPacket(wrp.isDisableAcks(), wrp.getTopicName().getBytes(), wrp.isChecksumExists(), wrp.getChecksum() + 1, wrp.getData());
           ByteBuf buf = PooledByteBufAllocator.DEFAULT.buffer(b.capacity());
           req = new RequestPacket(req.getProtocolVersion(), req.getClientRequestId(), req.getRequestType(), wrp);
-          req.write(buf, RequestType.PROTOCOL_VERSION);
+          req.setPreAllocOutBuf(buf);
           msg = buf;
           b.release();
         } else {

@@ -30,6 +30,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.pinterest.memq.client.commons2.MemqPooledByteBufAllocator;
+import io.netty.buffer.CompositeByteBuf;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -155,10 +157,13 @@ public class NetworkClient implements Closeable {
             logger.error("Failed to schedule clean up task: ", ree);
           }
         }
-        ByteBuf buffer = null;
+        ByteBuf buffer = request.getPreAllocOutBuf(); // try the pre-alloc buffer first
         try {
-          buffer = PooledByteBufAllocator.DEFAULT.buffer(request.getSize(RequestType.PROTOCOL_VERSION));
-          request.write(buffer, RequestType.PROTOCOL_VERSION);
+          if (buffer == null) {
+            // alloc a new buffer
+            buffer = MemqPooledByteBufAllocator.buffer(request.getSize(RequestType.PROTOCOL_VERSION));  // this will not block
+            request.write(buffer, RequestType.PROTOCOL_VERSION);
+          }
           channelFuture.channel().writeAndFlush(buffer);
         } catch (Exception e) {
           logger.warn("Failed to write request " + request.getClientRequestId(), e);

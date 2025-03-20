@@ -21,6 +21,7 @@ import com.pinterest.memq.client.commons.audit.Auditor;
 import com.pinterest.memq.client.commons.audit.KafkaBackedAuditor;
 import com.pinterest.memq.client.commons.serde.Serializer;
 import com.pinterest.memq.client.commons2.Endpoint;
+import com.pinterest.memq.client.commons2.MemoryAllocationException;
 import com.pinterest.memq.client.commons2.MemqCommonClient;
 import com.pinterest.memq.client.commons2.retry.FullJitterRetryStrategy;
 import com.pinterest.memq.client.commons2.retry.RetryStrategy;
@@ -81,6 +82,8 @@ public class MemqProducer<K, V> implements Closeable {
                          RetryStrategy retryStrategy,
                          int maxPayloadBytes,
                          int lingerMs,
+                         int maxBlockMs,
+                         int maxInflightRequestsMemoryBytes,
                          int maxInflightRequests,
                          Compression compression,
                          boolean disableAcks,
@@ -98,7 +101,7 @@ public class MemqProducer<K, V> implements Closeable {
         this.client = new MemqCommonClient(locality, sslConfig, networkProperties);
       }
       this.requestManager =
-          new RequestManager(client, topic, this, sendRequestTimeout, retryStrategy, maxPayloadBytes, lingerMs, maxInflightRequests, compression, disableAcks, metricRegistry);
+          new RequestManager(client, topic, this, sendRequestTimeout, retryStrategy, maxPayloadBytes, lingerMs, maxBlockMs, maxInflightRequestsMemoryBytes, maxInflightRequests, compression, disableAcks, metricRegistry);
       if (auditProperties != null) {
         String
             auditorClass =
@@ -138,33 +141,33 @@ public class MemqProducer<K, V> implements Closeable {
    * @throws IOException
    */
   public Future<MemqWriteResult> write(K key,
-                                       V value) throws IOException {
+                                       V value) throws IOException, MemoryAllocationException {
     return write(null, null, key, value, System.currentTimeMillis());
   }
 
   public Future<MemqWriteResult> write(K key,
                                        V value,
-                                       long writeTimestamp) throws IOException {
+                                       long writeTimestamp) throws IOException, MemoryAllocationException {
     return write(null, null, key, value, writeTimestamp);
   }
 
   public Future<MemqWriteResult> write(MessageId messageId,
                                        K key,
                                        V value,
-                                       long writeTimestamp) throws IOException {
+                                       long writeTimestamp) throws IOException, MemoryAllocationException {
     return write(messageId, null, key, value, writeTimestamp);
   }
 
 
   public Future<MemqWriteResult> write(MessageId messageId,
                                        K key,
-                                       V value) throws IOException {
+                                       V value) throws IOException, MemoryAllocationException {
     return write(messageId, null, key, value, System.currentTimeMillis());
   }
 
   public Future<MemqWriteResult> write(Map<String, byte[]> headers,
                                        K key,
-                                       V value) throws IOException {
+                                       V value) throws IOException, MemoryAllocationException {
     return write(null, headers, key, value, System.currentTimeMillis());
   }
 
@@ -173,7 +176,7 @@ public class MemqProducer<K, V> implements Closeable {
                                        Map<String, byte[]> headers,
                                        K key,
                                        V value,
-                                       long writeTimestamp) throws IOException {
+                                       long writeTimestamp) throws IOException, MemoryAllocationException {
     byte[] keyBytes = keySerializer.serialize(key);
     byte[] valueBytes = valueSerializer.serialize(value);
     RawRecord record = RawRecord.newInstance(messageId, headers, keyBytes, valueBytes, writeTimestamp);
@@ -215,8 +218,13 @@ public class MemqProducer<K, V> implements Closeable {
   }
 
   @VisibleForTesting
-  protected int getAvailablePermits() {
-    return requestManager.getAvailablePermits();
+  protected int getRequestCountAvailablePermits() {
+    return requestManager.getRequestCountAvailablePermits();
+  }
+
+  @VisibleForTesting
+  protected int getInflightMemoryAvailablePermits() {
+    return requestManager.getInflightMemoryAvailablePermits();
   }
 
   public String getCluster() {
@@ -253,6 +261,8 @@ public class MemqProducer<K, V> implements Closeable {
     private MetricRegistry metricRegistry = null;
     private MemqCommonClient client = null;
     private boolean memoize = false;
+    private int maxBlockMs;
+    private int maxInflightRequestsMemoryBytes = 32 * 1024 * 1024; // 32 MB
 
     public Builder() {
 
@@ -273,6 +283,8 @@ public class MemqProducer<K, V> implements Closeable {
       retryStrategy = builder.retryStrategy;
       maxPayloadBytes = builder.maxPayloadBytes;
       lingerMs = builder.lingerMs;
+      maxBlockMs = builder.maxBlockMs;
+      maxInflightRequestsMemoryBytes = builder.maxInflightRequestsMemoryBytes;
       maxInflightRequests = builder.maxPayloadBytes;
       compression = builder.compression;
       disableAcks = builder.disableAcks;
@@ -351,6 +363,16 @@ public class MemqProducer<K, V> implements Closeable {
       return this;
     }
 
+    public Builder<K, V> maxBlockMs(int maxBlockMs) {
+      this.maxBlockMs = maxBlockMs;
+      return this;
+    }
+
+    public Builder<K, V> maxInflightRequestsMemoryBytes(int maxInflightRequestsMemoryBytes) {
+      this.maxInflightRequestsMemoryBytes = maxInflightRequestsMemoryBytes;
+      return this;
+    }
+
     public Builder<K, V> maxInflightRequests(int maxInflightRequests) {
       this.maxInflightRequests = maxInflightRequests;
       return this;
@@ -421,6 +443,8 @@ public class MemqProducer<K, V> implements Closeable {
           retryStrategy,
           maxPayloadBytes,
           lingerMs,
+          maxBlockMs,
+          maxInflightRequestsMemoryBytes,
           maxInflightRequests,
           compression,
           disableAcks,
