@@ -136,6 +136,7 @@ public class TestConsumerIntegration {
         .send(new ProducerRecord<String, String>(notificationTopic, gson.toJson(payload)));
     notificationProducer.close();
 
+    System.setProperty("aws.region", "us-east-1");  // set region for S3 storage handler
     MemqConsumer<byte[], byte[]> consumer = getConsumer(props, memqBatchData);
     consumer.subscribe(Lists.newArrayList(topic));
     consumer.assign(Lists.newArrayList(0));

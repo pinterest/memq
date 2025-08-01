@@ -51,6 +51,11 @@ public class WriteRequestPacket implements Packet {
         + (protocolVersion >= 1 ? Integer.BYTES : 0);
   }
 
+  public static int getHeaderSize(short protocolVersion, String topicName) {
+    return Byte.BYTES + Short.BYTES + topicName.length() + Integer.BYTES
+        + (protocolVersion >= 1 ? Integer.BYTES : 0);
+  }
+
   @Override
   public void readFields(ByteBuf inBuffer, short protocolVersion) {
     disableAcks = inBuffer.readBoolean();
@@ -71,12 +76,17 @@ public class WriteRequestPacket implements Packet {
 
   @Override
   public void write(ByteBuf buf, short protocolVersion) {
-    buf.writeBoolean(disableAcks); // if ack all is enabled or not
-    buf.writeShort((short) topicName.length); // topic name length
-    buf.writeBytes(topicName); // topic name
-    buf.writeInt(checksum);
-    buf.writeInt(dataLength); // payload length
+    writeHeader(buf, protocolVersion);
     buf.writeBytes(data); // payload
+  }
+
+  @Override
+  public void writeHeader(ByteBuf headerBuf, short protocolVersion) {
+    headerBuf.writeBoolean(disableAcks); // if ack all is enabled or not
+    headerBuf.writeShort((short) topicName.length); // topic name length
+    headerBuf.writeBytes(topicName); // topic name
+    headerBuf.writeInt(checksum);
+    headerBuf.writeInt(dataLength); // payload length
   }
 
   public boolean isDisableAcks() {
@@ -132,9 +142,6 @@ public class WriteRequestPacket implements Packet {
 
   @Override
   public void release() throws IOException {
-    if (data != null) {
-      data.release();
-    }
     Packet.super.release();
   }
 }

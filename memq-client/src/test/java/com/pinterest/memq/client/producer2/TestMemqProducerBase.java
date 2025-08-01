@@ -77,17 +77,33 @@ public class TestMemqProducerBase {
     return new MockMemqServer(port, map);
   }
 
+  protected MockMemqServer newTrafficShapingTestServer(int readLimit) {
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
+
+    setupSimpleTestServerTopicMetadataHandler(map, port);
+    map.put(RequestType.WRITE, (ctx, req) -> {
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(),
+              req.getClientRequestId(), req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
+      ctx.writeAndFlush(resp);
+    });
+      return new MockMemqServer(port, map, false, true, readLimit, 200);
+  }
+
   protected void setupSimpleTestServerTopicMetadataHandler(Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map) {
+    setupSimpleTestServerTopicMetadataHandler(map, this.port);
+  }
+
+  protected static void setupSimpleTestServerTopicMetadataHandler(Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map, short port) {
     map.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
       TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
       TopicConfig topicConfig = new TopicConfig("test", "dev");
       TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
       Set<Broker> brokers = Collections.singleton(new Broker(LOCALHOST_STRING, port, "n/a", "n/a",
-          BrokerType.WRITE, Collections.singleton(topicAssignment)));
+              BrokerType.WRITE, Collections.singleton(topicAssignment)));
       ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.OK,
-          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
-              ImmutableSet.of(), "dev", new Properties())));
+              req.getRequestType(), ResponseCodes.OK,
+              new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+                      ImmutableSet.of(), "dev", new Properties())));
       ctx.writeAndFlush(resp);
     });
   }

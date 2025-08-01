@@ -38,6 +38,9 @@ public class TestCustomS3Async2OutputHandler {
     CustomS3Async2StorageHandler handler = new CustomS3Async2StorageHandler();
     Properties props = new Properties();
     props.setProperty("bucket", "test");
+    props.setProperty(KafkaNotificationSink.NOTIFICATION_SERVERSET, "src/test/resources/test.serverset");
+    props.setProperty(KafkaNotificationSink.NOTIFICATION_TOPIC, "test");
+    System.setProperty("aws.region", "us-east-1");
     handler.initWriter(props, "test", new MetricRegistry());
     List<CompletableFuture<CustomS3Async2StorageHandler.UploadResult>> tasks = new ArrayList<>();
 

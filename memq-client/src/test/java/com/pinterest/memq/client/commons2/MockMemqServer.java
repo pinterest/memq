@@ -1,12 +1,12 @@
 /**
  * Copyright 2022 Pinterest, Inc.
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *    http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -37,11 +37,13 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
+import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteOrder;
 import java.util.Map;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.function.BiConsumer;
 
 public class MockMemqServer {
@@ -52,24 +54,35 @@ public class MockMemqServer {
   private final ByteBufAllocator allocator;
 
   public MockMemqServer(int port, Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> responseMap, boolean useDirect) {
-    allocator = new PooledByteBufAllocator(useDirect);
+    this(port, responseMap, useDirect, false, -1, -1);
+  }
+
+  public MockMemqServer(int port, Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> responseMap, boolean useDirect,
+                        boolean attachTrafficShapingHandler, long readLimit, long checkInterval) {
+    allocator = new PooledByteBufAllocator(false,3, 0, 8192, 3);
     bootstrap = new ServerBootstrap();
     bootstrap.group(new NioEventLoopGroup(1, new ThreadFactoryBuilder().setNameFormat("boss").build()), new NioEventLoopGroup(new ThreadFactoryBuilder().setNameFormat("worker").build()));
     bootstrap.channel(NioServerSocketChannel.class);
     bootstrap.localAddress(port);
     bootstrap.childOption(ChannelOption.ALLOCATOR, allocator);
+    ScheduledThreadPoolExecutor tmpScheduler = new ScheduledThreadPoolExecutor(1);
+    tmpScheduler.setRemoveOnCancelPolicy(true);
+    GlobalTrafficShapingHandler trafficShapingHandler = new GlobalTrafficShapingHandler(tmpScheduler, 0, readLimit, checkInterval);
     bootstrap.childHandler(new ChannelInitializer<SocketChannel>() {
       @Override
       protected void initChannel(SocketChannel ch) throws Exception {
         ChannelPipeline pipeline = ch.pipeline();
         pipeline.addLast(new LengthFieldBasedFrameDecoder(
-            ByteOrder.BIG_ENDIAN,
-            4 * 1024 * 1024,
-            0,
-            Integer.BYTES,
-            0,
-            0,
-            false));
+                ByteOrder.BIG_ENDIAN,
+                4 * 1024 * 1024,
+                0,
+                Integer.BYTES,
+                0,
+                0,
+                false));
+        if (attachTrafficShapingHandler) {
+          pipeline.addLast(trafficShapingHandler);
+        }
         pipeline.addLast(new MockResponseHandler());
         pipeline.addLast(new MockRequestHandler(responseMap));
       }
@@ -78,7 +91,7 @@ public class MockMemqServer {
   }
 
   public MockMemqServer(int port, Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> responseMap) {
-    this(port, responseMap, true);
+    this(port, responseMap, true, false, -1, -1);
   }
 
   public ChannelFuture start() throws Exception {
@@ -122,7 +135,6 @@ public class MockMemqServer {
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
       logger.warn("Exception caught on inbound connection: {}", cause.getMessage());
-      ctx.close();
     }
   }
 

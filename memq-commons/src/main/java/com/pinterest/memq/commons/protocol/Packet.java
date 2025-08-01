@@ -27,6 +27,8 @@ public interface Packet {
 
   int getSize(short protocolVersion);
 
+  default void writeHeader(ByteBuf headerBuf, short protocolVersion) {};
+
   default void release() throws IOException {
 
   }

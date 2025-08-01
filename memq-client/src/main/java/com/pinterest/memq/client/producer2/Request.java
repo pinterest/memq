@@ -18,7 +18,9 @@ package com.pinterest.memq.client.producer2;
 import com.pinterest.memq.client.commons.Compression;
 import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons.audit.Auditor;
+import com.pinterest.memq.client.commons2.MemoryAllocationException;
 import com.pinterest.memq.client.commons2.MemqCommonClient;
+import com.pinterest.memq.client.commons2.MemqPooledByteBufAllocator;
 import com.pinterest.memq.client.commons2.network.ClosedConnectionException;
 import com.pinterest.memq.client.commons2.retry.RetryStrategy;
 import com.pinterest.memq.client.producer.MemqWriteResult;
@@ -35,6 +37,7 @@ import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufOutputStream;
+import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,6 +57,22 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.CRC32;
 
+/**
+ * Request class is responsible for managing the lifecycle of a request.
+ *
+ * At a high level, it handles the following:
+ * 1. ByteBuf allocation - it allocates a large ByteBuf of size maxPayloadSize that is sliced into 3 parts,
+ * each with their own read/write indices:
+ *    - RequestPacket header
+ *    - WriteRequestPacket header
+ *    - Payload ByteBuf
+ * 2. Writing new messages to the request payload ByteBuf
+ * 3. Sealing the request - this is done when the request is ready to be dispatched either via size or time threshold
+ * 4. Dispatching the request - this is done by submitting a Dispatch task to the dispatcher executor
+ * 5. Handling the response - this is done by the Dispatch task, which handles the response and resolves the result future
+ * 6. Retrying the request - if the request fails due to a closed connection, it will retry the request based on the retry strategy
+ * 7. Releasing resources - it releases the ByteBuf and request count + inflight memory permits when the request is done
+ */
 public class Request {
   private static final Logger logger = LoggerFactory.getLogger(Request.class);
 
@@ -78,7 +97,10 @@ public class Request {
   private volatile long startTime = System.currentTimeMillis();
 
   private volatile boolean dispatching = false;
-  private final ByteBuf byteBuf;
+  private final ByteBuf largeByteBuf;
+  private final ByteBuf requestPacketHeaderByteBuf;
+  private final ByteBuf writeRequestPacketHeaderByteBuf;
+  private final ByteBuf payloadByteBuf;
   private OutputStream outputStream;
   private byte[] messageIdHash;
   private int messageCount;
@@ -90,21 +112,26 @@ public class Request {
   private Timer requestWriteTimer;
   private Timer dispatchTimer;
   private Counter successCounter;
+  private Timer responseTimer;
+  private Timer ackTimer;
+  private RequestPacket requestPacket;
 
   public Request(ExecutorService dispatcher,
                  ScheduledExecutorService scheduler,
                  MemqCommonClient client,
                  RequestManager requestManager,
-                 Semaphore maxInflightRequestLock,
+                 Semaphore requestCountPermits,
+                 Semaphore inflightMemoryPermits,
                  String topic,
                  int clientRequestId,
                  int maxPayloadSize,
                  int lingerMs,
+                 int maxBlockMs,
                  long sendRequestTimeoutMs,
                  RetryStrategy retryStrategy,
                  boolean disableAcks,
                  Compression compression,
-                 MetricRegistry metricRegistry) throws IOException {
+                 MetricRegistry metricRegistry) throws IOException, MemoryAllocationException {
     this.dispatcher = dispatcher;
     this.scheduler = scheduler;
     this.client = client;
@@ -119,19 +146,26 @@ public class Request {
     this.compression = compression;
     this.metricRegistry = metricRegistry;
     int bufferCapacity = getByteBufCapacity(maxRequestSize, compression);
-    this.byteBuf = PooledByteBufAllocator.DEFAULT.buffer(bufferCapacity, bufferCapacity);
+    largeByteBuf = MemqPooledByteBufAllocator.buffer(bufferCapacity, bufferCapacity, maxBlockMs);
+    requestPacketHeaderByteBuf = largeByteBuf.retainedSlice(0, RequestPacket.getHeaderSize());
+    writeRequestPacketHeaderByteBuf = largeByteBuf.retainedSlice(RequestPacket.getHeaderSize(), WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, topic));
+    payloadByteBuf = largeByteBuf.retainedSlice(RequestPacket.getHeaderSize() + WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, topic), bufferCapacity - requestPacketHeaderByteBuf.readableBytes() - writeRequestPacketHeaderByteBuf.readableBytes());
+    requestPacketHeaderByteBuf.resetWriterIndex();
+    writeRequestPacketHeaderByteBuf.resetWriterIndex();
+    payloadByteBuf.resetWriterIndex();
     try {
       initializeOutputStream();
     } catch (IOException ioe) {
       // release bytebuf if exception happened to avoid bytebuf leaks
-      this.byteBuf.release();
+      largeByteBuf.release();
       throw ioe;
     }
     initializeMetrics();
     scheduleTimeBasedDispatch();
     // release request lock once the request is done
     resultFuture.handle((r, t) -> {
-      maxInflightRequestLock.release();
+      requestCountPermits.release();
+      inflightMemoryPermits.release(maxRequestSize);
       return null;
     });
   }
@@ -139,6 +173,8 @@ public class Request {
   private void initializeMetrics() {
     sentBytesCounter = metricRegistry.counter("requests.sent.bytes");
     ackedBytesCounter = metricRegistry.counter("requests.acked.bytes");
+    responseTimer = MiscUtils.oneMinuteWindowTimer(metricRegistry, "requests.response.time");
+    ackTimer = MiscUtils.oneMinuteWindowTimer(metricRegistry, "requests.acked.time");
     successCounter = metricRegistry.counter("requests.success.count");
     requestWriteTimer = metricRegistry.timer("requests.write.time");
     sendTimer = MiscUtils.oneMinuteWindowTimer(metricRegistry, "requests.send.time");
@@ -146,7 +182,7 @@ public class Request {
   }
 
   private void initializeOutputStream() throws IOException {
-    OutputStream stream = new ByteBufOutputStream(this.byteBuf);
+    OutputStream stream = new ByteBufOutputStream(payloadByteBuf);
     int headerLength = MemqMessageHeader.getHeaderLength();
     stream.write(new byte[headerLength]);
     if (compression != null) {
@@ -191,8 +227,8 @@ public class Request {
       }
 
       // synchronized to ensure bytebuf doesn't get out-of-order writes
-      synchronized (byteBuf) {
-        if (payloadSize > byteBuf.writableBytes()) {
+      synchronized (payloadByteBuf) {
+        if (payloadSize > payloadByteBuf.writableBytes()) {
           seal();
           return null;
         }
@@ -247,17 +283,49 @@ public class Request {
       logger.warn("Failed to close output stream: ", e);
     }
     try {
-      header.writeHeader(byteBuf);
-      int payloadSizeBytes = byteBuf.readableBytes();
+      header.writeHeader(payloadByteBuf);
+      int payloadSizeBytes = payloadByteBuf.readableBytes();
       if (payloadSizeBytes == 0) { // don't upload 0 byte payloads
         resultFuture.complete(new MemqWriteResult(clientRequestId, 0, 0, 0));
         return;
       }
-      dispatcher.submit(new Dispatch(byteBuf.asReadOnly().retainedDuplicate(), payloadSizeBytes));
+      requestPacket = createWriteRequestPacket(payloadByteBuf.asReadOnly().retainedDuplicate());
+      dispatcher.submit(new Dispatch(payloadSizeBytes));
       timeDispatchTask.cancel(true);
     } finally {
-      byteBuf.release();
+      payloadByteBuf.release();
     }
+  }
+
+  /**
+   * Given the payload ByteBuf, this method returns a RequestPacket that can be sent to the broker
+   * via the NetworkClient.
+   *
+   * The RequestPacket's payload is constructed by stitching together the 3 sliced ByteBufs which were derived from
+   * a large ByteBuf during Request creation. This single CompositeByteBuf is the overall payload of the RequestPacket which
+   * will be sent to the broker.
+   *
+   * @param payload the payloadByteBuf
+   * @return RequestPacket that can be sent to the broker
+   */
+  public RequestPacket createWriteRequestPacket(ByteBuf payload) {
+    CRC32 crc32 = new CRC32();
+    crc32.update(payload.duplicate().nioBuffer());
+    int checksum = (int) crc32.getValue();
+
+    WriteRequestPacket writeRequestPacket = new WriteRequestPacket(disableAcks,
+            topic.getBytes(), true, checksum, payload.duplicate());
+    writeRequestPacket.writeHeader(writeRequestPacketHeaderByteBuf, RequestType.PROTOCOL_VERSION);
+    RequestPacket requestPacket = new RequestPacket(RequestType.PROTOCOL_VERSION, clientRequestId, RequestType.WRITE,
+            writeRequestPacket);
+    requestPacket.writeHeader(requestPacketHeaderByteBuf, RequestType.PROTOCOL_VERSION);
+
+    CompositeByteBuf finalCompositeByteBuf = PooledByteBufAllocator.DEFAULT.compositeBuffer();
+    finalCompositeByteBuf.addComponent(true, requestPacketHeaderByteBuf);
+    finalCompositeByteBuf.addComponent(true, writeRequestPacketHeaderByteBuf);
+    finalCompositeByteBuf.addComponent(true, payloadByteBuf);
+    requestPacket.setPreAllocOutBuf(finalCompositeByteBuf);
+    return requestPacket;
   }
 
   public boolean isAvailable() {
@@ -312,8 +380,15 @@ public class Request {
     return clientRequestId;
   }
 
+  private void release(RequestPacket requestPacket) {
+    try {
+      requestPacket.release();
+    } catch (IOException e) {
+      logger.error("Failed to release request packet", e);
+    }
+  }
+
   protected class Dispatch implements Runnable {
-    private final ByteBuf payload;
     private final int payloadSizeBytes;
     private final int attempts;
     private final int redirects;
@@ -322,17 +397,15 @@ public class Request {
     private long writeTimestamp;
     private int writeLatency;
 
-    public Dispatch(ByteBuf payload, int payloadSizeBytes) {
-      this.payload = payload;
+    public Dispatch(int payloadSizeBytes) {
       this.payloadSizeBytes = payloadSizeBytes;
       this.attempts = 0;
       this.redirects = 0;
       this.dispatchTimeoutMs = sendRequestTimeoutMs;
     }
 
-    protected Dispatch(ByteBuf payload, int payloadSizeBytes, int attempts, int redirects,
+    protected Dispatch(int payloadSizeBytes, int attempts, int redirects,
                        long requestDeadline) {
-      this.payload = payload;
       this.payloadSizeBytes = payloadSizeBytes;
       this.attempts = attempts;
       this.redirects = redirects;
@@ -342,16 +415,18 @@ public class Request {
     @Override
     public void run() {
       if (dispatchTimeoutMs < 0) {
-        payload.release();
+        release(requestPacket);
         resolve(new TimeoutException("Request timed out before retry: " + attempts));
         return;
       }
-      RequestPacket requestPacket = createWriteRequestPacket(payload);
       sentBytesCounter.inc(payloadSizeBytes);
       Timer.Context dispatchTime = dispatchTimer.time();
       try {
         writeTimestamp = System.currentTimeMillis();
         Timer.Context sendTime = sendTimer.time();
+        Timer.Context responseTime = responseTimer.time();
+        Timer.Context ackTime = ackTimer.time();
+        requestPacket.getPreAllocOutBuf().retain();
         CompletableFuture<ResponsePacket> response = client.sendRequestPacketAndReturnResponseFuture(requestPacket, dispatchTimeoutMs);
         sendTime.stop();
         writeLatency = (int) (System.currentTimeMillis() - writeTimestamp);
@@ -361,7 +436,7 @@ public class Request {
                 if (throwable != null) {
                   handleException(throwable);
                 } else {
-                  handleResponse(responsePacket);
+                  handleResponse(responsePacket, responseTime, ackTime);
                 }
               } finally {
                 try {
@@ -393,19 +468,19 @@ public class Request {
         if (nextRetryIntervalDuration == null || dispatchTimeoutMs <= nextRetryIntervalDuration.toMillis()) {
           resolve(new TimeoutException("Request timed out after " + sendRequestTimeoutMs + " ms and " + attempts + " retries : " + throwable.getMessage()));
         } else {
-          logger.warn(throwable.getMessage() + ", retrying request after " + nextRetryIntervalDuration.toMillis() + " ms");
-          ByteBuf dup = payload.retainedDuplicate(); // retain the bytebuf since the finally clause in this Dispatch will release the local refCnt
+          logger.warn(throwable.getMessage() + ", retrying request " + clientRequestId + " after " + nextRetryIntervalDuration.toMillis() + " ms");
+          requestPacket.retry(); // retain the bytebuf since the finally clause in this Dispatch will release the local refCnt
           try {
             scheduler.schedule(() -> {
               try {
-                dispatcher.submit(new Dispatch(dup, payloadSizeBytes, attempts + 1, redirects, dispatchTimeoutMs + dispatchTimestamp));
+                dispatcher.submit(new Dispatch(payloadSizeBytes, attempts + 1, redirects, dispatchTimeoutMs + dispatchTimestamp));
               } catch (Exception e) {
-                dup.release();
+                release(requestPacket);
                 resolve(e);
               }
             }, nextRetryIntervalDuration.toMillis(), TimeUnit.MILLISECONDS);
           } catch (Exception e) {
-            dup.release();
+            release(requestPacket);
             resolve(e);
           }
         }
@@ -414,7 +489,6 @@ public class Request {
         while (resultException instanceof ExecutionException && resultException.getCause() instanceof Exception) {
           resultException = (Exception) resultException.getCause();
         }
-        logger.error("Failed to send request " + clientRequestId, resultException);
         resolve(resultException);
       } else {
         logger.error("Failed to send request " + clientRequestId, throwable);
@@ -422,13 +496,15 @@ public class Request {
       }
     }
 
-    protected void handleResponse(ResponsePacket responsePacket) {
+    protected void handleResponse(ResponsePacket responsePacket, Timer.Context responseTime, Timer.Context ackTime) {
       short responseCode = responsePacket.getResponseCode();
+      responseTime.stop();
       switch (responseCode) {
         case ResponseCodes.OK:
           ackedBytesCounter.inc(payloadSizeBytes);
           sendAuditMessageIfAuditEnabled();
           int ackLatency = (int) (System.currentTimeMillis() - writeTimestamp);
+          ackTime.stop();
           logger.debug("Request acked in:" + ackLatency + " " + clientRequestId);
           resolve(new MemqWriteResult(clientRequestId, writeLatency, ackLatency, payloadSizeBytes));
           break;
@@ -444,9 +520,9 @@ public class Request {
             return;
           }
           try {
+            requestPacket.retry();
             dispatcher.submit(
                 new Dispatch(
-                    payload.retainedDuplicate(),
                     payloadSizeBytes,
                     attempts,
                     redirects + 1,
@@ -495,23 +571,12 @@ public class Request {
     private void resolve(MemqWriteResult writeResult) {
       resultFuture.complete(writeResult);
       successCounter.inc();
+      largeByteBuf.release();
     }
 
     private void resolve(Throwable e) {
       resultFuture.completeExceptionally(e);
-    }
-
-    // generates the WriteRequestPacket with a retained duplicate of the payload ByteBuf
-    // release payload after invocation
-    public RequestPacket createWriteRequestPacket(ByteBuf payload) {
-      CRC32 crc32 = new CRC32();
-      crc32.update(payload.duplicate().nioBuffer());
-      int checksum = (int) crc32.getValue();
-
-      WriteRequestPacket writeRequestPacket = new WriteRequestPacket(disableAcks,
-          topic.getBytes(), true, checksum, payload.duplicate());
-      return new RequestPacket(RequestType.PROTOCOL_VERSION, clientRequestId, RequestType.WRITE,
-          writeRequestPacket);
+      largeByteBuf.release();
     }
 
     public long getDeadline() {

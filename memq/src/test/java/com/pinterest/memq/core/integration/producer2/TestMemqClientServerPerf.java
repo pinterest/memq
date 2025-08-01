@@ -129,6 +129,7 @@ public class TestMemqClientServerPerf {
               .metricRegistry(registry)
               .keySerializer(new ByteArraySerializer())
               .valueSerializer(new ByteArraySerializer())
+              .maxInflightRequestsMemoryBytes(1024*1024*64)
               .build();
           byte[] value = UUID.randomUUID().toString().getBytes();
           Set<Future<MemqWriteResult>> futures = new LinkedHashSet<>();
