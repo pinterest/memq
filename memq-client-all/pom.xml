@@ -6,7 +6,7 @@
 	<parent>
 		<groupId>com.pinterest.memq</groupId>
 		<artifactId>memq-parent</artifactId>
-		<version>0.2.22-SNAPSHOT</version>
+		<version>1.0.0</version>
 		<relativePath>../pom.xml</relativePath>
 	</parent>
 	<artifactId>memq-client-all</artifactId>
@@ -48,7 +48,7 @@
 		<dependency>
 			<groupId>com.pinterest.memq</groupId>
 			<artifactId>memq-client</artifactId>
-			<version>0.2.22-SNAPSHOT</version>
+			<version>1.0.0</version>
 		</dependency>
 	</dependencies>
 	<build>
