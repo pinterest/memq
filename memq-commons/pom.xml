@@ -9,6 +9,7 @@
 		<relativePath>../pom.xml</relativePath>
 	</parent>
 	<artifactId>memq-commons</artifactId>
+	<name>memq-commons</name>
 	<developers>
 		<developer>
 			<id>ambud</id>
