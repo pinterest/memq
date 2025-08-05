@@ -9,6 +9,36 @@
 		<relativePath>../pom.xml</relativePath>
 	</parent>
 	<artifactId>memq-commons</artifactId>
+	<developers>
+		<developer>
+			<id>ambud</id>
+			<name>Ambud Sharma</name>
+			<organization>Pinterest Logging Platform</organization>
+		</developer>
+		<developer>
+			<id>kabochya</id>
+			<name>Ping-Min Lin</name>
+			<organization>Pinterest Logging Platform</organization>
+		</developer>
+		<developer>
+			<id>jeffxiang</id>
+			<name>Jeff Xiang</name>
+			<organization>Pinterest Logging Platform</organization>
+		</developer>
+	</developers>
+	<url>https://github.com/pinterest/memq</url>
+	<licenses>
+		<license>
+			<name>The Apache Software License, Version 2.0</name>
+			<url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
+		</license>
+	</licenses>
+	<scm>
+		<connection>scm:git:git@pinterest/memq.git</connection>
+		<developerConnection>scm:git:git@github.com:pinterest/memq.git</developerConnection>
+		<url>https://github.com/pinterest/memq.git</url>
+		<tag>HEAD</tag>
+	</scm>
 	<dependencies>
 		<dependency>
 			<groupId>software.amazon.awssdk</groupId>

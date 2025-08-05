@@ -31,6 +31,11 @@
 			<name>Ping-Min Lin</name>
 			<organization>Pinterest Logging Platform</organization>
 		</developer>
+		<developer>
+			<id>jeffxiang</id>
+			<name>Jeff Xiang</name>
+			<organization>Pinterest Logging Platform</organization>
+		</developer>
 	</developers>
 	<url>https://github.com/pinterest/memq</url>
 	<licenses>
@@ -45,13 +50,6 @@
 	    <url>https://github.com/pinterest/memq.git</url>
 	    <tag>HEAD</tag>
  	</scm>
-	<distributionManagement>
-		<repository>
-			<id>ossrh</id>
-			<name>Central Repository OSSRH</name>
-			<url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
-		</repository>
-	</distributionManagement>
 	<dependencyManagement>
 		<dependencies>
 			<dependency>
@@ -127,14 +125,13 @@
 				</executions>
 			</plugin>
 			<plugin>
-			    <groupId>org.sonatype.plugins</groupId>
-			    <artifactId>nexus-staging-maven-plugin</artifactId>
-			    <version>1.6.7</version>
+				<groupId>org.sonatype.central</groupId>
+				<artifactId>central-publishing-maven-plugin</artifactId>
+				<version>0.8.0</version>
 			    <extensions>true</extensions>
 			    <configuration>
-			        <serverId>ossrh</serverId>
-			        <nexusUrl>https://oss.sonatype.org/</nexusUrl>
-			        <autoReleaseAfterClose>true</autoReleaseAfterClose>
+					<publishingServerId>central</publishingServerId>
+					<autoPublish>true</autoPublish>
 			    </configuration>
 			</plugin>
 			<plugin>
