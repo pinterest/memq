@@ -27,6 +27,7 @@ import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.Arrays;
@@ -493,8 +494,9 @@ public class FileSystemStorageHandler extends ReadBrokerStorageHandler {
    * @param filePath
    * @return
    */
-  protected boolean isValidReadRequest(String topic, String filePath) {
-    return storageDirList.stream().anyMatch(storageDir -> filePath.startsWith(storageDir));
+  protected boolean isValidReadRequest(String topic, String filePath) throws IOException {
+    String filePathCanonical = new File(filePath).getCanonicalPath();
+    return storageDirList.stream().anyMatch(storageDir -> filePathCanonical.startsWith(storageDir));
   }
 
   public CompletableFuture<String> anyUploadResultOrTimeout(Collection<CompletableFuture<String>> tasks,
