@@ -59,18 +59,26 @@ public class MemqCommonClient implements Closeable {
   private static final Logger logger = LoggerFactory.getLogger(MemqCommonClient.class);
   private static final int MAX_SEND_RETRIES = 3;
 
+  public static final String CONFIG_NUM_ENDPOINTS = "numEndpoints"; // number of endpoints for writes
+
   private final NetworkClient networkClient;
   private long connectTimeout = 500;
+  private short numEndpoints = 1;
 
   private String locality = DEFAULT_LOCALITY;
-  private Endpoint currentEndpoint;
-  private List<Endpoint> endpoints;
+  // private Endpoint currentEndpoint;
+  private List<Endpoint> localityEndpoints;
+  private List<Endpoint> writeEndpoints;
 
   protected MemqCommonClient(SSLConfig sslConfig, Properties networkProperties) {
-    if (networkProperties != null
-        && networkProperties.containsKey(NetworkClient.CONFIG_CONNECT_TIMEOUT_MS)) {
-      this.connectTimeout = Long
-          .parseLong(networkProperties.getProperty(NetworkClient.CONFIG_CONNECT_TIMEOUT_MS));
+    if (networkProperties != null) {
+      if (networkProperties.containsKey(NetworkClient.CONFIG_CONNECT_TIMEOUT_MS)) {
+        this.connectTimeout = Long
+            .parseLong(networkProperties.getProperty(NetworkClient.CONFIG_CONNECT_TIMEOUT_MS));
+      }
+      if (networkProperties.containsKey(CONFIG_NUM_ENDPOINTS)) {
+        this.numEndpoints = Short.parseShort(networkProperties.getProperty(CONFIG_NUM_ENDPOINTS));
+      }
     }
     networkClient = new NetworkClient(networkProperties, sslConfig);
   }
@@ -85,13 +93,14 @@ public class MemqCommonClient implements Closeable {
   }
 
   public void resetEndpoints(List<Endpoint> endpoints) throws Exception {
-    this.endpoints = getPreferredEndpoints(endpoints);
-    currentEndpoint = null;
+    this.localityEndpoints = getLocalityEndpoints(endpoints);
+    this.writeEndpoints = getWriteEndpoints(new ArrayList<>(this.localityEndpoints));
+    // currentEndpoint = null;
     validateInitialization();
   }
 
   private void validateInitialization() throws Exception {
-    if (endpoints.isEmpty()) {
+    if (localityEndpoints.isEmpty() || writeEndpoints.isEmpty()) {
       throw new Exception("Failed to initialize, no endpoints available");
     }
   }
@@ -100,7 +109,7 @@ public class MemqCommonClient implements Closeable {
                                                                                     long timeoutMillis) throws InterruptedException,
                                                                                                         TimeoutException,
                                                                                                         ExecutionException {
-    if (endpoints == null) {
+    if (localityEndpoints == null || writeEndpoints == null) {
       throw new IllegalStateException("Client not initialized yet");
     }
     CompletableFuture<ResponsePacket> future = null;
@@ -118,7 +127,7 @@ public class MemqCommonClient implements Closeable {
         future = networkClient.send(endpoint.getAddress(), request,
             Duration.ofMillis(timeoutMillis - elapsed));
         // we keep the endpoint connection for future use
-        currentEndpoint = endpoint;
+        // currentEndpoint = endpoint;
         break;
       } catch (ExecutionException e) {
         if (e.getCause() instanceof ConnectException) {
@@ -143,14 +152,20 @@ public class MemqCommonClient implements Closeable {
   }
 
   protected List<Endpoint> getEndpointsToTry() {
-    List<Endpoint> endpointsToTry;
-    if (currentEndpoint == null) {
-      endpointsToTry = randomizedEndpoints(endpoints);
-    } else {
-      endpointsToTry = new ArrayList<>();
-      endpointsToTry.add(currentEndpoint);
-      endpointsToTry.addAll(randomizedEndpoints(endpoints));
-    }
+    // List<Endpoint> endpointsToTry;
+    // if (currentEndpoint == null) {
+    //   endpointsToTry = randomizedEndpoints(endpoints);
+    // } else {
+    //   endpointsToTry = new ArrayList<>();
+    //   endpointsToTry.add(currentEndpoint);
+    //   endpointsToTry.addAll(randomizedEndpoints(endpoints));
+    // }
+    Collections.rotate(writeEndpoints, 1);  // rotate write endpoints to get new write endpoint
+    List<Endpoint> endpointsToTry = new ArrayList<>();
+    endpointsToTry.addAll(new ArrayList<>(writeEndpoints)); // add rotated write endpoints
+    List<Endpoint> remainingEndpoints = new ArrayList<>(randomizedEndpoints(localityEndpoints)); // add remaining locality endpoints
+    remainingEndpoints.removeAll(writeEndpoints);
+    endpointsToTry.addAll(remainingEndpoints);
     return endpointsToTry;
   }
 
@@ -186,9 +201,10 @@ public class MemqCommonClient implements Closeable {
     } else {
       brokers = md.getWriteBrokers();
     }
-    currentEndpoint = null;
-    endpoints = getPreferredEndpoints(
+    // currentEndpoint = null;
+    localityEndpoints = getLocalityEndpoints(
         brokers.stream().map(Endpoint::fromBroker).collect(Collectors.toList()));
+    writeEndpoints = getWriteEndpoints(new ArrayList<>(localityEndpoints));
   }
 
   protected List<Endpoint> randomizedEndpoints(List<Endpoint> servers) {
@@ -197,13 +213,18 @@ public class MemqCommonClient implements Closeable {
     return shuffle;
   }
 
-  protected List<Endpoint> getPreferredEndpoints(List<Endpoint> servers) {
+  protected List<Endpoint> getLocalityEndpoints(List<Endpoint> servers) {
     List<Endpoint> collect = servers.stream().filter(b -> locality.equals(b.getLocality()))
         .collect(Collectors.toList());
     if (collect.isEmpty()) {
       collect = servers;
     }
     return collect;
+  }
+
+  protected List<Endpoint> getWriteEndpoints(List<Endpoint> localityEndpoints) {
+    Collections.shuffle(localityEndpoints);
+    return localityEndpoints.subList(0, Math.min(localityEndpoints.size(), numEndpoints));
   }
 
   @Override
@@ -233,9 +254,9 @@ public class MemqCommonClient implements Closeable {
     }).collect(Collectors.toList());
   }
 
-  protected void setCurrentEndpoint(Endpoint currentEndpoint) {
-    this.currentEndpoint = currentEndpoint;
-  }
+  // protected void setCurrentEndpoint(Endpoint currentEndpoint) {
+  //   this.currentEndpoint = currentEndpoint;
+  // }
 
   public boolean isClosed() {
     return networkClient.isClosed();

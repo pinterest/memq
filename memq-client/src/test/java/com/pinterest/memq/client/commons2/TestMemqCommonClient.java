@@ -253,33 +253,82 @@ public class TestMemqCommonClient {
     );
     assertEquals(1, client.getEndpointsToTry().size());
 
+    // numEndpoints = 1
     MemqCommonClient client2 = new MemqCommonClient("test", null, new Properties());
-    client.initialize(
+    client2.initialize(
         Arrays.asList(
             commonEndpoint,
             new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9093), "test"),
             new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9094), "test")
         )
     );
-    client.setCurrentEndpoint(commonEndpoint);
-    List<Endpoint> endpointsToTry = client.getEndpointsToTry();
-    assertEquals(4, endpointsToTry.size());
-    assertEquals(endpointsToTry.get(0), commonEndpoint);
+    // client.setCurrentEndpoint(commonEndpoint);
+    List<Endpoint> endpointsToTry = client2.getEndpointsToTry();
+    assertEquals(3, endpointsToTry.size());
+    Endpoint firstEndpoint = endpointsToTry.get(0);
+//    assertEquals(endpointsToTry.get(0), commonEndpoint);
+    assertNotEquals(endpointsToTry.get(0), endpointsToTry.get(1));
     assertNotEquals(endpointsToTry.get(1), endpointsToTry.get(2));
-    assertNotEquals(endpointsToTry.get(2), endpointsToTry.get(3));
-    assertNotEquals(endpointsToTry.get(3), endpointsToTry.get(1));
+    assertNotEquals(endpointsToTry.get(2), endpointsToTry.get(0));
+
+    // ensure that with numEndpoints=1, each call to getEndpointsToTry returns the same first endpoint
+    for (int i = 0; i < 10; i++) {
+      endpointsToTry = client2.getEndpointsToTry();
+      assertEquals(firstEndpoint, endpointsToTry.get(0));
+      assertEquals(3, endpointsToTry.size());
+      assertNotEquals(endpointsToTry.get(0), endpointsToTry.get(1));
+      assertNotEquals(endpointsToTry.get(1), endpointsToTry.get(2));
+      assertNotEquals(endpointsToTry.get(2), endpointsToTry.get(0));
+    }
+
+    // numEndpoints = 3
+    Properties networkProps = new Properties();
+    networkProps.setProperty(MemqCommonClient.CONFIG_NUM_ENDPOINTS, "3");
+    MemqCommonClient client3 = new MemqCommonClient("test", null, networkProps);
+    client3.initialize(
+            Arrays.asList(
+                    // 5 endpoints in same locality
+                    commonEndpoint,
+                    new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9093), "test"),
+                    new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9094), "test"),
+                    new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9095), "test"),
+                    new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9096), "test"),
+                    // 4 endpoints in different localities
+                    new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9097), "test2"),
+                    new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9098), "test2"),
+                    new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9099), "test3"),
+                    new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 10000), "test3")
+                    )
+    );
+
+    List<Endpoint> client3EndpointsToTry = client3.getEndpointsToTry();
+    assertEquals(5, client3EndpointsToTry.size());
+    for (Endpoint endpoint : client3EndpointsToTry) {
+      assertEquals("test", endpoint.getLocality());
+    }
+
+    List<Endpoint> writeEndpoints = client3EndpointsToTry.subList(0, 3);
+    Set<Endpoint> writeEndpointsSet = new HashSet<>(writeEndpoints);
+
+    for (int i = 0; i < 10; i++) {
+      List<Endpoint> rotated = client3.getEndpointsToTry();
+      assertEquals(5, rotated.size());
+      assertEquals(writeEndpointsSet, new HashSet<>(rotated.subList(0, 3)));
+      assertEquals(writeEndpoints.get(2 - (i % 3)), rotated.get(0));
+    }
+
   }
 
   @Test
-  public void testGetPreferredEndpoints() throws Exception {
+  public void testGetLocalityEndpoints() throws Exception {
     MemqCommonClient client = new MemqCommonClient("test", null, new Properties());
-    List<Endpoint> preferred = client.getPreferredEndpoints(Arrays.asList(
+    List<Endpoint> localityEndpoints = client.getLocalityEndpoints(Arrays.asList(
         new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9092), "test"),
         new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9093), "test2"),
         new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9094), "test3")
     ));
-    assertEquals(1, preferred.size());
-    assertEquals("test", preferred.get(0).getLocality());
+    assertEquals(1, localityEndpoints.size());
+    assertEquals("test", localityEndpoints.get(0).getLocality());
   }
 
   @Test
