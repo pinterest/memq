@@ -219,12 +219,15 @@ public class MemqCommonClient implements Closeable {
     if (collect.isEmpty()) {
       collect = servers;
     }
+    logger.info("Locality endpoints: " + collect);
     return collect;
   }
 
   protected List<Endpoint> getWriteEndpoints(List<Endpoint> localityEndpoints) {
     Collections.shuffle(localityEndpoints);
-    return localityEndpoints.subList(0, Math.min(localityEndpoints.size(), numEndpoints));
+    List<Endpoint> writeEndpoints = localityEndpoints.subList(0, Math.min(localityEndpoints.size(), numEndpoints));
+    logger.info("Write endpoints: " + writeEndpoints);
+    return writeEndpoints;
   }
 
   @Override

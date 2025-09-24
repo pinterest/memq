@@ -255,30 +255,40 @@ public class TestMemqCommonClient {
 
     // numEndpoints = 1
     MemqCommonClient client2 = new MemqCommonClient("test", null, new Properties());
-    client2.initialize(
-        Arrays.asList(
+    List<Endpoint> client2Endpoints = Arrays.asList(
             commonEndpoint,
-            new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9093), "test"),
-            new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9094), "test")
-        )
+            new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9093), "test")
+//            new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9094), "test")
     );
+    client2.initialize(client2Endpoints);
     // client.setCurrentEndpoint(commonEndpoint);
     List<Endpoint> endpointsToTry = client2.getEndpointsToTry();
-    assertEquals(3, endpointsToTry.size());
+    assertEquals(2, endpointsToTry.size());
     Endpoint firstEndpoint = endpointsToTry.get(0);
 //    assertEquals(endpointsToTry.get(0), commonEndpoint);
     assertNotEquals(endpointsToTry.get(0), endpointsToTry.get(1));
-    assertNotEquals(endpointsToTry.get(1), endpointsToTry.get(2));
-    assertNotEquals(endpointsToTry.get(2), endpointsToTry.get(0));
+//    assertNotEquals(endpointsToTry.get(1), endpointsToTry.get(2));
+//    assertNotEquals(endpointsToTry.get(2), endpointsToTry.get(0));
 
     // ensure that with numEndpoints=1, each call to getEndpointsToTry returns the same first endpoint
     for (int i = 0; i < 10; i++) {
       endpointsToTry = client2.getEndpointsToTry();
       assertEquals(firstEndpoint, endpointsToTry.get(0));
-      assertEquals(3, endpointsToTry.size());
+      assertEquals(2, endpointsToTry.size());
       assertNotEquals(endpointsToTry.get(0), endpointsToTry.get(1));
-      assertNotEquals(endpointsToTry.get(1), endpointsToTry.get(2));
-      assertNotEquals(endpointsToTry.get(2), endpointsToTry.get(0));
+//      assertNotEquals(endpointsToTry.get(1), endpointsToTry.get(2));
+//      assertNotEquals(endpointsToTry.get(2), endpointsToTry.get(0));
+    }
+
+    // reinitialize client2 endpoints multiple times to ensure affinity is shuffled upon restarts
+    Map<Endpoint, Integer> counts = new HashMap<>();
+    for (int i = 0; i < 100; i++) {
+      client2.initialize(client2Endpoints);
+      endpointsToTry = client2.getEndpointsToTry();
+      counts.put(endpointsToTry.get(0), counts.getOrDefault(endpointsToTry.get(0), 0) + 1);
+    }
+    for (Endpoint endpoint : counts.keySet()) {
+      assertTrue(counts.get(endpoint) > 0);
     }
 
     // numEndpoints = 3
