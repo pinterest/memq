@@ -388,9 +388,8 @@ public class TestNetworkClient {
 
     try {
       pktFuture.get();
-      fail("should throw IO exception");
     } catch (ExecutionException ee) {
-      assertTrue(ee.getCause() instanceof IOException);
+      fail("should not throw exception");
     } catch (Exception e) {
       fail("failed: " + e);
     }
