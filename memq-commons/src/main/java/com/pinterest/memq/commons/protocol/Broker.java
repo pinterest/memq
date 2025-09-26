@@ -128,7 +128,7 @@ public class Broker implements Packet, Comparable<Broker> {
   @Override
   public boolean equals(Object obj) {
     if (obj instanceof Broker) {
-      return ((Broker) obj).getBrokerIP().equals(brokerIP);
+      return ((Broker) obj).getBrokerIP().equals(brokerIP) && ((Broker) obj).getBrokerPort() == brokerPort;
     }
     return false;
   }

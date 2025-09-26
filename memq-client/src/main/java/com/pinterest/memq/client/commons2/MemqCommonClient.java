@@ -66,7 +66,6 @@ public class MemqCommonClient implements Closeable {
   private short numEndpoints = 1;
 
   private String locality = DEFAULT_LOCALITY;
-  // private Endpoint currentEndpoint;
   private List<Endpoint> localityEndpoints;
   private List<Endpoint> writeEndpoints;
 
@@ -152,14 +151,6 @@ public class MemqCommonClient implements Closeable {
   }
 
   protected List<Endpoint> getEndpointsToTry() {
-    // List<Endpoint> endpointsToTry;
-    // if (currentEndpoint == null) {
-    //   endpointsToTry = randomizedEndpoints(endpoints);
-    // } else {
-    //   endpointsToTry = new ArrayList<>();
-    //   endpointsToTry.add(currentEndpoint);
-    //   endpointsToTry.addAll(randomizedEndpoints(endpoints));
-    // }
     Collections.rotate(writeEndpoints, 1);  // rotate write endpoints to get new write endpoint
     List<Endpoint> endpointsToTry = new ArrayList<>();
     endpointsToTry.addAll(new ArrayList<>(writeEndpoints)); // add rotated write endpoints
@@ -256,10 +247,6 @@ public class MemqCommonClient implements Closeable {
       return new Endpoint(InetSocketAddress.createUnresolved(parts[0], Short.parseShort(parts[1])));
     }).collect(Collectors.toList());
   }
-
-  // protected void setCurrentEndpoint(Endpoint currentEndpoint) {
-  //   this.currentEndpoint = currentEndpoint;
-  // }
 
   public boolean isClosed() {
     return networkClient.isClosed();

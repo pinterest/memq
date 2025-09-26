@@ -20,6 +20,8 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.Properties;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
@@ -31,7 +33,6 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.pinterest.memq.client.commons2.MemqPooledByteBufAllocator;
-import io.netty.buffer.CompositeByteBuf;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,7 +49,6 @@ import com.pinterest.memq.commons.protocol.ResponsePacket;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelOption;
@@ -80,7 +80,10 @@ public class NetworkClient implements Closeable {
   private final EventLoopGroup eventLoopGroup;
   private final AtomicBoolean closed = new AtomicBoolean(false);
 
-  private volatile ChannelFuture connectFuture;
+  // maintain a pool of connections keyed by endpoint
+  private final Map<InetSocketAddress, ChannelFuture> channelPool = new ConcurrentHashMap<>();
+  // kept for testing visibility to return the last acquired connection
+  private volatile ChannelFuture lastConnectFuture;
 
   public NetworkClient() {
     this(null, null);
@@ -141,7 +144,8 @@ public class NetworkClient implements Closeable {
     acquireChannel(socketAddress).addListener((ChannelFutureListener) channelFuture -> {
       if (channelFuture.isSuccess()) {
         long elapsedMs = System.currentTimeMillis() - startMs;
-        responseHandler.addRequest(identifier, returnFuture);
+        // register this request with the channel so only this channel's inflight requests are affected on close
+        responseHandler.registerRequest(channelFuture.channel(), identifier, returnFuture);
         try {
           final ScheduledFuture<?> scheduledCleanup = scheduler.schedule(() -> {
             responseHandler.cancelRequest(identifier, new TimeoutException("Failed to receive response after " + timeout.toMillis() + " ms"));
@@ -178,27 +182,28 @@ public class NetworkClient implements Closeable {
   }
 
   protected ChannelFuture acquireChannel(InetSocketAddress socketAddress) throws ExecutionException, InterruptedException {
-    if (isChannelUnavailable(socketAddress)) {
-      synchronized (this) {
-        if (isChannelUnavailable(socketAddress)) {
-          if (connectFuture != null && connectFuture.channel() != null) {
-            // destination address is different from current connection's remote address
-            connectFuture.channel().close().await();
-          }
+    ChannelFuture existing = channelPool.get(socketAddress);
+    if (existing == null || !existing.channel().isActive()) {
+      synchronized (getPoolLock(socketAddress)) {
+        existing = channelPool.get(socketAddress);
+        if (existing == null || !existing.channel().isActive()) {
           CompletableFuture<ChannelFuture> connectReadyFuture = new CompletableFuture<>();
           doConnect(socketAddress, connectReadyFuture, 0);
-          connectFuture = connectReadyFuture.get();
+          ChannelFuture newFuture = connectReadyFuture.get();
+          channelPool.put(socketAddress, newFuture);
+          lastConnectFuture = newFuture;
+          return newFuture;
         }
       }
     }
-    return connectFuture;
+    lastConnectFuture = existing;
+    return existing;
   }
 
-  private boolean isChannelUnavailable(InetSocketAddress socketAddress) {
-    if (connectFuture == null || !connectFuture.channel().isActive()) return true;
-    InetSocketAddress currentAddr = (InetSocketAddress) (connectFuture.channel().remoteAddress());
-
-    return !currentAddr.getHostString().equals(socketAddress.getHostString()) || !(currentAddr.getPort() == socketAddress.getPort());
+  private Object getPoolLock(InetSocketAddress socketAddress) {
+    // simple striped locking per address using the pool map's computeIfAbsent on a dummy value
+    // we avoid extra structures by synchronizing on the socketAddress object itself
+    return socketAddress;
   }
 
   private void doConnect(InetSocketAddress socketAddress, CompletableFuture<ChannelFuture> connectReadyFuture, int attempts) {
@@ -211,7 +216,18 @@ public class NetworkClient implements Closeable {
   public void close() throws IOException {
     logger.debug("Closing network client");
     closed.set(true);
-    connectFuture = null;
+    // close all channels
+    for (ChannelFuture cf : channelPool.values()) {
+      try {
+        if (cf != null && cf.channel() != null) {
+          cf.channel().close().await();
+        }
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+      }
+    }
+    channelPool.clear();
+    lastConnectFuture = null;
     responseHandler.close();
     scheduler.shutdown();
     eventLoopGroup.shutdownGracefully();
@@ -223,10 +239,13 @@ public class NetworkClient implements Closeable {
 
   // blocking
   public void reset() throws IOException, InterruptedException {
-    if (connectFuture != null && connectFuture.channel() != null) {
-      connectFuture.channel().close().await(); // should reset the response map after channel is closed
-      connectFuture = null;
+    for (ChannelFuture cf : channelPool.values()) {
+      if (cf != null && cf.channel() != null) {
+        cf.channel().close().await();
+      }
     }
+    channelPool.clear();
+    lastConnectFuture = null;
   }
 
   private final class RetryListener implements ChannelFutureListener {
@@ -278,6 +297,6 @@ public class NetworkClient implements Closeable {
 
   @VisibleForTesting
   protected ChannelFuture getConnectFuture() {
-    return connectFuture;
+    return lastConnectFuture;
   }
 }

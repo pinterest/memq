@@ -55,8 +55,9 @@ final class ConnectionLifecycleHandler extends ChannelDuplexHandler {
   public void channelInactive(ChannelHandlerContext ctx) throws Exception {
     logger.info("[" + ctx.channel().id() + "] Closing connection to server: " + ctx.channel()
         .remoteAddress());
-    handler.cleanAndRejectInflightRequests(
-        new ClosedConnectionException("Connection " + ctx.channel().id() + " closed"));
+    handler.cleanAndRejectInflightRequestsForChannel(
+        ctx.channel(),
+        new ClosedConnectionException("Connection " + ctx.channel().remoteAddress() + " closed"));
     super.channelInactive(ctx);
   }
 
@@ -64,10 +65,11 @@ final class ConnectionLifecycleHandler extends ChannelDuplexHandler {
   public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
     logger.error("[" + ctx.channel().id() + "] Exception caught in inbound pipeline: ", cause);
     if (cause instanceof IOException && (cause).getMessage().equals("Connection reset by peer")) {
-      handler.cleanAndRejectInflightRequests(
-          new ClosedConnectionException("Connection " + ctx.channel().id() + " closed by server"));
+      handler.cleanAndRejectInflightRequestsForChannel(
+          ctx.channel(),
+          new ClosedConnectionException("Connection " + ctx.channel().remoteAddress() + " closed by server"));
     } else {
-      handler.cleanAndRejectInflightRequests(cause);
+      handler.cleanAndRejectInflightRequestsForChannel(ctx.channel(), cause);
     }
     ctx.close();
   }
