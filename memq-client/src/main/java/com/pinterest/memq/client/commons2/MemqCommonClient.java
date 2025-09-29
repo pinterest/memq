@@ -59,11 +59,11 @@ public class MemqCommonClient implements Closeable {
   private static final Logger logger = LoggerFactory.getLogger(MemqCommonClient.class);
   private static final int MAX_SEND_RETRIES = 3;
 
-  public static final String CONFIG_NUM_ENDPOINTS = "numEndpoints"; // number of endpoints for writes
+  public static final String CONFIG_NUM_WRITE_ENDPOINTS = "numWriteEndpoints"; // number of endpoints for writes
 
   private final NetworkClient networkClient;
   private long connectTimeout = 500;
-  private short numEndpoints = 1;
+  private short numWriteEndpoints = 1;
 
   private String locality = DEFAULT_LOCALITY;
   private List<Endpoint> localityEndpoints;
@@ -75,8 +75,8 @@ public class MemqCommonClient implements Closeable {
         this.connectTimeout = Long
             .parseLong(networkProperties.getProperty(NetworkClient.CONFIG_CONNECT_TIMEOUT_MS));
       }
-      if (networkProperties.containsKey(CONFIG_NUM_ENDPOINTS)) {
-        this.numEndpoints = Short.parseShort(networkProperties.getProperty(CONFIG_NUM_ENDPOINTS));
+      if (networkProperties.containsKey(CONFIG_NUM_WRITE_ENDPOINTS)) {
+        this.numWriteEndpoints = Short.parseShort(networkProperties.getProperty(CONFIG_NUM_WRITE_ENDPOINTS));
       }
     }
     networkClient = new NetworkClient(networkProperties, sslConfig);
@@ -94,7 +94,6 @@ public class MemqCommonClient implements Closeable {
   public void resetEndpoints(List<Endpoint> endpoints) throws Exception {
     this.localityEndpoints = getLocalityEndpoints(endpoints);
     this.writeEndpoints = getWriteEndpoints(new ArrayList<>(this.localityEndpoints));
-    // currentEndpoint = null;
     validateInitialization();
   }
 
@@ -125,8 +124,6 @@ public class MemqCommonClient implements Closeable {
       try {
         future = networkClient.send(endpoint.getAddress(), request,
             Duration.ofMillis(timeoutMillis - elapsed));
-        // we keep the endpoint connection for future use
-        // currentEndpoint = endpoint;
         break;
       } catch (ExecutionException e) {
         if (e.getCause() instanceof ConnectException) {
@@ -150,6 +147,28 @@ public class MemqCommonClient implements Closeable {
     return future;
   }
 
+  /**
+   * Get the endpoints to try for a given request, ordered by priority in the following way:
+   * 1. N rotated write endpoints, where N = numEndpoints (config) and the write endpoints are rotated by 1 after each call
+   * 2. Remaining locality endpoints in a random order
+   * 
+   * A given request will be sent to the
+   * 
+   * Example:
+   * numEndpoints = 3
+   * localityEndpoints = [A, B, C, D, E, F]
+   * writeEndpoints = [A, B, C]
+   * 
+   * Example:
+   * getEndpointsToTry() returns [A, B, C, D, E, F]
+   * getEndpointsToTry() returns [C, A, B, D, F, E]
+   * getEndpointsToTry() returns [B, C, A, E, F, D]
+   * getEndpointsToTry() returns [A, B, C, E, D, F]
+   * ...
+   *
+   * This ensures that the write endpoints are used in a round-robin manner, and the locality endpoints are used (if >N retries are needed) in a random order.
+   * @return the endpoints to try
+   */
   protected List<Endpoint> getEndpointsToTry() {
     Collections.rotate(writeEndpoints, 1);  // rotate write endpoints to get new write endpoint
     List<Endpoint> endpointsToTry = new ArrayList<>();
@@ -192,7 +211,6 @@ public class MemqCommonClient implements Closeable {
     } else {
       brokers = md.getWriteBrokers();
     }
-    // currentEndpoint = null;
     localityEndpoints = getLocalityEndpoints(
         brokers.stream().map(Endpoint::fromBroker).collect(Collectors.toList()));
     writeEndpoints = getWriteEndpoints(new ArrayList<>(localityEndpoints));
@@ -216,7 +234,7 @@ public class MemqCommonClient implements Closeable {
 
   protected List<Endpoint> getWriteEndpoints(List<Endpoint> localityEndpoints) {
     Collections.shuffle(localityEndpoints);
-    List<Endpoint> writeEndpoints = localityEndpoints.subList(0, Math.min(localityEndpoints.size(), numEndpoints));
+    List<Endpoint> writeEndpoints = localityEndpoints.subList(0, Math.min(localityEndpoints.size(), numWriteEndpoints));
     logger.info("Write endpoints: " + writeEndpoints);
     return writeEndpoints;
   }

@@ -181,6 +181,15 @@ public class NetworkClient implements Closeable {
     return returnFuture;
   }
 
+  /**
+   * Acquire channel for the given address by checking if it exists in the channelPool.
+   * If not, create it and register it in the channelPool for future use.
+   *
+   * @param socketAddress
+   * @return the ChannelFuture for this address
+   * @throws ExecutionException
+   * @throws InterruptedException
+   */
   protected ChannelFuture acquireChannel(InetSocketAddress socketAddress) throws ExecutionException, InterruptedException {
     ChannelFuture existing = channelPool.get(socketAddress);
     if (existing == null || !existing.channel().isActive()) {

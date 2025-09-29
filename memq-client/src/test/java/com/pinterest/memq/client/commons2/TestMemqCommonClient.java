@@ -258,17 +258,12 @@ public class TestMemqCommonClient {
     List<Endpoint> client2Endpoints = Arrays.asList(
             commonEndpoint,
             new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9093), "test")
-//            new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9094), "test")
     );
     client2.initialize(client2Endpoints);
-    // client.setCurrentEndpoint(commonEndpoint);
     List<Endpoint> endpointsToTry = client2.getEndpointsToTry();
     assertEquals(2, endpointsToTry.size());
     Endpoint firstEndpoint = endpointsToTry.get(0);
-//    assertEquals(endpointsToTry.get(0), commonEndpoint);
     assertNotEquals(endpointsToTry.get(0), endpointsToTry.get(1));
-//    assertNotEquals(endpointsToTry.get(1), endpointsToTry.get(2));
-//    assertNotEquals(endpointsToTry.get(2), endpointsToTry.get(0));
 
     // ensure that with numEndpoints=1, each call to getEndpointsToTry returns the same first endpoint
     for (int i = 0; i < 10; i++) {
@@ -276,8 +271,6 @@ public class TestMemqCommonClient {
       assertEquals(firstEndpoint, endpointsToTry.get(0));
       assertEquals(2, endpointsToTry.size());
       assertNotEquals(endpointsToTry.get(0), endpointsToTry.get(1));
-//      assertNotEquals(endpointsToTry.get(1), endpointsToTry.get(2));
-//      assertNotEquals(endpointsToTry.get(2), endpointsToTry.get(0));
     }
 
     // reinitialize client2 endpoints multiple times to ensure affinity is shuffled upon restarts
@@ -293,7 +286,7 @@ public class TestMemqCommonClient {
 
     // numEndpoints = 3
     Properties networkProps = new Properties();
-    networkProps.setProperty(MemqCommonClient.CONFIG_NUM_ENDPOINTS, "3");
+    networkProps.setProperty(MemqCommonClient.CONFIG_NUM_WRITE_ENDPOINTS, "3");
     MemqCommonClient client3 = new MemqCommonClient("test", null, networkProps);
     client3.initialize(
             Arrays.asList(

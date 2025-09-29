@@ -775,7 +775,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
     mockServer2.start();
     
     Properties networkProperties = new Properties();
-    networkProperties.setProperty(MemqCommonClient.CONFIG_NUM_ENDPOINTS, "2");
+    networkProperties.setProperty(MemqCommonClient.CONFIG_NUM_WRITE_ENDPOINTS, "2");
 
     int payloadSize = 
       RequestPacket.getHeaderSize() + 
