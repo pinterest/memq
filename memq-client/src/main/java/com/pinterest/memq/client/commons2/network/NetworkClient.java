@@ -216,7 +216,7 @@ public class NetworkClient implements Closeable {
   }
 
   private void doConnect(InetSocketAddress socketAddress, CompletableFuture<ChannelFuture> connectReadyFuture, int attempts) {
-    logger.debug("Connecting to " + socketAddress.getHostString() + ", attempt " + (attempts + 1));
+    logger.info("Connecting to " + socketAddress + ", attempt " + (attempts + 1));
     // no need to remove listeners since they are removed by Netty after fired
     bootstrap.connect(socketAddress).addListener(new RetryListener(socketAddress, connectReadyFuture, attempts, retryStrategy));
   }
@@ -248,6 +248,7 @@ public class NetworkClient implements Closeable {
 
   // blocking
   public void reset() throws IOException, InterruptedException {
+    logger.info("Resetting network client");
     for (ChannelFuture cf : channelPool.values()) {
       if (cf != null && cf.channel() != null) {
         cf.channel().close().await();

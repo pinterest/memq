@@ -94,20 +94,21 @@ public class MemqCommonClient implements Closeable {
   public void resetEndpoints(List<Endpoint> endpoints) throws Exception {
     this.localityEndpoints = getLocalityEndpoints(endpoints);
     this.writeEndpoints = getWriteEndpoints(new ArrayList<>(this.localityEndpoints));
-    validateInitialization();
+    validateEndpoints();
   }
 
-  private void validateInitialization() throws Exception {
+  private void validateEndpoints() throws Exception {
     if (localityEndpoints.isEmpty() || writeEndpoints.isEmpty()) {
-      throw new Exception("Failed to initialize, no endpoints available");
+      throw new Exception("No endpoints available");
     }
   }
 
   public CompletableFuture<ResponsePacket> sendRequestPacketAndReturnResponseFuture(RequestPacket request,
+                                                                                    String topic,
                                                                                     long timeoutMillis) throws InterruptedException,
                                                                                                         TimeoutException,
                                                                                                         ExecutionException {
-    if (localityEndpoints == null || writeEndpoints == null) {
+    if (localityEndpoints == null || writeEndpoints == null || localityEndpoints.isEmpty() || writeEndpoints.isEmpty()) {
       throw new IllegalStateException("Client not initialized yet");
     }
     CompletableFuture<ResponsePacket> future = null;
@@ -128,10 +129,16 @@ public class MemqCommonClient implements Closeable {
       } catch (ExecutionException e) {
         if (e.getCause() instanceof ConnectException) {
           if (retry == retryCount - 1) {
-            logger.error("Failed to send request packet", e);
+            logger.error("Failed to send request packet for topic=" + topic, e);
             throw e;
           } else {
-            logger.warn("Retrying send request after failure: ", e);
+            logger.warn("Retrying send request after failure for topic=" + topic, e);
+            try {
+              refreshWriteEndpoints(endpoint, topic);  // this endpoint is down even after retries in NetworkClient, remove it from the write endpoints and take another one from locality endpoints
+            } catch (Exception ex) {
+              logger.error("Failed to refresh write endpoints", e);
+              throw e;
+            }
           }
         } else {
           throw e;
@@ -145,6 +152,10 @@ public class MemqCommonClient implements Closeable {
       future.completeExceptionally(new Exception("No suitable endpoints"));
     }
     return future;
+  }
+
+  public List<Endpoint> currentWriteEndpoints() {
+    return writeEndpoints;
   }
 
   /**
@@ -186,6 +197,7 @@ public class MemqCommonClient implements Closeable {
     Future<ResponsePacket> response = sendRequestPacketAndReturnResponseFuture(
         new RequestPacket(RequestType.PROTOCOL_VERSION, ThreadLocalRandom.current().nextLong(),
             RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket(topic)),
+        topic,
         timeoutMillis);
     ResponsePacket responsePacket = response.get(timeoutMillis, TimeUnit.MILLISECONDS);
     if (responsePacket.getResponseCode() == ResponseCodes.NOT_FOUND) {
@@ -203,6 +215,7 @@ public class MemqCommonClient implements Closeable {
 
   public synchronized void reconnect(String topic, boolean isConsumer) throws Exception {
     logger.warn("Reconnecting topic " + topic);
+
     TopicMetadata md = getTopicMetadata(topic, connectTimeout);
     networkClient.reset();
     Set<Broker> brokers = null;
@@ -220,6 +233,16 @@ public class MemqCommonClient implements Closeable {
     List<Endpoint> shuffle = new ArrayList<>(servers);
     Collections.shuffle(shuffle);
     return shuffle;
+  }
+
+  protected void refreshWriteEndpoints(Endpoint deadEndpoint, String topic) throws Exception {
+    synchronized (this) {
+      // put deadEndpoint last in the priority
+      localityEndpoints.remove(deadEndpoint);
+      writeEndpoints = getWriteEndpoints(new ArrayList<>(localityEndpoints));
+      localityEndpoints.add(deadEndpoint);
+      validateEndpoints();
+    }
   }
 
   protected List<Endpoint> getLocalityEndpoints(List<Endpoint> servers) {

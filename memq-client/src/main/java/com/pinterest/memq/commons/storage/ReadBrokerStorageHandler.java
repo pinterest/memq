@@ -135,6 +135,7 @@ public abstract class ReadBrokerStorageHandler implements StorageHandler {
     Future<ResponsePacket> response = client.sendRequestPacketAndReturnResponseFuture(
         new RequestPacket(RequestType.PROTOCOL_VERSION, ThreadLocalRandom.current().nextLong(),
             RequestType.READ, new ReadRequestPacket(topic, notification, readHeaderOnly, entry)),
+        topic,
         timeoutMillis);
     ResponsePacket responsePacket = response.get(timeoutMillis, TimeUnit.MILLISECONDS);
     if (responsePacket.getResponseCode() == ResponseCodes.OK) {

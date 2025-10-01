@@ -33,11 +33,15 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
+import io.netty.channel.group.ChannelGroup;
+import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
+import io.netty.util.concurrent.GlobalEventExecutor;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,6 +56,7 @@ public class MockMemqServer {
   private final ServerBootstrap bootstrap;
   private ChannelFuture channelFuture;
   private final ByteBufAllocator allocator;
+  private final ChannelGroup allChannels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
 
   public MockMemqServer(int port, Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> responseMap, boolean useDirect) {
     this(port, responseMap, useDirect, false, -1, -1);
@@ -103,17 +108,24 @@ public class MockMemqServer {
     if (channelFuture == null) {
       return;
     }
+    allChannels.close();
     channelFuture.channel().close();
     if (channelFuture.channel().parent() != null) {
       channelFuture.channel().parent().close();
     }
   }
 
-  private static class MockRequestHandler extends ChannelInboundHandlerAdapter {
+  private class MockRequestHandler extends ChannelInboundHandlerAdapter {
     private final Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> responseMap;
 
     public MockRequestHandler(Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> responseMap) {
       this.responseMap = responseMap;
+    }
+
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+      allChannels.add(ctx.channel());
+      super.channelActive(ctx);
     }
 
     @Override

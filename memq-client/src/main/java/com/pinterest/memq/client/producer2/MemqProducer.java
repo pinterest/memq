@@ -194,6 +194,11 @@ public class MemqProducer<K, V> implements Closeable {
     }
   }
 
+  @VisibleForTesting
+  protected List<Endpoint> getWriteEndpoints() {
+    return client.currentWriteEndpoints();
+  }
+
   public MetricRegistry getMetricRegistry() {
     return metricRegistry;
   }

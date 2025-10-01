@@ -427,7 +427,7 @@ public class Request {
         Timer.Context responseTime = responseTimer.time();
         Timer.Context ackTime = ackTimer.time();
         requestPacket.getPreAllocOutBuf().retain();
-        CompletableFuture<ResponsePacket> response = client.sendRequestPacketAndReturnResponseFuture(requestPacket, dispatchTimeoutMs);
+        CompletableFuture<ResponsePacket> response = client.sendRequestPacketAndReturnResponseFuture(requestPacket, topic, dispatchTimeoutMs);
         sendTime.stop();
         writeLatency = (int) (System.currentTimeMillis() - writeTimestamp);
         response
