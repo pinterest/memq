@@ -48,6 +48,8 @@ import com.google.common.collect.ImmutableSet;
 
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.socket.SocketChannel;
+
 import org.junit.Ignore;
 import org.junit.Test;
 
@@ -66,7 +68,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -714,6 +718,135 @@ public class TestMemqProducer extends TestMemqProducerBase {
     fail("Should throw exception since memory allocation should fail");
     producer.close();
     memqServer.stop();
+  }
+
+  @Test
+  public void testTwoBrokerWritesOneBrokerDown() throws Exception {
+    AtomicInteger writeCount1 = new AtomicInteger();
+    AtomicInteger writeCount2 = new AtomicInteger();
+
+    TopicConfig topicConfig = new TopicConfig("test", "dev");
+    TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
+
+    // Return both brokers in metadata so client discovers both
+    Set<Broker> brokers = new HashSet<>();
+    brokers.add(new Broker(LOCALHOST_STRING, port, "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+    brokers.add(new Broker(LOCALHOST_STRING, (short) (port + 1), "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+    
+    // Setup first broker on port - returns metadata with both brokers
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map1 = new HashMap<>();
+    map1.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+      
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK,
+          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+              ImmutableSet.of(), "dev", new Properties())));
+      ctx.writeAndFlush(resp);
+    });
+    map1.put(RequestType.WRITE, (ctx, req) -> {
+      writeCount1.getAndIncrement();
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
+      ctx.writeAndFlush(resp);
+    });
+    
+    // Setup second broker on port + 1 - same metadata handler
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map2 = new HashMap<>();
+    map2.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK,
+          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+              ImmutableSet.of(), "dev", new Properties())));
+      ctx.writeAndFlush(resp);
+    });
+    map2.put(RequestType.WRITE, (ctx, req) -> {
+      writeCount2.getAndIncrement();
+      // force disconnection + retry on every 10 writes
+      if (writeCount2.get() > 10) {
+        ((SocketChannel) ctx.channel()).config().setSoLinger(0);
+        ctx.close();
+        return;
+      }
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
+      ctx.writeAndFlush(resp);
+    });
+    
+    MockMemqServer mockServer1 = new MockMemqServer(port, map1);
+    MockMemqServer mockServer2 = new MockMemqServer(port + 1, map2);
+    mockServer1.start();
+    mockServer2.start();
+
+    // // force broker 2 to be down after 1 second
+    // new ScheduledThreadPoolExecutor(1).schedule(() -> {
+    //   try {
+    //     System.out.println("Stopping broker 2");
+    //     mockServer2.stop();
+    //   } catch (Exception e) {
+    //     // ignore
+    //     e.printStackTrace();
+    //   }
+    // }, 2000, TimeUnit.MILLISECONDS);
+    
+    Properties networkProperties = new Properties();
+    networkProperties.setProperty(MemqCommonClient.CONFIG_NUM_WRITE_ENDPOINTS, "2");
+
+    int payloadSize = 
+      RequestPacket.getHeaderSize() + 
+      RequestPacket.getHeaderSize() + 
+      WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, "test") + 
+      MemqMessageHeader.getHeaderLength() + 
+      RawRecord.newInstance(null, null, null, "test1".getBytes(), 0).calculateEncodedLogMessageLength();
+    
+    MemqProducer.Builder<byte[], byte[]> builder = new MemqProducer.Builder<>();
+    builder.cluster("prototype").topic("test")
+        .bootstrapServers(LOCALHOST_STRING + ":" + port)  // Start with just first server for bootstrap
+        .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
+        .maxPayloadBytes(payloadSize)
+        .maxInflightRequests(100)
+        .networkProperties(networkProperties);
+    
+    MemqProducer<byte[], byte[]> producer = builder.build();
+    
+    // Perform multiple writes to trigger round-robin behavior
+    List<Future<MemqWriteResult>> results = new ArrayList<>();
+    for (int i = 0; i < 100; i++) {
+      Future<MemqWriteResult> r = producer.write(null, "test1".getBytes());
+      results.add(r);
+      System.out.println("Written " + i + " records");
+      Thread.sleep(100);
+    }
+    
+    producer.flush();
+
+    int successCount = 0;
+    
+    for (Future<MemqWriteResult> r : results) {
+      try {
+        r.get();
+        successCount++;
+      } catch (Exception e) {
+        System.out.println("TestTwoBrokers exception:");
+        e.printStackTrace();
+        fail("Should not throw exception");
+      }
+    }
+
+    assertEquals("Success count should be 100", 100, successCount);
+    
+    producer.close();
+    
+    // Verify that writes went to both servers
+    int totalWrites = writeCount1.get() + writeCount2.get();
+    System.out.println("Total writes: " + totalWrites + ", Server 1 writes: " + writeCount1.get() + ", Server 2 writes: " + writeCount2.get());
+    assertTrue("Total writes should be at least 100", 100 < totalWrites);
+    assertTrue("Server 1 should receive >= 40 writes", 40 <= writeCount1.get());  // 40 to account for retries
+    assertTrue("Server 2 should receive >= 40 writes", 40 <= writeCount2.get());  // 40 to account for retries
+        
+    mockServer1.stop();
+    mockServer2.stop();
   }
 
   @Test
