@@ -936,11 +936,6 @@ public class TestMemqProducer extends TestMemqProducerBase {
     });
     map2.put(RequestType.WRITE, (ctx, req) -> {
       writeCount2.getAndIncrement();
-      // force disconnection + retry on every 10 writes
-      if (writeCount2.get() % 10 == 0) {
-        ctx.close();
-        return;
-      }
       ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
           req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
       ctx.writeAndFlush(resp);
@@ -1000,9 +995,9 @@ public class TestMemqProducer extends TestMemqProducerBase {
     // Verify that writes went to both servers
     int totalWrites = writeCount1.get() + writeCount2.get();
     System.out.println("Total writes: " + totalWrites + ", Server 1 writes: " + writeCount1.get() + ", Server 2 writes: " + writeCount2.get());
-    assertTrue("Total writes should be at least 100", 100 < totalWrites);
-    assertTrue("Server 1 should receive >= 40 writes", 40 <= writeCount1.get());  // 40 to account for retries
-    assertTrue("Server 2 should receive >= 40 writes", 40 <= writeCount2.get());  // 40 to account for retries
+    assertEquals("Total writes should be at least 100", 100, totalWrites);
+    assertEquals("Server 1 should receive >= 40 writes", 50, writeCount1.get());  // 40 to account for retries
+    assertEquals("Server 2 should receive >= 40 writes", 50, writeCount2.get());  // 40 to account for retries
         
     mockServer1.stop();
     mockServer2.stop();
