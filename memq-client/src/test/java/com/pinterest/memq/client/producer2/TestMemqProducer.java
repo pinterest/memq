@@ -987,7 +987,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
         r.get();
         successCount++;
       } catch (Exception e) {
-        System.out.println("TestTwoBrokers exception:");
+        System.out.println("TestTwoBrokers exception: " + e);
         e.printStackTrace();
         fail("Should not throw exception");
       }
