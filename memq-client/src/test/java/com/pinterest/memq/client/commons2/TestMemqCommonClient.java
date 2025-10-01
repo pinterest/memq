@@ -79,7 +79,7 @@ public class TestMemqCommonClient {
       client.initialize(Collections.emptyList());
       fail("should not initialize with empty list");
     } catch (Exception e) {
-      assertEquals("Failed to initialize, no endpoints available", e.getMessage());
+      assertEquals("No endpoints available", e.getMessage());
     }
 
   }
