@@ -81,7 +81,7 @@ public class TestMemqCommonClient {
     } catch (Exception e) {
       assertEquals("No endpoints available", e.getMessage());
     }
-
+    client.close();
   }
 
   @Test
@@ -141,6 +141,7 @@ public class TestMemqCommonClient {
       fail("failed: " + e);
     }
 
+    client.close();
     mockServer.stop();
   }
 
@@ -191,6 +192,7 @@ public class TestMemqCommonClient {
       assertTrue(ee.getCause() instanceof TimeoutException);
     }
 
+    client.close();
     mockServer.stop();
   }
 
@@ -238,6 +240,7 @@ public class TestMemqCommonClient {
       fail("failed: " + e);
     }
 
+    client.close();
     mockServer.stop();
   }
 
@@ -321,6 +324,10 @@ public class TestMemqCommonClient {
       assertEquals(writeEndpoints.get(2 - (i % 3)), rotated.get(0));
     }
 
+    client.close();
+    client2.close();
+    client3.close();
+
   }
 
   @Test
@@ -333,6 +340,8 @@ public class TestMemqCommonClient {
     ));
     assertEquals(1, localityEndpoints.size());
     assertEquals("test", localityEndpoints.get(0).getLocality());
+
+    client.close();
   }
 
   @Test
@@ -364,6 +373,9 @@ public class TestMemqCommonClient {
     TopicMetadata md = client.getTopicMetadata("test", 3000);
     assertEquals(1, md.getWriteBrokers().size());
     assertEquals("dev", md.getStorageHandlerName());
+
+    client.close();
+    mockServer.stop();  
   }
 
   @Test
@@ -403,5 +415,59 @@ public class TestMemqCommonClient {
     List<Endpoint> endpoints = client.getEndpointsToTry();
     assertEquals(2, endpoints.size());
     assertNotEquals(endpoints.get(0), endpoints.get(1));
+    client.close();
+    mockServer.stop();
+  }
+
+  @Test
+  public void testSendFailureRefreshesWriteEndpoints() throws Exception {
+    // Use real MemqCommonClient and force first attempt to target a dead endpoint by rotating write endpoints
+    Properties networkProps = new Properties();
+    networkProps.setProperty(MemqCommonClient.CONFIG_NUM_WRITE_ENDPOINTS, "2");
+    MemqCommonClient client = new MemqCommonClient("test", null, networkProps);
+
+    // Prepare endpoints: include a dead endpoint and a live endpoint
+    Endpoint dead = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port), "test");
+    Endpoint alive = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port + 1), "test");
+    client.initialize(Arrays.asList(dead, alive));
+
+    // Start server on the alive endpoint
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
+    map.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+      TopicConfig topicConfig = new TopicConfig("test", "dev");
+      TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
+      Set<Broker> brokers = Collections.singleton(new Broker(LOCALHOST_STRING, (short) (port + 1), "n/a",
+          "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK,
+          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+              ImmutableSet.of(), "dev", new Properties())));
+      ctx.writeAndFlush(resp);
+    });
+    MockMemqServer server = new MockMemqServer(port + 1, map);
+    server.start();
+
+    // Rotate write endpoints so the first endpoint to try is the dead one
+    List<Endpoint> endpointsToTry = client.getEndpointsToTry();
+    int attempts = 0;
+    while (endpointsToTry.get(0).getAddress().getPort() != port && attempts++ < 5) {
+      endpointsToTry = client.getEndpointsToTry();
+    }
+    assertEquals(port, endpointsToTry.get(0).getAddress().getPort());
+
+    // First attempt should hit the dead endpoint (connect failure) → triggers refreshWriteEndpoints; next attempt hits alive and succeeds
+    RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1,
+        RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
+
+    ResponsePacket resp = client.sendRequestPacketAndReturnResponseFuture(request, "test", 5000).get();
+    assertEquals(ResponseCodes.OK, resp.getResponseCode());
+
+    // Verify write endpoints were refreshed to prefer the alive endpoint now
+    List<Endpoint> writeEndpoints = client.currentWriteEndpoints();
+    assertEquals(alive.getAddress(), writeEndpoints.get(0).getAddress());
+
+    client.close();
+    server.stop();
   }
 }

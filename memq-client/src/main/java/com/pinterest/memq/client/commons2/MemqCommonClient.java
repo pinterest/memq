@@ -103,6 +103,41 @@ public class MemqCommonClient implements Closeable {
     }
   }
 
+  /**
+   * Send a request packet and return a future for the response.
+   * 
+   * The choice of endpoint to try is based on the logic in getEndpointsToTry(), see method javadoc for more details
+   * on how the endpoints are rotated and chosen.
+   * 
+   * If the request fails before reaching the retry limit, the write endpoints are refreshed to deprioritize the dead endpoint.
+   * If the request fails after reaching the retry limit, the exception is propagated without further refreshing.
+   * 
+   * For example:
+   * <pre>
+   * {@code
+   * numEndpoints = 3
+   * localityEndpoints = [A, B, C, D, E, F]
+   * writeEndpoints = [A, B, C]
+   * 
+   * Endpoint A is dead, all other endpoints are alive.
+   * 
+   * getEndpointsToTry() returns [A, B, C, D, E, F]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint A --> fail
+   * refreshWriteEndpoints() --> writeEndpoints = [D, C, F]
+   * getEndpointsToTry() returns [D, C, F, E, B, A] (shuffled)
+   * sendRequestPackeAndReturnResponseFuture() --> try endpoint D --> succeed
+   * ...
+   * }
+   * </pre>
+   * 
+   * @param request
+   * @param topic
+   * @param timeoutMillis
+   * @return the CompletableFuture for the response
+   * @throws InterruptedException
+   * @throws TimeoutException
+   * @throws ExecutionException
+   */
   public CompletableFuture<ResponsePacket> sendRequestPacketAndReturnResponseFuture(RequestPacket request,
                                                                                     String topic,
                                                                                     long timeoutMillis) throws InterruptedException,
@@ -159,12 +194,14 @@ public class MemqCommonClient implements Closeable {
   }
 
   /**
-   * Get the endpoints to try for a given request, ordered by priority in the following way:
-   * 1. N rotated write endpoints, where N = numEndpoints (config) and the write endpoints are rotated by 1 after each call
-   * 2. Remaining locality endpoints in a random order
+   * Get the endpoints to try for a given request, ordered by priority in the following way:<br>
+   * 1. N rotated write endpoints, where N = numWriteEndpoints (config) and the write endpoints are rotated by 1 after each call<br>
+   * 2. Remaining locality endpoints in a random order<br>
    * 
-   * A given request will be sent to the
+   * A given request will attempt to be sent to the first endpoint in the list, and if that fails, the next endpoint in the list will be tried, and so on.<br>
    * 
+   * <pre>
+   * {@code
    * Example:
    * numEndpoints = 3
    * localityEndpoints = [A, B, C, D, E, F]
@@ -176,8 +213,10 @@ public class MemqCommonClient implements Closeable {
    * getEndpointsToTry() returns [B, C, A, E, F, D]
    * getEndpointsToTry() returns [A, B, C, E, D, F]
    * ...
+   * }
+   * </pre>
    *
-   * This ensures that the write endpoints are used in a round-robin manner, and the locality endpoints are used (if >N retries are needed) in a random order.
+   * This ensures that the write endpoints are used in a round-robin manner, and the remaining locality endpoints are used (if >N retries are needed) in a random order.
    * @return the endpoints to try
    */
   protected List<Endpoint> getEndpointsToTry() {
@@ -235,6 +274,13 @@ public class MemqCommonClient implements Closeable {
     return shuffle;
   }
 
+  /**
+   * Refresh the write endpoints to deprioritize the dead endpoint.
+   * 
+   * @param deadEndpoint
+   * @param topic
+   * @throws Exception
+   */
   protected void refreshWriteEndpoints(Endpoint deadEndpoint, String topic) throws Exception {
     synchronized (this) {
       // put deadEndpoint last in the priority
@@ -255,6 +301,11 @@ public class MemqCommonClient implements Closeable {
     return collect;
   }
 
+  /**
+   * Randomly sample min(numWriteEndpoints, localityEndpoints.size()) endpoints from the locality endpoints for round-robin writes.
+   * @param localityEndpoints
+   * @return the write endpoints
+   */
   protected List<Endpoint> getWriteEndpoints(List<Endpoint> localityEndpoints) {
     Collections.shuffle(localityEndpoints);
     List<Endpoint> writeEndpoints = localityEndpoints.subList(0, Math.min(localityEndpoints.size(), numWriteEndpoints));

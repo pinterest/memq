@@ -258,6 +258,11 @@ public class NetworkClient implements Closeable {
     lastConnectFuture = null;
   }
 
+  @VisibleForTesting
+  protected Map<InetSocketAddress, ChannelFuture> getChannelPool() {
+    return channelPool;
+  }
+
   private final class RetryListener implements ChannelFutureListener {
     private final CompletableFuture<ChannelFuture> connectReadyFuture;
     private final InetSocketAddress socketAddress;
