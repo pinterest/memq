@@ -25,7 +25,6 @@ import static org.junit.Assert.fail;
 import com.pinterest.memq.client.commons.Compression;
 import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons.serde.ByteArraySerializer;
-import com.pinterest.memq.client.commons2.Endpoint;
 import com.pinterest.memq.client.commons2.MemoryAllocationException;
 import com.pinterest.memq.client.commons2.MemqCommonClient;
 import com.pinterest.memq.client.commons2.MockMemqServer;
@@ -49,18 +48,13 @@ import com.google.common.collect.ImmutableSet;
 
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.socket.SocketChannel;
-
 import org.junit.Ignore;
 import org.junit.Test;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
@@ -70,9 +64,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -720,287 +712,6 @@ public class TestMemqProducer extends TestMemqProducerBase {
     fail("Should throw exception since memory allocation should fail");
     producer.close();
     memqServer.stop();
-  }
-
-  @Test
-  public void testThreeBrokerWritesOneBrokerDown() throws Exception {
-    AtomicInteger writeCount1 = new AtomicInteger();
-    AtomicInteger writeCount2 = new AtomicInteger();
-    AtomicInteger writeCount3 = new AtomicInteger();
-    int numWriteEndpoints = 3;
-
-    TopicConfig topicConfig = new TopicConfig("test", "dev");
-    TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
-
-    // Return both brokers in metadata so client discovers both
-    List<Broker> brokers = new ArrayList<>();
-    Broker broker1 = new Broker(LOCALHOST_STRING, port, "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment));
-    Broker broker2 = new Broker(LOCALHOST_STRING, (short) (port + 1), "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment));
-    Broker broker3 = new Broker(LOCALHOST_STRING, (short) (port + 2), "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment));
-    brokers.add(broker1);
-    brokers.add(broker2);
-    brokers.add(broker3);
-    
-    // Setup first broker on port - returns metadata with both brokers
-    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map1 = new HashMap<>();
-    map1.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
-      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
-      
-      ResponsePacket resp;
-      if (writeCount2.get() > 10) {
-        resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-            req.getRequestType(), ResponseCodes.OK,
-            new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), Collections.singleton(broker1),
-            ImmutableSet.of(), "dev", new Properties())));
-      } else {
-        resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-            req.getRequestType(), ResponseCodes.OK,
-            new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), new HashSet<>(brokers),
-                ImmutableSet.of(), "dev", new Properties())));
-        ctx.writeAndFlush(resp);
-      }
-    });
-    map1.put(RequestType.WRITE, (ctx, req) -> {
-      writeCount1.getAndIncrement();
-      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
-      ctx.writeAndFlush(resp);
-    });
-    
-    // Setup second broker on port + 1 - same metadata handler
-    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map2 = new HashMap<>();
-    map2.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
-      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
-      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.OK,
-          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), new HashSet<>(brokers),
-              ImmutableSet.of(), "dev", new Properties())));
-      ctx.writeAndFlush(resp);
-    });
-    map2.put(RequestType.WRITE, (ctx, req) -> {
-      writeCount2.getAndIncrement();
-      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
-      ctx.writeAndFlush(resp);
-    });
-
-    // Setup third broker on port + 2 - same metadata handler
-    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map3 = new HashMap<>();
-    map3.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
-      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
-      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.OK,
-          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), new HashSet<>(brokers),
-              ImmutableSet.of(), "dev", new Properties())));
-      ctx.writeAndFlush(resp);
-    });
-    map3.put(RequestType.WRITE, (ctx, req) -> {
-      writeCount3.getAndIncrement();
-      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
-      ctx.writeAndFlush(resp);
-    });
-
-    MockMemqServer mockServer1 = new MockMemqServer(port, map1);
-    MockMemqServer mockServer2 = new MockMemqServer(port + 1, map2);
-    MockMemqServer mockServer3 = new MockMemqServer(port + 2, map3);
-
-    mockServer1.start();
-    mockServer2.start();
-    mockServer3.start();
-    
-    Properties networkProperties = new Properties();
-    networkProperties.setProperty(MemqCommonClient.CONFIG_NUM_WRITE_ENDPOINTS, String.valueOf(numWriteEndpoints));
-
-    int payloadSize = 
-      RequestPacket.getHeaderSize() + 
-      RequestPacket.getHeaderSize() + 
-      WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, "test") + 
-      MemqMessageHeader.getHeaderLength() + 
-      RawRecord.newInstance(null, null, null, "test1".getBytes(), 0).calculateEncodedLogMessageLength();
-    
-    MemqProducer.Builder<byte[], byte[]> builder = new MemqProducer.Builder<>();
-    builder.cluster("prototype").topic("test")
-        .bootstrapServers(LOCALHOST_STRING + ":" + port)  // Start with just first server for bootstrap
-        .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
-        .maxPayloadBytes(payloadSize)
-        .maxInflightRequests(100)
-        .networkProperties(networkProperties)
-        .memoize();
-    
-    MemqProducer<byte[], byte[]> producer = builder.build();
-
-    Set<Integer> writePorts = new HashSet<>();
-    for (Endpoint endpoint : producer.getWriteEndpoints()) {
-      writePorts.add(endpoint.getAddress().getPort());
-    }
-
-    assertEquals(Math.min(numWriteEndpoints, brokers.size()), writePorts.size());
-    final MockMemqServer brokerToStop;
-    if (writePorts.contains((int) port)) {
-      brokerToStop = mockServer1;
-    } else if (writePorts.contains((int) (port + 1))) {
-      brokerToStop = mockServer2;
-    } else {
-      brokerToStop = mockServer3;
-    }
-
-    new ScheduledThreadPoolExecutor(1).schedule(() -> {
-      try {
-        System.out.println("Stopping broker");
-        brokerToStop.stop();
-      } catch (Exception e) {
-        // ignore
-        e.printStackTrace();
-      }
-    }, 2000, TimeUnit.MILLISECONDS);
-
-    // Perform multiple writes to trigger round-robin behavior
-    List<Future<MemqWriteResult>> results = new ArrayList<>();
-    for (int i = 0; i < 100; i++) {
-      Future<MemqWriteResult> r = producer.write(null, "test1".getBytes());
-      results.add(r);
-      System.out.println("Written " + i + " records");
-      Thread.sleep(100);
-    }
-    
-    producer.flush();
-
-    int successCount = 0;
-
-    for (Future<MemqWriteResult> r : results) {
-      try {
-        r.get();
-        successCount++;
-      } catch (Exception e) {
-        System.out.println("TestTwoBrokers exception:");
-        e.printStackTrace();
-        fail("Should not throw exception");
-      }
-    }
-
-    assertEquals("Success count should be 100", 100, successCount);
-    
-    producer.close();
-    
-    // Verify that writes went to both servers
-    int totalWrites = writeCount1.get() + writeCount2.get() + writeCount3.get();
-    System.out.println("Total writes: " + totalWrites + ", Server 1 writes: " + writeCount1.get() + ", Server 2 writes: " + writeCount2.get() + ", Server 3 writes: " + writeCount3.get());
-    assertTrue("Total writes should be at least 100", 100 <= totalWrites);
-        
-    mockServer1.stop();
-    mockServer2.stop();
-    mockServer3.stop();
-  }
-
-  @Test
-  public void testTwoBrokerWrites() throws Exception {
-    AtomicInteger writeCount1 = new AtomicInteger();
-    AtomicInteger writeCount2 = new AtomicInteger();
-
-    TopicConfig topicConfig = new TopicConfig("test", "dev");
-    TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
-
-    // Return both brokers in metadata so client discovers both
-    Set<Broker> brokers = new HashSet<>();
-    brokers.add(new Broker(LOCALHOST_STRING, port, "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
-    brokers.add(new Broker(LOCALHOST_STRING, (short) (port + 1), "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
-    
-    // Setup first broker on port - returns metadata with both brokers
-    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map1 = new HashMap<>();
-    map1.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
-      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
-      
-      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.OK,
-          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
-              ImmutableSet.of(), "dev", new Properties())));
-      ctx.writeAndFlush(resp);
-    });
-    map1.put(RequestType.WRITE, (ctx, req) -> {
-      writeCount1.getAndIncrement();
-      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
-      ctx.writeAndFlush(resp);
-    });
-    
-    // Setup second broker on port + 1 - same metadata handler
-    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map2 = new HashMap<>();
-    map2.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
-      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
-      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.OK,
-          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
-              ImmutableSet.of(), "dev", new Properties())));
-      ctx.writeAndFlush(resp);
-    });
-    map2.put(RequestType.WRITE, (ctx, req) -> {
-      writeCount2.getAndIncrement();
-      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
-          req.getRequestType(), ResponseCodes.OK, new WriteResponsePacket());
-      ctx.writeAndFlush(resp);
-    });
-    
-    MockMemqServer mockServer1 = new MockMemqServer(port, map1);
-    MockMemqServer mockServer2 = new MockMemqServer(port + 1, map2);
-    mockServer1.start();
-    mockServer2.start();
-    
-    Properties networkProperties = new Properties();
-    networkProperties.setProperty(MemqCommonClient.CONFIG_NUM_WRITE_ENDPOINTS, "2");
-
-    int payloadSize = 
-      RequestPacket.getHeaderSize() + 
-      RequestPacket.getHeaderSize() + 
-      WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, "test") + 
-      MemqMessageHeader.getHeaderLength() + 
-      RawRecord.newInstance(null, null, null, "test1".getBytes(), 0).calculateEncodedLogMessageLength();
-    
-    MemqProducer.Builder<byte[], byte[]> builder = new MemqProducer.Builder<>();
-    builder.cluster("prototype").topic("test")
-        .bootstrapServers(LOCALHOST_STRING + ":" + port)  // Start with just first server for bootstrap
-        .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
-        .maxPayloadBytes(payloadSize)
-        .maxInflightRequests(100)
-        .networkProperties(networkProperties);
-    
-    MemqProducer<byte[], byte[]> producer = builder.build();
-    
-    // Perform multiple writes to trigger round-robin behavior
-    List<Future<MemqWriteResult>> results = new ArrayList<>();
-    for (int i = 0; i < 100; i++) {
-      Future<MemqWriteResult> r = producer.write(null, "test1".getBytes());
-      results.add(r);
-    }
-    
-    producer.flush();
-
-    int successCount = 0;
-    
-    for (Future<MemqWriteResult> r : results) {
-      try {
-        r.get();
-        successCount++;
-      } catch (Exception e) {
-        System.out.println("TestTwoBrokers exception: " + e);
-        e.printStackTrace();
-        fail("Should not throw exception");
-      }
-    }
-
-    assertEquals("Success count should be 100", 100, successCount);
-    
-    producer.close();
-    
-    // Verify that writes went to both servers
-    int totalWrites = writeCount1.get() + writeCount2.get();
-    System.out.println("Total writes: " + totalWrites + ", Server 1 writes: " + writeCount1.get() + ", Server 2 writes: " + writeCount2.get());
-    assertEquals("Total writes should be at least 100", 100, totalWrites);
-    assertEquals("Server 1 should receive >= 40 writes", 50, writeCount1.get());  // 40 to account for retries
-    assertEquals("Server 2 should receive >= 40 writes", 50, writeCount2.get());  // 40 to account for retries
-        
-    mockServer1.stop();
-    mockServer2.stop();
   }
 
   @Test

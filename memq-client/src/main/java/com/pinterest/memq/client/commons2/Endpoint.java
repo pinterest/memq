@@ -59,4 +59,17 @@ public class Endpoint {
   public String toString() {
     return String.format("Endpoint[address=%s, locality=%s]", address, locality);
   }
+
+  @Override
+  public boolean equals(Object obj) {
+    if (obj instanceof Endpoint) {
+      return address.equals(((Endpoint) obj).address) && locality.equals(((Endpoint) obj).locality);
+    }
+    return false;
+  }
+
+  @Override
+  public int hashCode() {
+    return address.hashCode() + locality.hashCode();
+  }
 }

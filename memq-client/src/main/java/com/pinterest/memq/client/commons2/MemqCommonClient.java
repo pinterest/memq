@@ -28,9 +28,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
@@ -63,11 +65,12 @@ public class MemqCommonClient implements Closeable {
 
   private final NetworkClient networkClient;
   private long connectTimeout = 500;
-  private short numWriteEndpoints = 1;
+  private int numWriteEndpoints = 1;
 
   private String locality = DEFAULT_LOCALITY;
   private List<Endpoint> localityEndpoints;
   private List<Endpoint> writeEndpoints;
+  private Map<Endpoint, Integer> failureCounts;
 
   protected MemqCommonClient(SSLConfig sslConfig, Properties networkProperties) {
     if (networkProperties != null) {
@@ -76,9 +79,11 @@ public class MemqCommonClient implements Closeable {
             .parseLong(networkProperties.getProperty(NetworkClient.CONFIG_CONNECT_TIMEOUT_MS));
       }
       if (networkProperties.containsKey(CONFIG_NUM_WRITE_ENDPOINTS)) {
-        this.numWriteEndpoints = Short.parseShort(networkProperties.getProperty(CONFIG_NUM_WRITE_ENDPOINTS));
+        this.numWriteEndpoints = Integer.parseInt(networkProperties.getProperty(CONFIG_NUM_WRITE_ENDPOINTS));
       }
     }
+    writeEndpoints = new ArrayList<>();
+    failureCounts = new ConcurrentHashMap<>();
     networkClient = new NetworkClient(networkProperties, sslConfig);
   }
 
@@ -93,12 +98,11 @@ public class MemqCommonClient implements Closeable {
 
   public void resetEndpoints(List<Endpoint> endpoints) throws Exception {
     this.localityEndpoints = getLocalityEndpoints(endpoints);
-    this.writeEndpoints = getWriteEndpoints(new ArrayList<>(this.localityEndpoints));
     validateEndpoints();
   }
 
   private void validateEndpoints() throws Exception {
-    if (localityEndpoints.isEmpty() || writeEndpoints.isEmpty()) {
+    if (localityEndpoints.isEmpty()) {
       throw new Exception("No endpoints available");
     }
   }
@@ -143,7 +147,7 @@ public class MemqCommonClient implements Closeable {
                                                                                     long timeoutMillis) throws InterruptedException,
                                                                                                         TimeoutException,
                                                                                                         ExecutionException {
-    if (localityEndpoints == null || writeEndpoints == null || localityEndpoints.isEmpty() || writeEndpoints.isEmpty()) {
+    if (localityEndpoints == null || writeEndpoints == null || localityEndpoints.isEmpty()) {
       throw new IllegalStateException("Client not initialized yet");
     }
     CompletableFuture<ResponsePacket> future = null;
@@ -157,9 +161,11 @@ public class MemqCommonClient implements Closeable {
         throw new TimeoutException("Failed to send after " + timeoutMillis + " ms");
       }
       Endpoint endpoint = endpointsToTry.get(retry);
+      // System.out.println("Trying endpoint " + endpoint + " for topic " + topic);
       try {
         future = networkClient.send(endpoint.getAddress(), request,
             Duration.ofMillis(timeoutMillis - elapsed));
+        maybeRegisterWriteEndpoint(endpoint, topic);
         break;
       } catch (ExecutionException e) {
         if (e.getCause() instanceof ConnectException) {
@@ -169,7 +175,7 @@ public class MemqCommonClient implements Closeable {
           } else {
             logger.warn("Retrying send request after failure for topic=" + topic, e);
             try {
-              refreshWriteEndpoints(endpoint, topic);  // this endpoint is down even after retries in NetworkClient, remove it from the write endpoints and take another one from locality endpoints
+              deprioritizeDeadEndpoint(endpoint, topic);  // this endpoint is down even after retries in NetworkClient, remove it from the write endpoints and take another one from locality endpoints
             } catch (Exception ex) {
               logger.error("Failed to refresh write endpoints", e);
               throw e;
@@ -191,6 +197,53 @@ public class MemqCommonClient implements Closeable {
 
   public List<Endpoint> currentWriteEndpoints() {
     return writeEndpoints;
+  }
+
+  public TopicMetadata getTopicMetadata(String topic,
+                                        long timeoutMillis) throws TopicNotFoundException,
+                                                            ExecutionException,
+                                                            InterruptedException, TimeoutException {
+    Future<ResponsePacket> response = sendRequestPacketAndReturnResponseFuture(
+        new RequestPacket(RequestType.PROTOCOL_VERSION, ThreadLocalRandom.current().nextLong(),
+            RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket(topic)),
+        topic,
+        timeoutMillis);
+    ResponsePacket responsePacket = response.get(timeoutMillis, TimeUnit.MILLISECONDS);
+    if (responsePacket.getResponseCode() == ResponseCodes.NOT_FOUND) {
+      throw new TopicNotFoundException("Topic " + topic + " not found");
+    }
+    TopicMetadataResponsePacket resp = ((TopicMetadataResponsePacket) responsePacket.getPacket());
+    writeEndpoints.clear();
+    // System.out.println("Finished getting topic metadata");
+    return resp.getMetadata();
+  }
+
+  public TopicMetadata getTopicMetadata(String topic) throws TopicNotFoundException,
+                                                      ExecutionException, InterruptedException,
+                                                      TimeoutException {
+    return getTopicMetadata(topic, connectTimeout);
+  }
+
+  public synchronized void reconnect(String topic, boolean isConsumer) throws Exception {
+    logger.warn("Reconnecting topic " + topic);
+
+    TopicMetadata md = getTopicMetadata(topic, connectTimeout);
+    networkClient.reset();
+    Set<Broker> brokers = null;
+    if (isConsumer) {
+      brokers = md.getReadBrokers();
+    } else {
+      brokers = md.getWriteBrokers();
+    }
+    localityEndpoints = getLocalityEndpoints(
+        brokers.stream().map(Endpoint::fromBroker).collect(Collectors.toList()));
+    validateEndpoints();
+  }
+
+  protected List<Endpoint> randomizedEndpoints(List<Endpoint> servers) {
+    List<Endpoint> shuffle = new ArrayList<>(servers);
+    Collections.shuffle(shuffle);
+    return shuffle;
   }
 
   /**
@@ -220,58 +273,34 @@ public class MemqCommonClient implements Closeable {
    * @return the endpoints to try
    */
   protected List<Endpoint> getEndpointsToTry() {
-    Collections.rotate(writeEndpoints, 1);  // rotate write endpoints to get new write endpoint
     List<Endpoint> endpointsToTry = new ArrayList<>();
-    endpointsToTry.addAll(new ArrayList<>(writeEndpoints)); // add rotated write endpoints
-    List<Endpoint> remainingEndpoints = new ArrayList<>(randomizedEndpoints(localityEndpoints)); // add remaining locality endpoints
-    remainingEndpoints.removeAll(writeEndpoints);
-    endpointsToTry.addAll(remainingEndpoints);
+
+    if (writeEndpoints.size() == numWriteEndpoints) {
+      Collections.rotate(writeEndpoints, 1);
+      endpointsToTry.addAll(new ArrayList<>(writeEndpoints));
+      List<Endpoint> remainingEndpoints = new ArrayList<>(localityEndpoints);
+      remainingEndpoints.removeAll(writeEndpoints);
+      endpointsToTry.addAll(remainingEndpoints);
+    } else {
+      // System.out.println("Rotating locality endpoints. Before: " + localityEndpoints);
+      Collections.rotate(localityEndpoints, -1);
+      endpointsToTry.addAll(localityEndpoints);
+      // System.out.println("Rotating locality endpoints. After: " + localityEndpoints);
+    }
+
     return endpointsToTry;
   }
 
-  public TopicMetadata getTopicMetadata(String topic,
-                                        long timeoutMillis) throws TopicNotFoundException,
-                                                            ExecutionException,
-                                                            InterruptedException, TimeoutException {
-    Future<ResponsePacket> response = sendRequestPacketAndReturnResponseFuture(
-        new RequestPacket(RequestType.PROTOCOL_VERSION, ThreadLocalRandom.current().nextLong(),
-            RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket(topic)),
-        topic,
-        timeoutMillis);
-    ResponsePacket responsePacket = response.get(timeoutMillis, TimeUnit.MILLISECONDS);
-    if (responsePacket.getResponseCode() == ResponseCodes.NOT_FOUND) {
-      throw new TopicNotFoundException("Topic " + topic + " not found");
+  protected void maybeRegisterWriteEndpoint(Endpoint endpoint, String topic) {
+    failureCounts.remove(endpoint);
+    if (writeEndpoints.size() < numWriteEndpoints && !writeEndpoints.contains(endpoint)) {
+      logger.info("Registering write endpoint: " + endpoint + " for topic: " + topic);
+      writeEndpoints.add(endpoint);
     }
-    TopicMetadataResponsePacket resp = ((TopicMetadataResponsePacket) responsePacket.getPacket());
-    return resp.getMetadata();
-  }
-
-  public TopicMetadata getTopicMetadata(String topic) throws TopicNotFoundException,
-                                                      ExecutionException, InterruptedException,
-                                                      TimeoutException {
-    return getTopicMetadata(topic, connectTimeout);
-  }
-
-  public synchronized void reconnect(String topic, boolean isConsumer) throws Exception {
-    logger.warn("Reconnecting topic " + topic);
-
-    TopicMetadata md = getTopicMetadata(topic, connectTimeout);
-    networkClient.reset();
-    Set<Broker> brokers = null;
-    if (isConsumer) {
-      brokers = md.getReadBrokers();
-    } else {
-      brokers = md.getWriteBrokers();
+    if (!localityEndpoints.contains(endpoint)) {
+      logger.info("Registering locality endpoint: " + endpoint + " for topic: " + topic);
+      localityEndpoints.add(endpoint);
     }
-    localityEndpoints = getLocalityEndpoints(
-        brokers.stream().map(Endpoint::fromBroker).collect(Collectors.toList()));
-    writeEndpoints = getWriteEndpoints(new ArrayList<>(localityEndpoints));
-  }
-
-  protected List<Endpoint> randomizedEndpoints(List<Endpoint> servers) {
-    List<Endpoint> shuffle = new ArrayList<>(servers);
-    Collections.shuffle(shuffle);
-    return shuffle;
   }
 
   /**
@@ -281,14 +310,20 @@ public class MemqCommonClient implements Closeable {
    * @param topic
    * @throws Exception
    */
-  protected void refreshWriteEndpoints(Endpoint deadEndpoint, String topic) throws Exception {
-    synchronized (this) {
+  protected void deprioritizeDeadEndpoint(Endpoint deadEndpoint, String topic) throws Exception {
       // put deadEndpoint last in the priority
-      localityEndpoints.remove(deadEndpoint);
-      writeEndpoints = getWriteEndpoints(new ArrayList<>(localityEndpoints));
-      localityEndpoints.add(deadEndpoint);
+      failureCounts.compute(deadEndpoint, (k, v) -> v == null ? 1 : v + 1);
+      if (failureCounts.get(deadEndpoint) >= 2) {
+        logger.warn("Dead endpoint " + deadEndpoint + " has failed 2 times, removing from future consideration");
+        localityEndpoints.remove(deadEndpoint);
+        writeEndpoints.remove(deadEndpoint);
+      } else {
+        logger.warn("Dead endpoint " + deadEndpoint + " has failed " + failureCounts.get(deadEndpoint) + " times, deprioritizing it");
+        localityEndpoints.remove(deadEndpoint);
+        writeEndpoints.remove(deadEndpoint);
+        localityEndpoints.add(deadEndpoint);
+      }
       validateEndpoints();
-    }
   }
 
   protected List<Endpoint> getLocalityEndpoints(List<Endpoint> servers) {
@@ -297,20 +332,9 @@ public class MemqCommonClient implements Closeable {
     if (collect.isEmpty()) {
       collect = servers;
     }
+    Collections.shuffle(collect);
     logger.info("Locality endpoints: " + collect);
     return collect;
-  }
-
-  /**
-   * Randomly sample min(numWriteEndpoints, localityEndpoints.size()) endpoints from the locality endpoints for round-robin writes.
-   * @param localityEndpoints
-   * @return the write endpoints
-   */
-  protected List<Endpoint> getWriteEndpoints(List<Endpoint> localityEndpoints) {
-    Collections.shuffle(localityEndpoints);
-    List<Endpoint> writeEndpoints = localityEndpoints.subList(0, Math.min(localityEndpoints.size(), numWriteEndpoints));
-    logger.info("Write endpoints: " + writeEndpoints);
-    return writeEndpoints;
   }
 
   @Override
