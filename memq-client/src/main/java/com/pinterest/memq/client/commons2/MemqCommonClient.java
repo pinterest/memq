@@ -110,26 +110,70 @@ public class MemqCommonClient implements Closeable {
   /**
    * Send a request packet and return a future for the response.
    * 
-   * The choice of endpoint to try is based on the logic in getEndpointsToTry(), see method javadoc for more details
-   * on how the endpoints are rotated and chosen.
+   * The choice of endpoint to try is the first endpoint in the list returned by getEndpointsToTry().
+   * The order of the list is based on the logic in getEndpointsToTry().
    * 
-   * If the request fails before reaching the retry limit, the write endpoints are refreshed to deprioritize the dead endpoint.
+   * If the request succeeds and there are less than numWriteEndpoints in the set of write endpoints, the endpoint is added to the set,
+   * and the next endpoint is chosen by rotating the locality endpoints.
+   * 
+   * If the request succeeds and there are already numWriteEndpoints in the set of write endpoints, the endpoint must already be in the set for it to be chosen,
+   * so nothing is added to the set. The next endpoint is chosen by rotating the write endpoints, which will give us another endpoint in the set of write endpoints.
+   * 
+   * If the request fails before reaching the retry limit, the dead endpoint is removed from the set of write endpoints in rotation,
+   * and the next working endpoint not already in the rotation is added to the set. The next retry will try the next endpoint in the list.
+   * 
+   * If an endpoint fails 2 times in a row, it is removed from both the set of write endpoints and the set of locality endpoints so it is not considered for future requests.
+   * 
    * If the request fails after reaching the retry limit, the exception is propagated without further refreshing.
    * 
    * For example:
    * <pre>
    * {@code
-   * numEndpoints = 3
+   * numWriteEndpoints = 3
    * localityEndpoints = [A, B, C, D, E, F]
-   * writeEndpoints = [A, B, C]
+   * writeEndpoints = []
    * 
-   * Endpoint A is dead, all other endpoints are alive.
+   * getEndpointsToTry() returns rotate(localityEndpoints) -->[A, B, C, D, E, F]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint A --> succeed --> writeEndpoints = [A]
+   * getEndpointsToTry() returns rotate(localityEndpoints) --> [B, C, D, E, F, A]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint B --> succeed --> writeEndpoints = [A, B]
+   * getEndpointsToTry() returns rotate(localityEndpoints) --> [C, D, E, F, A, B]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint C --> succeed --> writeEndpoints = [A, B, C]
    * 
-   * getEndpointsToTry() returns [A, B, C, D, E, F]
-   * sendRequestPacketAndReturnResponseFuture() --> try endpoint A --> fail
-   * refreshWriteEndpoints() --> writeEndpoints = [D, C, F]
-   * getEndpointsToTry() returns [D, C, F, E, B, A] (shuffled)
-   * sendRequestPackeAndReturnResponseFuture() --> try endpoint D --> succeed
+   * ------- writeEndpoints is full -------
+   * 
+   * getEndpointsToTry() returns rotate(writeEndpoints) U localityEndpoints --> [B, C, A, D, E, F]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint B --> succeed --> writeEndpoints = [B, C, A]
+   * getEndpointsToTry() returns rotate(writeEndpoints) U localityEndpoints --> [C, A, B, D, E, F]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint C --> succeed --> writeEndpoints = [C, A, B]
+   * getEndpointsToTry() returns rotate(writeEndpoints) U localityEndpoints --> [A, B, C, D, E, F]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint A --> succeed --> writeEndpoints = [A, B, C]
+   * 
+   * ...
+   * 
+   * ------- now endpoint A is dead -------
+   * 
+   * getEndpointsToTry() returns rotate(writeEndpoints) U localityEndpoints --> [A, B, C, D, E, F]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint A --> fail --> deprioritizeDeadEndpoint(A) --> retry --> try endpoint B --> succeed --> writeEndpoints = [B, C]
+   * 
+   * ------- writeEndpoints is not full -------
+   * 
+   * getEndpointsToTry() returns rotate(localityEndpoints) --> [B, C, D, E, F, A]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint B --> succeed --> B is already in writeEndpoints, so writeEndpoints = [B, C]
+   * getEndpointsToTry() returns rotate(localityEndpoints) --> [C, D, E, F, A, B]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint C --> succeed --> writeEndpoints = [C, B]
+   * getEndpointsToTry() returns rotate(localityEndpoints) --> [D, E, F, A, B, C]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint D --> succeed --> writeEndpoints = [C, B, D]
+   * 
+   * ------- writeEndpoints is full -------
+   * 
+   * getEndpointsToTry() returns rotate(writeEndpoints) U localityEndpoints --> [B, C, D, E, F, A]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint B --> succeed --> writeEndpoints = [B, C, D]
+   * getEndpointsToTry() returns rotate(writeEndpoints) U localityEndpoints --> [C, D, B, E, F, A]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint C --> succeed --> writeEndpoints = [C, D, B]
+   * getEndpointsToTry() returns rotate(writeEndpoints) U localityEndpoints --> [D, B, C, E, F, A]
+   * sendRequestPacketAndReturnResponseFuture() --> try endpoint D --> succeed --> writeEndpoints = [D, B, C]
+   * 
    * ...
    * }
    * </pre>
@@ -161,7 +205,6 @@ public class MemqCommonClient implements Closeable {
         throw new TimeoutException("Failed to send after " + timeoutMillis + " ms");
       }
       Endpoint endpoint = endpointsToTry.get(retry);
-      // System.out.println("Trying endpoint " + endpoint + " for topic " + topic);
       try {
         future = networkClient.send(endpoint.getAddress(), request,
             Duration.ofMillis(timeoutMillis - elapsed));
@@ -214,7 +257,6 @@ public class MemqCommonClient implements Closeable {
     }
     TopicMetadataResponsePacket resp = ((TopicMetadataResponsePacket) responsePacket.getPacket());
     writeEndpoints.clear();
-    // System.out.println("Finished getting topic metadata");
     return resp.getMetadata();
   }
 
@@ -249,7 +291,7 @@ public class MemqCommonClient implements Closeable {
   /**
    * Get the endpoints to try for a given request, ordered by priority in the following way:<br>
    * 1. N rotated write endpoints, where N = numWriteEndpoints (config) and the write endpoints are rotated by 1 after each call<br>
-   * 2. Remaining locality endpoints in a random order<br>
+   * 2. Remaining locality endpoints, the order of which was already shuffled during initialization<br>
    * 
    * A given request will attempt to be sent to the first endpoint in the list, and if that fails, the next endpoint in the list will be tried, and so on.<br>
    * 
@@ -262,35 +304,49 @@ public class MemqCommonClient implements Closeable {
    * 
    * Example:
    * getEndpointsToTry() returns [A, B, C, D, E, F]
-   * getEndpointsToTry() returns [C, A, B, D, F, E]
-   * getEndpointsToTry() returns [B, C, A, E, F, D]
-   * getEndpointsToTry() returns [A, B, C, E, D, F]
+   * getEndpointsToTry() returns [C, A, B, D, E, F]
+   * getEndpointsToTry() returns [B, C, A, D, E, F]
+   * getEndpointsToTry() returns [A, B, C, D, E, F]
    * ...
    * }
    * </pre>
    *
-   * This ensures that the write endpoints are used in a round-robin manner, and the remaining locality endpoints are used (if >N retries are needed) in a random order.
+   * This ensures that the write endpoints are used in a round-robin manner.
+   * 
+   * If there are less than numWriteEndpoints in the set of writeEndpoints, the localityEndpoints are rotated by 1 and returned. The client will add working endpoints 
+   * to the set of writeEndpoints until the size of writeEndpoints reaches numWriteEndpoints. An example is provided in javadoc for sendRequestPacketAndReturnResponseFuture().
+   * 
    * @return the endpoints to try
    */
   protected List<Endpoint> getEndpointsToTry() {
     List<Endpoint> endpointsToTry = new ArrayList<>();
 
     if (writeEndpoints.size() == numWriteEndpoints) {
+      // write endpoints is full, rotate it by 1 and concatenate with the remaining locality endpoints
       Collections.rotate(writeEndpoints, 1);
       endpointsToTry.addAll(new ArrayList<>(writeEndpoints));
       List<Endpoint> remainingEndpoints = new ArrayList<>(localityEndpoints);
       remainingEndpoints.removeAll(writeEndpoints);
       endpointsToTry.addAll(remainingEndpoints);
     } else {
-      // System.out.println("Rotating locality endpoints. Before: " + localityEndpoints);
+      // write endpoints is not full, rotate the locality endpoints by 1
       Collections.rotate(localityEndpoints, -1);
       endpointsToTry.addAll(localityEndpoints);
-      // System.out.println("Rotating locality endpoints. After: " + localityEndpoints);
     }
 
     return endpointsToTry;
   }
 
+  /**
+   * The provided endpoint had just succeeded, so register the endpoint as a write endpoint if it is not already in the set of write endpoints and if the set of write endpoints is not full.
+   * 
+   * The endpoint's failure count is reset to 0 since it had just succeeded.
+   * 
+   * If the set of write endpoints is full, nothing is done.
+   * 
+   * @param endpoint
+   * @param topic
+   */
   protected void maybeRegisterWriteEndpoint(Endpoint endpoint, String topic) {
     failureCounts.remove(endpoint);
     if (writeEndpoints.size() < numWriteEndpoints && !writeEndpoints.contains(endpoint)) {
@@ -298,13 +354,20 @@ public class MemqCommonClient implements Closeable {
       writeEndpoints.add(endpoint);
     }
     if (!localityEndpoints.contains(endpoint)) {
+      // we should not reach here, because the endpoint should be in the set of locality endpoints. Adding this logic as a sanity check / fail-safe
       logger.info("Registering locality endpoint: " + endpoint + " for topic: " + topic);
       localityEndpoints.add(endpoint);
     }
   }
 
   /**
-   * Refresh the write endpoints to deprioritize the dead endpoint.
+   * Deprioritize the dead endpoint by removing it from the set of write endpoints and moving it to the end of locality endpoints.
+   * 
+   * If the endpoint has failed 2 times in a row, it is removed from both the set of write endpoints and the set of locality endpoints so it is not considered for future requests.
+   * 
+   * If the endpoint has failed 1 time but succeeds again in a future request, its failure count is reset to 0 in maybeRegisterWriteEndpoint().
+   * 
+   * An example is provided in javadoc for sendRequestPacketAndReturnResponseFuture().
    * 
    * @param deadEndpoint
    * @param topic
