@@ -41,6 +41,12 @@ public class Broker implements Packet, Comparable<Broker> {
   }
 
   public Broker(Broker broker) {
+    if (broker == null) {
+      throw new IllegalArgumentException("broker cannot be null");
+    }
+    if (broker.brokerIP == null) {
+      throw new IllegalArgumentException("brokerIP cannot be null");
+    }
     this.brokerIP = broker.brokerIP;
     this.brokerPort = broker.brokerPort;
     this.instanceType = broker.instanceType;
@@ -56,6 +62,9 @@ public class Broker implements Packet, Comparable<Broker> {
                 String locality,
                 BrokerType brokerType,
                 Set<TopicAssignment> assignedTopics) {
+    if (brokerIP == null) {
+      throw new IllegalArgumentException("brokerIP cannot be null");
+    }
     this.brokerIP = brokerIP;
     this.brokerPort = brokerPort;
     this.instanceType = instanceType;

@@ -38,6 +38,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -68,9 +69,11 @@ public class MemqCommonClient implements Closeable {
   private int numWriteEndpoints = 1;
 
   private String locality = DEFAULT_LOCALITY;
-  private List<Endpoint> localityEndpoints;
-  private List<Endpoint> writeEndpoints;
+  private volatile List<Endpoint> localityEndpoints;
+  private volatile List<Endpoint> writeEndpoints;
   private Map<Endpoint, Integer> failureCounts;
+  private final AtomicInteger writeRotateIdx = new AtomicInteger(0);
+  private final AtomicInteger localityRotateIdx = new AtomicInteger(0);
 
   protected MemqCommonClient(SSLConfig sslConfig, Properties networkProperties) {
     if (networkProperties != null) {
@@ -79,10 +82,10 @@ public class MemqCommonClient implements Closeable {
             .parseLong(networkProperties.getProperty(NetworkClient.CONFIG_CONNECT_TIMEOUT_MS));
       }
       if (networkProperties.containsKey(CONFIG_NUM_WRITE_ENDPOINTS)) {
-        this.numWriteEndpoints = Integer.parseInt(networkProperties.getProperty(CONFIG_NUM_WRITE_ENDPOINTS));
+        this.numWriteEndpoints = Math.max(1, Integer.parseInt(networkProperties.getProperty(CONFIG_NUM_WRITE_ENDPOINTS)));
       }
     }
-    writeEndpoints = new ArrayList<>();
+    writeEndpoints = Collections.emptyList();
     failureCounts = new ConcurrentHashMap<>();
     networkClient = new NetworkClient(networkProperties, sslConfig);
   }
@@ -97,7 +100,7 @@ public class MemqCommonClient implements Closeable {
   }
 
   public void resetEndpoints(List<Endpoint> endpoints) throws Exception {
-    this.localityEndpoints = getLocalityEndpoints(endpoints);
+    this.localityEndpoints = Collections.unmodifiableList(getLocalityEndpoints(endpoints));
     validateEndpoints();
   }
 
@@ -220,7 +223,7 @@ public class MemqCommonClient implements Closeable {
             try {
               deprioritizeDeadEndpoint(endpoint, topic);  // this endpoint is down even after retries in NetworkClient, remove it from the write endpoints and take another one from locality endpoints
             } catch (Exception ex) {
-              logger.error("Failed to refresh write endpoints", e);
+              logger.error("Failed to refresh write endpoints", ex);
               throw e;
             }
           }
@@ -256,7 +259,7 @@ public class MemqCommonClient implements Closeable {
       throw new TopicNotFoundException("Topic " + topic + " not found");
     }
     TopicMetadataResponsePacket resp = ((TopicMetadataResponsePacket) responsePacket.getPacket());
-    writeEndpoints.clear();
+    writeEndpoints = Collections.emptyList();
     return resp.getMetadata();
   }
 
@@ -277,8 +280,8 @@ public class MemqCommonClient implements Closeable {
     } else {
       brokers = md.getWriteBrokers();
     }
-    localityEndpoints = getLocalityEndpoints(
-        brokers.stream().map(Endpoint::fromBroker).collect(Collectors.toList()));
+    localityEndpoints = Collections.unmodifiableList(
+        getLocalityEndpoints(brokers.stream().map(Endpoint::fromBroker).collect(Collectors.toList())));
     validateEndpoints();
   }
 
@@ -319,19 +322,28 @@ public class MemqCommonClient implements Closeable {
    * @return the endpoints to try
    */
   protected List<Endpoint> getEndpointsToTry() {
-    List<Endpoint> endpointsToTry = new ArrayList<>();
+    // Snapshot current lists to avoid races and in-place mutation
+    List<Endpoint> writes = this.writeEndpoints;
+    List<Endpoint> locals = this.localityEndpoints;
+    List<Endpoint> endpointsToTry = new ArrayList<>(writes.size() + locals.size());
 
-    if (writeEndpoints.size() == numWriteEndpoints) {
-      // write endpoints is full, rotate it by 1 and concatenate with the remaining locality endpoints
-      Collections.rotate(writeEndpoints, 1);
-      endpointsToTry.addAll(new ArrayList<>(writeEndpoints));
-      List<Endpoint> remainingEndpoints = new ArrayList<>(localityEndpoints);
-      remainingEndpoints.removeAll(writeEndpoints);
-      endpointsToTry.addAll(remainingEndpoints);
+    if (writes.size() == numWriteEndpoints) {
+      // If the set of writeEndpoints is full, rotate the writeEndpoints by 1 and add the localityEndpoints that are not in the set of writeEndpoints to the end of the list
+      int start = Math.floorMod(writeRotateIdx.getAndIncrement(), Math.max(1, writes.size()));
+      for (int i = 0; i < writes.size(); i++) {
+        endpointsToTry.add(writes.get((start + i) % writes.size()));
+      }
+      for (Endpoint e : locals) {
+        if (!writes.contains(e)) {
+          endpointsToTry.add(e);
+        }
+      }
     } else {
-      // write endpoints is not full, rotate the locality endpoints by 1
-      Collections.rotate(localityEndpoints, -1);
-      endpointsToTry.addAll(localityEndpoints);
+      // If the set of writeEndpoints is not full, rotate the localityEndpoints by 1
+      int start = Math.floorMod(localityRotateIdx.getAndIncrement(), Math.max(1, locals.size()));
+      for (int i = 0; i < locals.size(); i++) {
+        endpointsToTry.add(locals.get((start + i) % locals.size()));
+      }
     }
 
     return endpointsToTry;
@@ -349,14 +361,19 @@ public class MemqCommonClient implements Closeable {
    */
   protected void maybeRegisterWriteEndpoint(Endpoint endpoint, String topic) {
     failureCounts.remove(endpoint);
-    if (writeEndpoints.size() < numWriteEndpoints && !writeEndpoints.contains(endpoint)) {
+    List<Endpoint> currentWrites = this.writeEndpoints;
+    if (currentWrites.size() < numWriteEndpoints && !currentWrites.contains(endpoint)) {
       logger.info("Registering write endpoint: " + endpoint + " for topic: " + topic);
-      writeEndpoints.add(endpoint);
+      List<Endpoint> newWrites = new ArrayList<>(currentWrites);
+      newWrites.add(endpoint);
+      this.writeEndpoints = Collections.unmodifiableList(newWrites);
     }
-    if (!localityEndpoints.contains(endpoint)) {
-      // we should not reach here, because the endpoint should be in the set of locality endpoints. Adding this logic as a sanity check / fail-safe
+    List<Endpoint> currentLocals = this.localityEndpoints;
+    if (!currentLocals.contains(endpoint)) {
       logger.info("Registering locality endpoint: " + endpoint + " for topic: " + topic);
-      localityEndpoints.add(endpoint);
+      List<Endpoint> newLocals = new ArrayList<>(currentLocals);
+      newLocals.add(endpoint);
+      this.localityEndpoints = Collections.unmodifiableList(newLocals);
     }
   }
 
@@ -374,18 +391,24 @@ public class MemqCommonClient implements Closeable {
    * @throws Exception
    */
   protected void deprioritizeDeadEndpoint(Endpoint deadEndpoint, String topic) throws Exception {
-      // put deadEndpoint last in the priority
       failureCounts.compute(deadEndpoint, (k, v) -> v == null ? 1 : v + 1);
-      if (failureCounts.get(deadEndpoint) >= 2) {
+      int failures = failureCounts.get(deadEndpoint);
+
+      List<Endpoint> newLocals = new ArrayList<>(this.localityEndpoints);
+      newLocals.remove(deadEndpoint);
+      List<Endpoint> newWrites = new ArrayList<>(this.writeEndpoints);
+      newWrites.remove(deadEndpoint);
+
+      if (failures >= 2) {
         logger.warn("Dead endpoint " + deadEndpoint + " has failed 2 times, removing from future consideration");
-        localityEndpoints.remove(deadEndpoint);
-        writeEndpoints.remove(deadEndpoint);
+        // Do not re-add to locals
       } else {
-        logger.warn("Dead endpoint " + deadEndpoint + " has failed " + failureCounts.get(deadEndpoint) + " times, deprioritizing it");
-        localityEndpoints.remove(deadEndpoint);
-        writeEndpoints.remove(deadEndpoint);
-        localityEndpoints.add(deadEndpoint);
+        logger.warn("Dead endpoint " + deadEndpoint + " has failed " + failures + " times, deprioritizing it");
+        newLocals.add(deadEndpoint); // move to end
       }
+
+      this.localityEndpoints = Collections.unmodifiableList(newLocals);
+      this.writeEndpoints = Collections.unmodifiableList(newWrites);
       validateEndpoints();
   }
 
