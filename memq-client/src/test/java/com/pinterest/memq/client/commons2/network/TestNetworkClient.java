@@ -388,9 +388,8 @@ public class TestNetworkClient {
 
     try {
       pktFuture.get();
-      fail("should throw IO exception");
     } catch (ExecutionException ee) {
-      assertTrue(ee.getCause() instanceof IOException);
+      fail("should not throw exception");
     } catch (Exception e) {
       fail("failed: " + e);
     }
@@ -571,6 +570,79 @@ public class TestNetworkClient {
     assertEquals(ResponseCodes.OK, resp2.getResponseCode());
     assertEquals(RequestType.TOPIC_METADATA, resp2.getRequestType());
     mockServer.stop();
+  }
+
+  @Test
+  public void testChannelPoolingReusesConnectionForSameEndpoint() throws Exception {
+    MockMemqServer server = new MockMemqServer(port, Collections.emptyMap());
+    server.start();
+
+    NetworkClient client = new NetworkClient();
+    ChannelFuture cf1 = client.acquireChannel(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port));
+    // Acquire again for the same endpoint; should reuse the same channel
+    ChannelFuture cf2 = client.acquireChannel(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port));
+
+    assertSame(cf1.channel(), cf2.channel());
+    assertTrue(cf1.channel().isActive());
+
+    client.close();
+    server.stop();
+  }
+
+  @Test
+  public void testMultiplexingUsesSingleChannelForConcurrentRequests() throws Exception {
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
+    map.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+      try {
+        Thread.sleep(300);
+      } catch (InterruptedException e) {
+        // no-op
+      }
+      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+      TopicConfig topicConfig = new TopicConfig("test", "dev");
+      TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
+      Set<Broker> brokers = Collections.singleton(new Broker(LOCALHOST_STRING, (short) port, "n/a",
+          "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK,
+          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+              ImmutableSet.of(), "dev", new Properties())));
+      ctx.writeAndFlush(resp);
+    });
+
+    MockMemqServer server = new MockMemqServer(port, map);
+    server.start();
+
+    NetworkClient client = new NetworkClient();
+    RequestPacket r1 = new RequestPacket(RequestType.PROTOCOL_VERSION, 1,
+        RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
+    RequestPacket r2 = new RequestPacket(RequestType.PROTOCOL_VERSION, 2,
+        RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
+    RequestPacket r3 = new RequestPacket(RequestType.PROTOCOL_VERSION, 3,
+        RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
+
+    Future<ResponsePacket> f1 = client.send(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port), r1);
+    Future<ResponsePacket> f2 = client.send(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port), r2);
+    Future<ResponsePacket> f3 = client.send(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port), r3);
+
+    // Give a moment for all three to be inflight
+    Thread.sleep(100);
+
+    // Only one channel should back the same endpoint; acquiring should return the same active channel
+    ChannelFuture cf = client.acquireChannel(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port));
+    assertEquals(1, client.getChannelPool().size());
+    assertTrue(cf.channel().isActive());
+    assertEquals(3, client.getInflightRequestCount());
+
+    ResponsePacket rp1 = f1.get();
+    ResponsePacket rp2 = f2.get();
+    ResponsePacket rp3 = f3.get();
+    assertEquals(ResponseCodes.OK, rp1.getResponseCode());
+    assertEquals(ResponseCodes.OK, rp2.getResponseCode());
+    assertEquals(ResponseCodes.OK, rp3.getResponseCode());
+    assertEquals(0, client.getInflightRequestCount());
+    client.close();
+    server.stop();
   }
 
 //  @Test

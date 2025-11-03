@@ -24,9 +24,13 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelId;
 
 public class ResponseHandler implements Closeable {
 
@@ -34,9 +38,12 @@ public class ResponseHandler implements Closeable {
   private final AtomicReference<Map<TransportPacketIdentifier, CompletableFuture<ResponsePacket>>>
       inflightRequestMapRef = new AtomicReference<>(new ConcurrentHashMap<>());
 
+  // Track which requests belong to which channel so we can reject only that channel's inflight on close
+  private final Map<ChannelId, Set<TransportPacketIdentifier>> channelToRequests = new ConcurrentHashMap<>();
+  private final Map<TransportPacketIdentifier, ChannelId> requestToChannel = new ConcurrentHashMap<>();
+
   public void handle(ResponsePacket responsePacket) throws Exception {
-    CompletableFuture<ResponsePacket> future = inflightRequestMapRef.get()
-        .remove(new TransportPacketIdentifier(responsePacket));
+    CompletableFuture<ResponsePacket> future = removeRequest(new TransportPacketIdentifier(responsePacket));
     if (future != null) {
       future.complete(responsePacket);
     } else {
@@ -55,8 +62,28 @@ public class ResponseHandler implements Closeable {
     inflightRequestMapRef.get().put(identifier, future);
   }
 
+  public void registerRequest(Channel channel,
+                              TransportPacketIdentifier identifier,
+                              CompletableFuture<ResponsePacket> future) {
+    inflightRequestMapRef.get().put(identifier, future);
+    ChannelId channelId = channel.id();
+    channelToRequests.computeIfAbsent(channelId, k -> ConcurrentHashMap.newKeySet()).add(identifier);
+    requestToChannel.put(identifier, channelId);
+  }
+
   public CompletableFuture<ResponsePacket> removeRequest(TransportPacketIdentifier identifier) {
-    return inflightRequestMapRef.get().remove(identifier);
+    CompletableFuture<ResponsePacket> future = inflightRequestMapRef.get().remove(identifier);
+    ChannelId channelId = requestToChannel.remove(identifier);
+    if (channelId != null) {
+      Set<TransportPacketIdentifier> set = channelToRequests.get(channelId);
+      if (set != null) {
+        set.remove(identifier);
+        if (set.isEmpty()) {
+          channelToRequests.remove(channelId);
+        }
+      }
+    }
+    return future;
   }
 
   public boolean cancelRequest(TransportPacketIdentifier identifier, Throwable reason) {
@@ -84,6 +111,23 @@ public class ResponseHandler implements Closeable {
     for (Map.Entry<TransportPacketIdentifier, CompletableFuture<ResponsePacket>> entry : oldMap
         .entrySet()) {
       rejectRequestFuture(entry.getValue(), reason);
+    }
+    channelToRequests.clear();
+    requestToChannel.clear();
+  }
+
+  public void cleanAndRejectInflightRequestsForChannel(Channel channel, Throwable reason) {
+    ChannelId channelId = channel.id();
+    Set<TransportPacketIdentifier> identifiers = channelToRequests.remove(channelId);
+    if (identifiers == null || identifiers.isEmpty()) {
+      return;
+    }
+    for (TransportPacketIdentifier identifier : identifiers) {
+      CompletableFuture<ResponsePacket> future = inflightRequestMapRef.get().remove(identifier);
+      requestToChannel.remove(identifier);
+      if (future != null) {
+        rejectRequestFuture(future, reason);
+      }
     }
   }
 

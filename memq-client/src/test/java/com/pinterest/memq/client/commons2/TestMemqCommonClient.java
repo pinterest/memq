@@ -37,6 +37,7 @@ import org.junit.Test;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -79,9 +80,9 @@ public class TestMemqCommonClient {
       client.initialize(Collections.emptyList());
       fail("should not initialize with empty list");
     } catch (Exception e) {
-      assertEquals("Failed to initialize, no endpoints available", e.getMessage());
+      assertEquals("No endpoints available", e.getMessage());
     }
-
+    client.close();
   }
 
   @Test
@@ -90,7 +91,7 @@ public class TestMemqCommonClient {
 
     // not initialized
     try {
-      client.sendRequestPacketAndReturnResponseFuture(null, 10000);
+      client.sendRequestPacketAndReturnResponseFuture(null, "test", 10000);
       fail("should fail since not initialized");
     } catch (IllegalStateException ise) {
       // good
@@ -102,7 +103,7 @@ public class TestMemqCommonClient {
     client.initialize(Collections.singletonList(commonEndpoint));
     RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1, RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
     try {
-      client.sendRequestPacketAndReturnResponseFuture(request, 10000);
+      client.sendRequestPacketAndReturnResponseFuture(request, "test", 10000);
       fail("should fail since non connection");
     } catch (ExecutionException ee) {
       assertTrue(ee.getCause() instanceof ConnectException);
@@ -133,13 +134,15 @@ public class TestMemqCommonClient {
     mockServer.start();
 
     try {
-      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 10000);
+      client.initialize(Collections.singletonList(commonEndpoint));
+      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, "test", 10000);
       ResponsePacket resp = respFuture.get();
       assertEquals(ResponseCodes.OK, resp.getResponseCode());
     } catch (Exception e) {
       fail("failed: " + e);
     }
 
+    client.close();
     mockServer.stop();
   }
 
@@ -183,13 +186,14 @@ public class TestMemqCommonClient {
     RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1, RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
 
     try {
-      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 3000);
+      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, "test",3000);
       ResponsePacket resp = respFuture.get();
       fail("should throw timeout exception");
     } catch (ExecutionException ee) {
       assertTrue(ee.getCause() instanceof TimeoutException);
     }
 
+    client.close();
     mockServer.stop();
   }
 
@@ -228,7 +232,7 @@ public class TestMemqCommonClient {
     RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1, RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
 
     try {
-      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, 5000);
+      Future<ResponsePacket> respFuture = client.sendRequestPacketAndReturnResponseFuture(request, "test", 5000);
       respFuture.get();
       fail("should fail since connection is dropped");
     } catch (ExecutionException ee) {
@@ -237,49 +241,22 @@ public class TestMemqCommonClient {
       fail("failed: " + e);
     }
 
+    client.close();
     mockServer.stop();
   }
 
   @Test
-  public void testGetEndpointsToTry() throws Exception {
-    Endpoint commonEndpoint = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9092), "test");
+  public void testGetLocalityEndpoints() throws Exception {
     MemqCommonClient client = new MemqCommonClient("test", null, new Properties());
-    client.initialize(
-        Arrays.asList(
-            commonEndpoint,
-            new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9093), "test2"),
-            new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9094), "test3")
-        )
-    );
-    assertEquals(1, client.getEndpointsToTry().size());
-
-    MemqCommonClient client2 = new MemqCommonClient("test", null, new Properties());
-    client.initialize(
-        Arrays.asList(
-            commonEndpoint,
-            new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9093), "test"),
-            new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9094), "test")
-        )
-    );
-    client.setCurrentEndpoint(commonEndpoint);
-    List<Endpoint> endpointsToTry = client.getEndpointsToTry();
-    assertEquals(4, endpointsToTry.size());
-    assertEquals(endpointsToTry.get(0), commonEndpoint);
-    assertNotEquals(endpointsToTry.get(1), endpointsToTry.get(2));
-    assertNotEquals(endpointsToTry.get(2), endpointsToTry.get(3));
-    assertNotEquals(endpointsToTry.get(3), endpointsToTry.get(1));
-  }
-
-  @Test
-  public void testGetPreferredEndpoints() throws Exception {
-    MemqCommonClient client = new MemqCommonClient("test", null, new Properties());
-    List<Endpoint> preferred = client.getPreferredEndpoints(Arrays.asList(
+    List<Endpoint> localityEndpoints = client.getLocalityEndpoints(Arrays.asList(
         new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9092), "test"),
         new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9093), "test2"),
         new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9094), "test3")
     ));
-    assertEquals(1, preferred.size());
-    assertEquals("test", preferred.get(0).getLocality());
+    assertEquals(1, localityEndpoints.size());
+    assertEquals("test", localityEndpoints.get(0).getLocality());
+
+    client.close();
   }
 
   @Test
@@ -311,6 +288,9 @@ public class TestMemqCommonClient {
     TopicMetadata md = client.getTopicMetadata("test", 3000);
     assertEquals(1, md.getWriteBrokers().size());
     assertEquals("dev", md.getStorageHandlerName());
+
+    client.close();
+    mockServer.stop();  
   }
 
   @Test
@@ -350,5 +330,207 @@ public class TestMemqCommonClient {
     List<Endpoint> endpoints = client.getEndpointsToTry();
     assertEquals(2, endpoints.size());
     assertNotEquals(endpoints.get(0), endpoints.get(1));
+    client.close();
+    mockServer.stop();
+  }
+
+  @Test
+  public void testDeprioritizeAndRemoveDeadEndpointAfterTwoFailures() throws Exception {
+    Properties networkProps = new Properties();
+    networkProps.setProperty(MemqCommonClient.CONFIG_NUM_WRITE_ENDPOINTS, "2");
+    MemqCommonClient client = new MemqCommonClient("test", null, networkProps);
+
+    Endpoint dead = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port), "test");
+    Endpoint e2 = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port + 1), "test");
+    Endpoint e3 = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port + 2), "test");
+    client.initialize(Arrays.asList(dead, e2, e3));
+
+    // First deprioritization: moved to end, still present
+    client.deprioritizeDeadEndpoint(dead, "topic");
+    List<Endpoint> orderAfterFirst = client.getEndpointsToTry();
+    assertTrue(orderAfterFirst.contains(dead));
+    assertFalse(orderAfterFirst.get(0).equals(dead));
+
+    // Second deprioritization: removed from consideration
+    client.deprioritizeDeadEndpoint(dead, "topic");
+    List<Endpoint> orderAfterSecond = client.getEndpointsToTry();
+    assertFalse(orderAfterSecond.contains(dead));
+    assertEquals(2, orderAfterSecond.size());
+
+    client.close();
+  }
+
+  @Test
+  public void testStickyWriteEndpointsAndRoundRobinRotation() throws Exception {
+    Properties networkProps = new Properties();
+    networkProps.setProperty(MemqCommonClient.CONFIG_NUM_WRITE_ENDPOINTS, "2");
+    MemqCommonClient client = new MemqCommonClient("test", null, networkProps);
+
+    Endpoint e1 = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port), "test");
+    Endpoint e2 = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port + 1), "test");
+    Endpoint e3 = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port + 2), "test");
+    client.initialize(Arrays.asList(e1, e2, e3));
+
+    // Start servers on all three endpoints (all alive)
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
+    map.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+      TopicConfig topicConfig = new TopicConfig("test", "dev");
+      TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
+      Set<Broker> brokers = new HashSet<>();
+      brokers.add(new Broker(LOCALHOST_STRING, (short) port, "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      brokers.add(new Broker(LOCALHOST_STRING, (short) (port + 1), "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      brokers.add(new Broker(LOCALHOST_STRING, (short) (port + 2), "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK,
+          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+              ImmutableSet.of(), "dev", new Properties())));
+      ctx.writeAndFlush(resp);
+    });
+    MockMemqServer s1 = new MockMemqServer(port, map);
+    MockMemqServer s2 = new MockMemqServer(port + 1, map);
+    MockMemqServer s3 = new MockMemqServer(port + 2, map);
+    s1.start();
+    s2.start();
+    s3.start();
+
+    // Send a few requests to register two working write endpoints
+    RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1,
+        RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
+    for (int i = 0; i < 4; i++) {
+      client.sendRequestPacketAndReturnResponseFuture(request, "test", 3000).get();
+    }
+
+    List<Endpoint> sticky = new ArrayList<>(client.currentWriteEndpoints());
+    assertEquals(2, sticky.size());
+
+    // Ensure they remain sticky across additional sends
+    for (int i = 0; i < 10; i++) {
+      client.sendRequestPacketAndReturnResponseFuture(request, "test", 3000).get();
+      List<Endpoint> current = client.currentWriteEndpoints();
+      assertEquals(new HashSet<>(sticky), new HashSet<>(current));
+    }
+
+    // Verify round-robin rotation among sticky endpoints
+    List<Endpoint> first = client.getEndpointsToTry();
+    assertTrue(first.get(0).equals(sticky.get(0)) || first.get(0).equals(sticky.get(1)));
+    List<Endpoint> second = client.getEndpointsToTry();
+    // The first position should rotate to the other sticky endpoint
+    assertNotEquals(first.get(0), second.get(0));
+    assertTrue(new HashSet<>(Arrays.asList(first.get(0), second.get(0))).containsAll(sticky));
+
+    client.close();
+    s1.stop();
+    s2.stop();
+    s3.stop();
+  }
+
+  @Test
+  public void testWriteEndpointsSelectionRandomizedAcrossRuns() throws Exception {
+    // Probabilistic: across multiple runs, the chosen sticky endpoints should vary at least once
+    int runs = 8;
+    Set<Set<Integer>> selections = new HashSet<>();
+
+    for (int r = 0; r < runs; r++) {
+      int base = port + 10 + (r * 10);
+      Properties networkProps = new Properties();
+      networkProps.setProperty(MemqCommonClient.CONFIG_NUM_WRITE_ENDPOINTS, "2");
+      MemqCommonClient client = new MemqCommonClient("test", null, networkProps);
+
+      Endpoint e1 = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, base), "test");
+      Endpoint e2 = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, base + 1), "test");
+      Endpoint e3 = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, base + 2), "test");
+      client.initialize(Arrays.asList(e1, e2, e3));
+
+      Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
+      map.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+        TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+        TopicConfig topicConfig = new TopicConfig("test", "dev");
+        TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
+        Set<Broker> brokers = new HashSet<>();
+        brokers.add(new Broker(LOCALHOST_STRING, (short) base, "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+        brokers.add(new Broker(LOCALHOST_STRING, (short) (base + 1), "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+        brokers.add(new Broker(LOCALHOST_STRING, (short) (base + 2), "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+        ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+            req.getRequestType(), ResponseCodes.OK,
+            new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+                ImmutableSet.of(), "dev", new Properties())));
+        ctx.writeAndFlush(resp);
+      });
+      MockMemqServer s1 = new MockMemqServer(base, map);
+      MockMemqServer s2 = new MockMemqServer(base + 1, map);
+      MockMemqServer s3 = new MockMemqServer(base + 2, map);
+      s1.start();
+      s2.start();
+      s3.start();
+
+      RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1,
+          RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
+      for (int i = 0; i < 3; i++) {
+        client.sendRequestPacketAndReturnResponseFuture(request, "test", 3000).get();
+      }
+      List<Endpoint> sticky = client.currentWriteEndpoints();
+      selections.add(new HashSet<>(Arrays.asList(sticky.get(0).getAddress().getPort(), sticky.get(1).getAddress().getPort())));
+
+      client.close();
+      s1.stop();
+      s2.stop();
+      s3.stop();
+    }
+
+    // Expect at least two distinct selections across runs to indicate random choice
+    assertTrue("Expected at least two distinct sticky endpoint selections across runs", selections.size() >= 2);
+  }
+
+  @Test
+  public void testSendFailureRefreshesWriteEndpoints() throws Exception {
+    // Use real MemqCommonClient and force first attempt to target a dead endpoint by rotating write endpoints
+    Properties networkProps = new Properties();
+    networkProps.setProperty(MemqCommonClient.CONFIG_NUM_WRITE_ENDPOINTS, "2");
+    MemqCommonClient client = new MemqCommonClient("test", null, networkProps);
+
+    // Prepare endpoints: include a dead endpoint and a live endpoint
+    Endpoint dead = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port), "test");
+    Endpoint alive = new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, port + 1), "test");
+    client.initialize(Arrays.asList(dead, alive));
+
+    // Start server on the alive endpoint
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
+    map.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+      TopicConfig topicConfig = new TopicConfig("test", "dev");
+      TopicAssignment topicAssignment = new TopicAssignment(topicConfig, 100.0);
+      Set<Broker> brokers = Collections.singleton(new Broker(LOCALHOST_STRING, (short) (port + 1), "n/a",
+          "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+      ResponsePacket resp = new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+          req.getRequestType(), ResponseCodes.OK,
+          new TopicMetadataResponsePacket(new TopicMetadata(mdPkt.getTopic(), brokers,
+              ImmutableSet.of(), "dev", new Properties())));
+      ctx.writeAndFlush(resp);
+    });
+    MockMemqServer server = new MockMemqServer(port + 1, map);
+    server.start();
+
+    // Rotate write endpoints so the first endpoint to try is the dead one
+    List<Endpoint> endpointsToTry = client.getEndpointsToTry();
+    int attempts = 0;
+    while (endpointsToTry.get(0).getAddress().getPort() != port && attempts++ < 5) {
+      endpointsToTry = client.getEndpointsToTry();
+    }
+    assertEquals(port, endpointsToTry.get(0).getAddress().getPort());
+
+    // First attempt should hit the dead endpoint (connect failure) → triggers refreshWriteEndpoints; next attempt hits alive and succeeds
+    RequestPacket request = new RequestPacket(RequestType.PROTOCOL_VERSION, 1,
+        RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket("test"));
+
+    ResponsePacket resp = client.sendRequestPacketAndReturnResponseFuture(request, "test", 5000).get();
+    assertEquals(ResponseCodes.OK, resp.getResponseCode());
+
+    // Verify write endpoints were refreshed to prefer the alive endpoint now
+    List<Endpoint> writeEndpoints = client.currentWriteEndpoints();
+    assertEquals(alive.getAddress(), writeEndpoints.get(0).getAddress());
+
+    client.close();
+    server.stop();
   }
 }
