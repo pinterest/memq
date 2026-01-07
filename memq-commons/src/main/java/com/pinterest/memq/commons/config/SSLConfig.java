@@ -18,19 +18,6 @@ package com.pinterest.memq.commons.config;
 import java.util.Collections;
 import java.util.List;
 
-/**
- * listeners=PLAINTEXT://:9092,SSL://:9093
- * security.inter.broker.protocol=PLAINTEXT ssl.client.auth=required
- * ssl.enabled.protocols=TLSv1.2,TLSv1.1,TLSv1
- * ssl.endpoint.identification.algorithm=HTTPS ssl.key.password=pintastic
- * ssl.keystore.location=/var/lib/normandie/fuse/jks/generic
- * ssl.keystore.password=pintastic ssl.keystore.type=JKS
- * ssl.secure.random.implementation=SHA1PRNG
- * ssl.truststore.location=/var/lib/normandie/fuse/jkstrust/generic
- * ssl.truststore.password=pintastic ssl.truststore.type=JKS
- * authorizer.class.name=com.pinterest.commons.kafka.authorizers.PastisAuthorizer
- * kafka.authorizer.pastis_policy=kafka
- */
 public class SSLConfig {
 
   private String keystorePath;
