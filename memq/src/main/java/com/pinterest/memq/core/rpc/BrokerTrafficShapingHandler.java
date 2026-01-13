@@ -10,7 +10,6 @@ import java.util.logging.Logger;
 public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
 
     public static final String READ_LIMIT_METRIC_NAME = "broker.traffic.read.limit";
-    public static final String READ_THROUGHPUT_METRIC_NAME = "broker.traffic.read.throughput";
     private static final Logger logger = Logger.getLogger(BrokerTrafficShapingHandler.class.getName());
     private int metricsReportingIntervalSec = 60; // default 1 minute
     private final MetricRegistry registry;
@@ -66,7 +65,5 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
     public void reportMetrics() {
         long readLimit = this.getReadLimit();
         registry.gauge(READ_LIMIT_METRIC_NAME, () -> () -> readLimit);
-        registry.gauge(READ_THROUGHPUT_METRIC_NAME, () -> () -> this.trafficCounter().lastReadThroughput());
-        logger.info("Latest traffic metrics: " + this.trafficCounter());
     }
 }

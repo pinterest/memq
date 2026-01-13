@@ -41,6 +41,8 @@ import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.config.AuthorizerConfig;
 import com.pinterest.memq.core.config.MemqConfig;
 import com.pinterest.memq.core.config.NettyServerConfig;
+import com.pinterest.memq.core.config.QueueingConfig;
+import com.pinterest.memq.core.rpc.queue.QueuedPacketSwitchingHandler;
 import com.pinterest.memq.core.security.Authorizer;
 import com.pinterest.memq.core.utils.DaemonThreadFactory;
 import com.pinterest.memq.core.utils.MemqUtils;
@@ -137,6 +139,11 @@ public class MemqNettyServer {
         trafficShapingHandler.startPeriodicMetricsReporting(childGroup);
       }
 
+      // Create the packet switch handler ONCE and share across all connections.
+      // This is critical because QueuedPacketSwitchingHandler creates its own thread pool.
+      final PacketSwitchingHandler packetSwitchHandler = createPacketSwitchHandler(
+          nettyServerConfig.getQueueingConfig(), authorizer, registry);
+
       if (useEpoll) {
         serverBootstrap.channel(EpollServerSocketChannel.class);
       } else {
@@ -170,7 +177,7 @@ public class MemqNettyServer {
           pipeline.addLast(new LengthFieldBasedFrameDecoder(ByteOrder.BIG_ENDIAN,
               nettyServerConfig.getMaxFrameByteLength(), 0, Integer.BYTES, 0, 0, false));
           pipeline.addLast(new MemqResponseEncoder(registry));
-          pipeline.addLast(new MemqRequestDecoder(memqManager, memqGovernor, authorizer, registry));
+          pipeline.addLast(new MemqRequestDecoder(packetSwitchHandler, registry));
         }
 
       });
@@ -227,6 +234,26 @@ public class MemqNettyServer {
       return authorizer;
     }
     return null;
+  }
+
+  /**
+   * Create the packet switch handler. If queueing is enabled, creates a 
+   * QueuedPacketSwitchingHandler with its own thread pool; otherwise creates
+   * a regular PacketSwitchingHandler.
+   * 
+   * This handler is created ONCE and shared across all connections to avoid
+   * creating a new thread pool per connection.
+   */
+  private PacketSwitchingHandler createPacketSwitchHandler(QueueingConfig queueingConfig,
+                                                            Authorizer authorizer,
+                                                            MetricRegistry registry) throws Exception {
+    if (queueingConfig != null && queueingConfig.isEnabled()) {
+      logger.info("Creating QueuedPacketSwitchingHandler with fair queueing enabled");
+      return new QueuedPacketSwitchingHandler(
+          memqManager, memqGovernor, authorizer, registry, queueingConfig);
+    } else {
+      return new PacketSwitchingHandler(memqManager, memqGovernor, authorizer, registry);
+    }
   }
 
   private EventLoopGroup getEventLoopGroup(int nThreads) {

@@ -28,6 +28,8 @@ public class NettyServerConfig {
   private int brokerInputTrafficShapingMetricsReportIntervalSec = 60; // 1 minute by default
   // SSL
   private SSLConfig sslConfig;
+  // Fair queueing configuration
+  private QueueingConfig queueingConfig = null;
 
   public int getBrokerInputTrafficShapingMetricsReportIntervalSec() {
     return brokerInputTrafficShapingMetricsReportIntervalSec;
@@ -92,6 +94,14 @@ public class NettyServerConfig {
 
   public void setEnableEpoll(boolean enableEpoll) {
     this.enableEpoll = enableEpoll;
+  }
+
+  public QueueingConfig getQueueingConfig() {
+    return queueingConfig;
+  }
+
+  public void setQueueingConfig(QueueingConfig queueingConfig) {
+    this.queueingConfig = queueingConfig;
   }
 
 }

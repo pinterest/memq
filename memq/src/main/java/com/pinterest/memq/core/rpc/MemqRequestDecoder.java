@@ -32,9 +32,6 @@ import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.commons.protocol.RequestPacket;
 import com.pinterest.memq.commons.protocol.ResponseCodes;
 import com.pinterest.memq.commons.protocol.ResponsePacket;
-import com.pinterest.memq.core.MemqManager;
-import com.pinterest.memq.core.clustering.MemqGovernor;
-import com.pinterest.memq.core.security.Authorizer;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
@@ -45,15 +42,20 @@ public class MemqRequestDecoder extends ChannelInboundHandlerAdapter {
 
   private static final Logger logger = Logger
       .getLogger(MemqRequestDecoder.class.getCanonicalName());
-  private Counter errorCounter;
-  private PacketSwitchingHandler packetSwitchHandler;
+  private final Counter errorCounter;
+  private final PacketSwitchingHandler packetSwitchHandler;
 
-  public MemqRequestDecoder(MemqManager mgr,
-                            MemqGovernor governor,
-                            Authorizer authorizer,
+  /**
+   * Create a MemqRequestDecoder with a shared PacketSwitchingHandler.
+   * This constructor should be used to avoid creating a new handler per connection.
+   * 
+   * @param packetSwitchHandler the shared handler instance
+   * @param registry the metrics registry
+   */
+  public MemqRequestDecoder(PacketSwitchingHandler packetSwitchHandler,
                             MetricRegistry registry) {
-    errorCounter = registry.counter("request.error");
-    packetSwitchHandler = new PacketSwitchingHandler(mgr, governor, authorizer, registry);
+    this.errorCounter = registry.counter("request.error");
+    this.packetSwitchHandler = packetSwitchHandler;
   }
 
   @Override

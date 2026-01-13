@@ -95,6 +95,7 @@ import com.pinterest.memq.core.config.NettyServerConfig;
 import com.pinterest.memq.core.rpc.MemqNettyServer;
 import com.pinterest.memq.core.rpc.MemqRequestDecoder;
 import com.pinterest.memq.core.rpc.MemqResponseEncoder;
+import com.pinterest.memq.core.rpc.PacketSwitchingHandler;
 import com.pinterest.memq.core.rpc.TestAuditor;
 import com.pinterest.memq.core.utils.MiscUtils;
 import com.salesforce.kafka.test.junit4.SharedKafkaTestResource;
@@ -141,7 +142,7 @@ public class TestMemqClientServerIntegration {
     MetricRegistry registry = new MetricRegistry();
     EmbeddedChannel ech = new EmbeddedChannel(new MemqResponseEncoder(registry),
         new LengthFieldBasedFrameDecoder(ByteOrder.BIG_ENDIAN, 2 * 1024 * 1024, 0, 4, 0, 0, false),
-        new MemqRequestDecoder(null, null, null, registry));
+        new MemqRequestDecoder(new PacketSwitchingHandler(null, null, null, registry), registry));
     ech.writeInbound(output);
     ech.checkException();
     assertEquals(1, ech.outboundMessages().size());
