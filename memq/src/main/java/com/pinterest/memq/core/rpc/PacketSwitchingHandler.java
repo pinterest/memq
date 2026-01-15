@@ -25,20 +25,24 @@ import javax.ws.rs.RedirectionException;
 
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.MetricRegistry;
+import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.ReadRequestPacket;
 import com.pinterest.memq.commons.protocol.RequestPacket;
 import com.pinterest.memq.commons.protocol.ResponseCodes;
 import com.pinterest.memq.commons.protocol.ResponsePacket;
+import com.pinterest.memq.commons.protocol.TopicAssignment;
 import com.pinterest.memq.commons.protocol.TopicMetadata;
 import com.pinterest.memq.commons.protocol.TopicMetadataRequestPacket;
 import com.pinterest.memq.commons.protocol.TopicMetadataResponsePacket;
+import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
-import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.commons.protocol.Broker.BrokerType;
 import com.pinterest.memq.core.MemqManager;
 import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.processing.TopicProcessor;
 import com.pinterest.memq.core.security.Authorizer;
+
+import java.util.Properties;
 
 import io.netty.channel.ChannelHandlerContext;
 
@@ -88,15 +92,19 @@ public class PacketSwitchingHandler {
     case TOPIC_METADATA:
       TopicMetadataRequestPacket mdRequest = (TopicMetadataRequestPacket) requestPacket
           .getPayload();
-      TopicMetadata md = governor.getTopicMetadataMap().get(mdRequest.getTopic());
+      TopicMetadata md = null;
+      if (!assignmentsEnabled()) {
+        md = buildMetadataForAllBrokers(mdRequest.getTopic());
+      } else {
+        md = governor.getTopicMetadataMap().get(mdRequest.getTopic());
+      }
       if (md == null) {
         throw TOPIC_NOT_FOUND;
-      } else {
-        ResponsePacket msg = new ResponsePacket(requestPacket.getProtocolVersion(),
-            requestPacket.getClientRequestId(), requestPacket.getRequestType(), ResponseCodes.OK,
-            new TopicMetadataResponsePacket(md));
-        ctx.writeAndFlush(msg);
       }
+      ResponsePacket msg = new ResponsePacket(requestPacket.getProtocolVersion(),
+          requestPacket.getClientRequestId(), requestPacket.getRequestType(), ResponseCodes.OK,
+          new TopicMetadataResponsePacket(md));
+      ctx.writeAndFlush(msg);
       break;
     case READ:
       ReadRequestPacket readPacket = (ReadRequestPacket) requestPacket.getPayload();
@@ -144,6 +152,34 @@ public class PacketSwitchingHandler {
       throw SERVER_NOT_INITIALIZED;
     }
     TopicProcessor topicProcessor = mgr.getProcessorMap().get(writePacket.getTopicName());
+    if (!assignmentsEnabled()) {
+      if (topicProcessor == null) {
+        try {
+          TopicAssignment assignment = mgr.getTopicAssignment(writePacket.getTopicName());
+          if (assignment == null) {
+            TopicConfig topicConfig = governor.getTopicConfig(writePacket.getTopicName());
+            if (topicConfig != null) {
+              assignment = new TopicAssignment(topicConfig, -1);
+              mgr.createTopicProcessor(assignment);
+            }
+          }
+          if (assignment == null) {
+            throw new NotFoundException("Topic not found:" + writePacket.getTopicName());
+          }
+          topicProcessor = mgr.getOrCreateTopicProcessor(writePacket.getTopicName());
+        } catch (NotFoundException e) {
+          logger.severe("Topic not found:" + writePacket.getTopicName());
+          throw TOPIC_NOT_FOUND;
+        } catch (Exception e) {
+          throw new InternalServerErrorException(e);
+        }
+      }
+      writeRquestCounter.inc();
+      mgr.touchTopic(writePacket.getTopicName());
+      topicProcessor.registerChannel(ctx.channel());
+      topicProcessor.write(requestPacket, writePacket, ctx);
+      return;
+    }
     if (topicProcessor != null) {
       writeRquestCounter.inc();
       topicProcessor.registerChannel(ctx.channel());
@@ -167,5 +203,43 @@ public class PacketSwitchingHandler {
       readRequestCounter.inc();
       topicProcessor.read(requestPacket, readPacket, ctx);
     }
+  }
+
+  private boolean assignmentsEnabled() {
+    return mgr.getConfiguration().getClusteringConfig() == null
+        || mgr.getConfiguration().getClusteringConfig().isEnableAssignments();
+  }
+
+  private TopicMetadata buildMetadataForAllBrokers(String topic) throws Exception {
+    TopicMetadata md;
+    TopicAssignment assignment = mgr.getTopicAssignment(topic);
+    if (assignment != null) {
+      md = new TopicMetadata(topic,
+          assignment.getStorageHandlerName(),
+          assignment.getStorageHandlerConfig());
+    } else {
+      TopicConfig topicConfig = governor.getTopicConfig(topic);
+      if (topicConfig != null) {
+        md = new TopicMetadata(topicConfig);
+      } else {
+      // When assignments are disabled, allow metadata for topics not yet known locally.
+      // Storage handler info will be empty; clients can still discover brokers.
+        md = new TopicMetadata(topic, null, new Properties());
+      }
+    }
+    for (Broker broker : governor.getAllBrokers()) {
+      switch (broker.getBrokerType()) {
+      case READ:
+        md.getReadBrokers().add(broker);
+        break;
+      case WRITE:
+        md.getWriteBrokers().add(broker);
+        break;
+      default:
+        md.getReadBrokers().add(broker);
+        md.getWriteBrokers().add(broker);
+      }
+    }
+    return md;
   }
 }

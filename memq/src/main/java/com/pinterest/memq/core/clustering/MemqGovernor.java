@@ -16,6 +16,7 @@
 package com.pinterest.memq.core.clustering;
 
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -125,18 +126,22 @@ public class MemqGovernor {
       }
     });
 
-    if (clusteringConfig.isEnableBalancer()) {
-      Balancer balancer = new Balancer(config, this, client, leaderSelector);
-      Thread thBalancer = new Thread(balancer);
-      thBalancer.setName("BalancerThread");
-      thBalancer.setDaemon(true);
-      thBalancer.start();
-    }
+    if (clusteringConfig.isEnableAssignments()) {
+      if (clusteringConfig.isEnableBalancer()) {
+        Balancer balancer = new Balancer(config, this, client, leaderSelector);
+        Thread thBalancer = new Thread(balancer);
+        thBalancer.setName("BalancerThread");
+        thBalancer.setDaemon(true);
+        thBalancer.start();
+      }
 
-    Thread th = new Thread(new MetadataPoller(client, topicMetadataMap));
-    th.setName("MetadataPollerThread");
-    th.setDaemon(true);
-    th.start();
+      Thread th = new Thread(new MetadataPoller(client, topicMetadataMap));
+      th.setName("MetadataPollerThread");
+      th.setDaemon(true);
+      th.start();
+    } else {
+      mgr.startIdleTopicCleanup(clusteringConfig.getMaxIdleMs());
+    }
 
     if (clusteringConfig.isEnableLeaderSelector()) {
       leaderSelector.autoRequeue();
@@ -171,7 +176,7 @@ public class MemqGovernor {
     client.create().withMode(CreateMode.EPHEMERAL).forPath(brokerZnodePath,
         GSON.toJson(broker).getBytes());
 
-    if (clusteringConfig.isEnableLocalAssigner()) {
+    if (clusteringConfig.isEnableAssignments() && clusteringConfig.isEnableLocalAssigner()) {
       Thread th = new Thread(new TopicAssignmentWatcher(mgr, brokerZnodePath, broker, client));
       th.setDaemon(true);
       th.setName("TopicAssignmentWatcher");
@@ -181,6 +186,31 @@ public class MemqGovernor {
 
   public Map<String, TopicMetadata> getTopicMetadataMap() {
     return topicMetadataMap;
+  }
+
+  public TopicConfig getTopicConfig(String topic) throws Exception {
+    if (client == null) {
+      return null;
+    }
+    String path = ZNODE_TOPICS_BASE + topic;
+    if (client.checkExists().forPath(path) == null) {
+      return null;
+    }
+    String topicConfig = new String(client.getData().forPath(path));
+    return GSON.fromJson(topicConfig, TopicConfig.class);
+  }
+
+  public Set<Broker> getAllBrokers() throws Exception {
+    Set<Broker> brokers = new HashSet<>();
+    if (client == null) {
+      return brokers;
+    }
+    for (String id : client.getChildren().forPath(ZNODE_BROKERS)) {
+      String brokerInfo = new String(client.getData().forPath(ZNODE_BROKERS_BASE + id));
+      Broker broker = GSON.fromJson(brokerInfo, Broker.class);
+      brokers.add(broker);
+    }
+    return brokers;
   }
 
   public static List<String> convertTopicAssignmentsSetToList(Set<TopicAssignment> topicAssignments) {

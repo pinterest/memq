@@ -24,6 +24,8 @@ public class ClusteringConfig {
   private boolean enableLocalAssigner = true;
   private boolean addBootstrapTopics = true;
   private boolean enableExpiration = true;
+  private boolean enableAssignments = true;
+  private long maxIdleMs = 5 * 60 * 1000; // 5 minutes
 
   public boolean isAddBootstrapTopics() {
     return addBootstrapTopics;
@@ -79,5 +81,21 @@ public class ClusteringConfig {
 
   public void setEnableExpiration(boolean enableExpiration) {
     this.enableExpiration = enableExpiration;
+  }
+
+  public boolean isEnableAssignments() {
+    return enableAssignments;
+  }
+
+  public void setEnableAssignments(boolean enableAssignments) {
+    this.enableAssignments = enableAssignments;
+  }
+
+  public long getMaxIdleMs() {
+    return maxIdleMs;
+  }
+
+  public void setMaxIdleMs(long maxIdleMs) {
+    this.maxIdleMs = maxIdleMs;
   }
 }

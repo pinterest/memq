@@ -16,15 +16,18 @@
 package com.pinterest.memq.core;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.nio.file.Paths;
 import java.util.HashMap;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.Test;
 
 import com.pinterest.memq.commons.protocol.TopicAssignment;
 import com.pinterest.memq.commons.protocol.TopicConfig;
+import com.pinterest.memq.core.config.ClusteringConfig;
 import com.pinterest.memq.core.config.MemqConfig;
 
 public class TestMemqManager {
@@ -65,6 +68,43 @@ public class TestMemqManager {
     mgr.updateTopic(topicAssignment);
     assertEquals(size + 100, mgr.getTopicAssignment().iterator().next().getBatchSizeBytes());
 
+  }
+
+  @Test
+  public void testAssignmentsDisabledLazyCreationAndIdleCleanup() throws Exception {
+    MemqConfig configuration = new MemqConfig();
+    ClusteringConfig clusteringConfig = new ClusteringConfig();
+    clusteringConfig.setEnableAssignments(false);
+    clusteringConfig.setMaxIdleMs(50);
+    configuration.setClusteringConfig(clusteringConfig);
+    File tmpFile = File.createTempFile("testmgrcache", "", Paths.get("/tmp").toFile());
+    tmpFile.deleteOnExit();
+    configuration.setTopicCacheFile(tmpFile.toString());
+    tmpFile.delete();
+    configuration.setTopicConfig(new TopicConfig[] {
+        new TopicConfig("test", "delayeddevnull")
+    });
+
+    MemqManager mgr = new MemqManager(null, configuration, new HashMap<>());
+    mgr.init();
+
+    // No processors should be created on init when assignments are disabled.
+    assertEquals(0, mgr.getProcessorMap().size());
+    assertEquals(1, mgr.getTopicAssignment().size());
+
+    // Create on first use.
+    assertTrue(mgr.getOrCreateTopicProcessor("test") != null);
+    assertEquals(1, mgr.getProcessorMap().size());
+
+    // Touch the topic and start idle cleanup with a short timeout.
+    mgr.touchTopic("test");
+    mgr.startIdleTopicCleanup(25);
+
+    long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(2);
+    while (System.currentTimeMillis() < deadline && mgr.getProcessorMap().size() > 0) {
+      Thread.sleep(20);
+    }
+    assertEquals(0, mgr.getProcessorMap().size());
   }
 
 }

@@ -62,6 +62,7 @@ public class MemqManager implements Managed {
   private static final Gson gson = new Gson();
   private Map<String, TopicProcessor> processorMap = new ConcurrentHashMap<>();
   private Map<String, TopicAssignment> topicMap = new ConcurrentHashMap<>();
+  private Map<String, Long> topicLastAccessMs = new ConcurrentHashMap<>();
   private MemqConfig configuration;
   private ScheduledExecutorService timerService;
   private ScheduledExecutorService cleanupService;
@@ -89,9 +90,11 @@ public class MemqManager implements Managed {
     if (file.exists()) {
       byte[] bytes = Files.readAllBytes(file.toPath());
       TopicAssignment[] topics = gson.fromJson(new String(bytes), TopicAssignment[].class);
-      topicMap = new ConcurrentHashMap<>();
-      for (TopicAssignment topicConfig : topics) {
-        topicMap.put(topicConfig.getTopic(), topicConfig);
+      if (topics != null) {
+        topicMap = new ConcurrentHashMap<>();
+        for (TopicAssignment topicConfig : topics) {
+          topicMap.put(topicConfig.getTopic(), topicConfig);
+        }
       }
     }
     if (configuration.getTopicConfig() != null) {
@@ -99,8 +102,12 @@ public class MemqManager implements Managed {
         topicMap.put(topicConfig.getTopic(), new TopicAssignment(topicConfig, -1));
       }
     }
-    for (Entry<String, TopicAssignment> entry : topicMap.entrySet()) {
-      createTopicProcessor(entry.getValue());
+    boolean assignmentsEnabled = configuration.getClusteringConfig() == null
+        || configuration.getClusteringConfig().isEnableAssignments();
+    if (assignmentsEnabled) {
+      for (Entry<String, TopicAssignment> entry : topicMap.entrySet()) {
+        createTopicProcessor(entry.getValue());
+      }
     }
   }
 
@@ -148,6 +155,7 @@ public class MemqManager implements Managed {
 
     processorMap.put(topicConfig.getTopic(), tp);
     topicMap.put(topicConfig.getTopic(), topicConfig);
+    topicLastAccessMs.put(topicConfig.getTopic(), System.currentTimeMillis());
     logger.info("Configured and started TopicProcessor for:" + topicConfig.getTopic());
   }
 
@@ -183,6 +191,7 @@ public class MemqManager implements Managed {
       }
       processorMap.remove(topic);
       topicMap.remove(topic);
+      topicLastAccessMs.remove(topic);
     });
   }
 
@@ -209,6 +218,47 @@ public class MemqManager implements Managed {
 
   public Map<String, MetricRegistry> getRegistry() {
     return metricsRegistryMap;
+  }
+
+  public TopicAssignment getTopicAssignment(String topic) {
+    return topicMap.get(topic);
+  }
+
+  public TopicProcessor getOrCreateTopicProcessor(String topic) throws Exception {
+    TopicProcessor topicProcessor = processorMap.get(topic);
+    if (topicProcessor != null) {
+      return topicProcessor;
+    }
+    TopicAssignment assignment = topicMap.get(topic);
+    if (assignment == null) {
+      throw new NotFoundException("Topic not found:" + topic);
+    }
+    createTopicProcessor(assignment);
+    return processorMap.get(topic);
+  }
+
+  public void touchTopic(String topic) {
+    topicLastAccessMs.put(topic, System.currentTimeMillis());
+  }
+
+  public void startIdleTopicCleanup(long maxIdleMs) {
+    if (maxIdleMs <= 0) {
+      return;
+    }
+    cleanupService.scheduleAtFixedRate(() -> {
+      long now = System.currentTimeMillis();
+      for (Entry<String, Long> entry : topicLastAccessMs.entrySet()) {
+        String topic = entry.getKey();
+        Long lastAccess = entry.getValue();
+        if (lastAccess == null) {
+          continue;
+        }
+        if (now - lastAccess > maxIdleMs && processorMap.containsKey(topic)) {
+          logger.info("Deleting idle TopicProcessor for topic:" + topic);
+          deleteTopicProcessor(topic);
+        }
+      }
+    }, maxIdleMs, maxIdleMs, TimeUnit.MILLISECONDS);
   }
 
   @Override

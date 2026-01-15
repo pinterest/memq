@@ -19,13 +19,20 @@ import static org.junit.Assert.assertEquals;
 
 import java.io.FileNotFoundException;
 import java.io.FileReader;
+import java.util.HashMap;
+import java.util.Set;
 
 import org.junit.Test;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonIOException;
 import com.google.gson.JsonSyntaxException;
+import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicConfig;
+import com.pinterest.memq.core.MemqManager;
+import com.pinterest.memq.core.config.ClusteringConfig;
+import com.pinterest.memq.core.config.LocalEnvironmentProvider;
+import com.pinterest.memq.core.config.MemqConfig;
 
 public class TestMemqGovernor {
 
@@ -39,6 +46,19 @@ public class TestMemqGovernor {
         TopicConfig.class);
     assertEquals("customs3aync2", oldConf.getStorageHandlerName());
     assertEquals("customs3aync2", newConf.getStorageHandlerName());
+  }
+
+  @Test
+  public void testGetAllBrokersWithNoZkClient() throws Exception {
+    MemqConfig config = new MemqConfig();
+    ClusteringConfig clusteringConfig = new ClusteringConfig();
+    clusteringConfig.setEnableAssignments(false);
+    config.setClusteringConfig(clusteringConfig);
+    MemqManager mgr = new MemqManager(null, config, new HashMap<>());
+    MemqGovernor governor = new MemqGovernor(mgr, config, new LocalEnvironmentProvider());
+
+    Set<Broker> brokers = governor.getAllBrokers();
+    assertEquals(0, brokers.size());
   }
 
 }
