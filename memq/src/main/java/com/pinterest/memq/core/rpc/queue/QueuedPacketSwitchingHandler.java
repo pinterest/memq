@@ -251,11 +251,11 @@ public class QueuedPacketSwitchingHandler extends PacketSwitchingHandler {
   }
 
   private void registerPerTopicMetricsIfNeeded(String topicName) {
-    if (perTopicGaugeRegistered.putIfAbsent(topicName, Boolean.TRUE) != null) {
-      return;
-    }
     MetricRegistry topicRegistry = mgr.getRegistry().get(topicName);
     if (topicRegistry == null) {
+      return;
+    }
+    if (perTopicGaugeRegistered.putIfAbsent(topicName, Boolean.TRUE) != null) {
       return;
     }
     topicRegistry.gauge("queue.pending.bytes",
