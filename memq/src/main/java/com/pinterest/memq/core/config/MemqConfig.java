@@ -74,6 +74,8 @@ public class MemqConfig extends Configuration {
   
   private ClusteringConfig clusteringConfig = null;
   
+  private GossipConfig gossipConfig = null;
+  
   private String topicCacheFile = "/tmp/.memq_topic_cache";
 
   private Map<String, Object> additionalConfigs = new HashMap<>();
@@ -266,6 +268,14 @@ public class MemqConfig extends Configuration {
 
   public void setBrokerType(BrokerType brokerType) {
     this.brokerType = brokerType;
+  }
+
+  public GossipConfig getGossipConfig() {
+    return gossipConfig;
+  }
+
+  public void setGossipConfig(GossipConfig gossipConfig) {
+    this.gossipConfig = gossipConfig;
   }
 
   public Map<String, Object> getAdditionalConfigs() {

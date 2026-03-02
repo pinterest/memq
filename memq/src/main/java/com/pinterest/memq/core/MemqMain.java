@@ -35,7 +35,9 @@ import com.pinterest.memq.commons.mon.OpenTSDBClient;
 import com.pinterest.memq.commons.mon.OpenTSDBReporter;
 import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.config.EnvironmentProvider;
+import com.pinterest.memq.core.config.GossipConfig;
 import com.pinterest.memq.core.config.MemqConfig;
+import com.pinterest.memq.core.gossip.GossipServer;
 import com.pinterest.memq.core.mon.MemqMgrHealthCheck;
 import com.pinterest.memq.core.mon.MonitorEndpoint;
 import com.pinterest.memq.core.rpc.MemqNettyServer;
@@ -77,18 +79,25 @@ public class MemqMain extends Application<MemqConfig> {
     MemqGovernor memqGovernor = initializeGovernor(configuration, memqManager);
     MemqNettyServer nettyServer = initializeNettyServer(configuration, memqManager, memqGovernor,
         metricsRegistryMap, client);
+
+    GossipServer gossipServer = initializeGossipServer(configuration, memqGovernor,
+        metricsRegistryMap);
     logger.info("Memq started");
 
-    initializeShutdownHooks(memqManager, memqGovernor, nettyServer);
+    initializeShutdownHooks(memqManager, memqGovernor, nettyServer, gossipServer);
     initializeAdditionalModules(configuration, environment, memqManager, memqGovernor);
   }
 
   private void initializeShutdownHooks(MemqManager memqManager,
                                        MemqGovernor memqGovernor,
-                                       MemqNettyServer nettyServer) {
+                                       MemqNettyServer nettyServer,
+                                       GossipServer gossipServer) {
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
       public void run() {
+        if (gossipServer != null) {
+          gossipServer.stop();
+        }
         nettyServer.stop();
         memqGovernor.stop();
         try {
@@ -133,6 +142,24 @@ public class MemqMain extends Application<MemqConfig> {
         metricsRegistryMap, client);
     server.initialize();
     return server;
+  }
+
+  private GossipServer initializeGossipServer(MemqConfig configuration,
+                                                MemqGovernor memqGovernor,
+                                                Map<String, MetricRegistry> metricsRegistryMap) throws Exception {
+    GossipConfig gossipConfig = configuration.getGossipConfig();
+    if (gossipConfig != null && gossipConfig.isEnabled()) {
+      EnvironmentProvider provider = Class.forName(configuration.getEnvironmentProvider())
+          .asSubclass(EnvironmentProvider.class).newInstance();
+      MetricRegistry gossipRegistry = metricsRegistryMap.computeIfAbsent("_gossip",
+          k -> new MetricRegistry());
+      GossipServer gossipServer = new GossipServer(provider.getIP(), provider.getRack(),
+          gossipConfig, memqGovernor, gossipRegistry);
+      gossipServer.start();
+      logger.info("Gossip server started on port " + gossipConfig.getPort());
+      return gossipServer;
+    }
+    return null;
   }
 
   public void initializeAdditionalModules(MemqConfig config, Environment environment, MemqManager memqManager, MemqGovernor memqGovernor) throws Exception {
