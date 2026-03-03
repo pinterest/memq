@@ -49,6 +49,7 @@ import com.pinterest.memq.commons.storage.StorageHandler;
 import com.pinterest.memq.commons.storage.StorageHandlerTable;
 import com.pinterest.memq.core.config.MemqConfig;
 import com.pinterest.memq.core.processing.TopicProcessor;
+import com.pinterest.memq.core.slot.SlotManager;
 import com.pinterest.memq.core.processing.TopicProcessorState;
 import com.pinterest.memq.core.processing.bucketing.BucketingTopicProcessor;
 import com.pinterest.memq.core.utils.DaemonThreadFactory;
@@ -69,6 +70,7 @@ public class MemqManager implements Managed {
   private AtomicBoolean disabled;
   private String topicCacheFile;
   private OpenTSDBClient client;
+  private SlotManager slotManager;
 
   public MemqManager(OpenTSDBClient client,
                      MemqConfig configuration,
@@ -209,6 +211,14 @@ public class MemqManager implements Managed {
 
   public Map<String, MetricRegistry> getRegistry() {
     return metricsRegistryMap;
+  }
+
+  public SlotManager getSlotManager() {
+    return slotManager;
+  }
+
+  public void setSlotManager(SlotManager slotManager) {
+    this.slotManager = slotManager;
   }
 
   @Override

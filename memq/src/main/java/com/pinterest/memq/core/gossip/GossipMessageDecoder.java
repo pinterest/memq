@@ -38,8 +38,8 @@ public class GossipMessageDecoder extends SimpleChannelInboundHandler<DatagramPa
   public GossipMessageDecoder(ConcurrentHashMap<String, GossipState> peerStates,
                               MetricRegistry registry) {
     this.peerStates = peerStates;
-    this.receivedCounter = registry.counter("gossip.message.received");
-    this.latencyHistogram = registry.histogram("gossip.message.latency");
+    this.receivedCounter = registry.counter("message.received");
+    this.latencyHistogram = registry.histogram("message.latency");
   }
 
   @Override
@@ -51,6 +51,7 @@ public class GossipMessageDecoder extends SimpleChannelInboundHandler<DatagramPa
       peerStates.put(msg.getBrokerId(), state);
       receivedCounter.inc();
       latencyHistogram.update(now - msg.getSendTimestampMs());
+      logger.info("Received gossip message: " + msg);
     } catch (Exception e) {
       logger.log(Level.WARNING, "Failed to decode gossip datagram", e);
     }

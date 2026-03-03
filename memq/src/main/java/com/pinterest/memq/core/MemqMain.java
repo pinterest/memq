@@ -37,7 +37,9 @@ import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.config.EnvironmentProvider;
 import com.pinterest.memq.core.config.GossipConfig;
 import com.pinterest.memq.core.config.MemqConfig;
+import com.pinterest.memq.core.config.SlotAccountingConfig;
 import com.pinterest.memq.core.gossip.GossipServer;
+import com.pinterest.memq.core.slot.SlotManager;
 import com.pinterest.memq.core.mon.MemqMgrHealthCheck;
 import com.pinterest.memq.core.mon.MonitorEndpoint;
 import com.pinterest.memq.core.rpc.MemqNettyServer;
@@ -76,25 +78,32 @@ public class MemqMain extends Application<MemqConfig> {
 
     environment.healthChecks().register("base", new MemqMgrHealthCheck(memqManager));
 
+    SlotManager slotManager = initializeSlotManager(configuration, memqManager, metricsRegistryMap,
+        client);
+
     MemqGovernor memqGovernor = initializeGovernor(configuration, memqManager);
     MemqNettyServer nettyServer = initializeNettyServer(configuration, memqManager, memqGovernor,
         metricsRegistryMap, client);
 
     GossipServer gossipServer = initializeGossipServer(configuration, memqGovernor,
-        metricsRegistryMap, client);
+        metricsRegistryMap, client, slotManager);
     logger.info("Memq started");
 
-    initializeShutdownHooks(memqManager, memqGovernor, nettyServer, gossipServer);
+    initializeShutdownHooks(memqManager, memqGovernor, nettyServer, gossipServer, slotManager);
     initializeAdditionalModules(configuration, environment, memqManager, memqGovernor);
   }
 
   private void initializeShutdownHooks(MemqManager memqManager,
                                        MemqGovernor memqGovernor,
                                        MemqNettyServer nettyServer,
-                                       GossipServer gossipServer) {
+                                       GossipServer gossipServer,
+                                       SlotManager slotManager) {
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
       public void run() {
+        if (slotManager != null) {
+          slotManager.stop();
+        }
         if (gossipServer != null) {
           gossipServer.stop();
         }
@@ -147,7 +156,8 @@ public class MemqMain extends Application<MemqConfig> {
   private GossipServer initializeGossipServer(MemqConfig configuration,
                                                 MemqGovernor memqGovernor,
                                                 Map<String, MetricRegistry> metricsRegistryMap,
-                                                OpenTSDBClient client) throws Exception {
+                                                OpenTSDBClient client,
+                                                SlotManager slotManager) throws Exception {
     GossipConfig gossipConfig = configuration.getGossipConfig();
     if (gossipConfig != null && gossipConfig.isEnabled()) {
       EnvironmentProvider provider = Class.forName(configuration.getEnvironmentProvider())
@@ -155,7 +165,7 @@ public class MemqMain extends Application<MemqConfig> {
       MetricRegistry gossipRegistry = new MetricRegistry();
       metricsRegistryMap.put("gossip", gossipRegistry);
       GossipServer gossipServer = new GossipServer(provider.getIP(), provider.getRack(),
-          gossipConfig, memqGovernor, gossipRegistry);
+          gossipConfig, memqGovernor, gossipRegistry, slotManager);
       gossipServer.start();
 
       if (client != null) {
@@ -173,6 +183,54 @@ public class MemqMain extends Application<MemqConfig> {
       return gossipServer;
     }
     return null;
+  }
+
+  private SlotManager initializeSlotManager(MemqConfig configuration,
+                                              MemqManager memqManager,
+                                              Map<String, MetricRegistry> metricsRegistryMap,
+                                              OpenTSDBClient client) throws Exception {
+    SlotAccountingConfig slotConfig = configuration.getSlotAccountingConfig();
+    if (slotConfig == null || !slotConfig.isEnabled()) {
+      return null;
+    }
+
+    int maxTrafficMbps = configuration.getNettyServerConfig().getMaxBrokerInputTrafficMbPerSec();
+    if (maxTrafficMbps <= 0) {
+      logger.warning("Slot accounting enabled but maxBrokerInputTrafficMbPerSec is not set;"
+          + " disabling slot accounting");
+      return null;
+    }
+
+    double effectiveCapacity = maxTrafficMbps * (1 - slotConfig.getSlotOverhead());
+    int totalSlots = (int) Math.ceil(effectiveCapacity / slotConfig.getSlotSizeMbps());
+
+    MetricRegistry slotRegistry = new MetricRegistry();
+
+    SlotManager slotManager = new SlotManager(slotConfig, totalSlots, slotRegistry);
+    memqManager.setSlotManager(slotManager);
+    slotManager.start();
+    metricsRegistryMap.put("slot", slotRegistry);
+    slotRegistry.gauge("total", () -> (Gauge<Integer>) slotManager::getTotalSlots);
+    slotRegistry.gauge("occupied", () -> (Gauge<Integer>) slotManager::getOccupiedSlots);
+    slotRegistry.gauge("free", () -> (Gauge<Integer>) slotManager::getFreeSlots);
+    slotRegistry.gauge("frozen",
+        () -> (Gauge<Integer>) () -> slotManager.isFrozen() ? 1 : 0);
+    slotRegistry.gauge("producers", () -> (Gauge<Integer>) slotManager::getProducerCount);
+
+    if (client != null) {
+      String localHostname = MiscUtils.getHostname();
+      for (String metricName : slotRegistry.getNames()) {
+        ScheduledReporter reporter = OpenTSDBReporter.createReporter("slot", slotRegistry,
+            metricName, (String name, Metric metric) -> true, TimeUnit.SECONDS, TimeUnit.SECONDS,
+            client, localHostname);
+        reporter.start(configuration.getOpenTsdbConfig().getFrequencyInSeconds(), TimeUnit.SECONDS);
+      }
+    }
+
+    logger.info("Slot accounting started: totalSlots=" + totalSlots
+        + " slotSizeMbps=" + slotConfig.getSlotSizeMbps()
+        + " effectiveCapacityMbps=" + effectiveCapacity);
+    return slotManager;
   }
 
   public void initializeAdditionalModules(MemqConfig config, Environment environment, MemqManager memqManager, MemqGovernor memqGovernor) throws Exception {

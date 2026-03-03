@@ -20,6 +20,7 @@ import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.config.GossipConfig;
+import com.pinterest.memq.core.slot.SlotManager;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
@@ -50,6 +51,7 @@ public class GossipServer {
   private final MemqGovernor governor;
   private final MetricRegistry registry;
   private final Counter sentCounter;
+  private final SlotManager slotManager;
   private final ConcurrentHashMap<String, GossipState> peerStates = new ConcurrentHashMap<>();
 
   private NioEventLoopGroup group;
@@ -57,17 +59,23 @@ public class GossipServer {
   private ScheduledExecutorService senderExecutor;
 
   public GossipServer(String brokerId, String rack, GossipConfig config, MemqGovernor governor) {
-    this(brokerId, rack, config, governor, new MetricRegistry());
+    this(brokerId, rack, config, governor, new MetricRegistry(), null);
   }
 
   public GossipServer(String brokerId, String rack, GossipConfig config, MemqGovernor governor,
                       MetricRegistry registry) {
+    this(brokerId, rack, config, governor, registry, null);
+  }
+
+  public GossipServer(String brokerId, String rack, GossipConfig config, MemqGovernor governor,
+                      MetricRegistry registry, SlotManager slotManager) {
     this.brokerId = brokerId;
     this.rack = rack;
     this.config = config;
     this.governor = governor;
     this.registry = registry;
-    this.sentCounter = registry.counter("gossip.message.sent");
+    this.sentCounter = registry.counter("message.sent");
+    this.slotManager = slotManager;
   }
 
   public void start() throws InterruptedException {
@@ -101,7 +109,9 @@ public class GossipServer {
 
   private void broadcastGossip() {
     try {
-      GossipMessage msg = new GossipMessage(brokerId, 0, false, System.currentTimeMillis());
+      int freeSlots = slotManager != null ? slotManager.getFreeSlots() : 0;
+      boolean freeze = slotManager != null && slotManager.isFrozen();
+      GossipMessage msg = new GossipMessage(brokerId, freeSlots, freeze, System.currentTimeMillis());
       Set<Broker> brokers = governor.getAllBrokersInRack(rack);
       for (Broker broker : brokers) {
         if (brokerId.equals(broker.getBrokerIP())) {

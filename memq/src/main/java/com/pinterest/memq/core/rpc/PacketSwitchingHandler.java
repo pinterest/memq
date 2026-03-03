@@ -41,6 +41,9 @@ import com.pinterest.memq.core.MemqManager;
 import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.processing.TopicProcessor;
 import com.pinterest.memq.core.security.Authorizer;
+import com.pinterest.memq.core.slot.SlotManager;
+
+import java.net.InetSocketAddress;
 
 import io.netty.channel.ChannelHandlerContext;
 
@@ -156,6 +159,11 @@ public class PacketSwitchingHandler {
     TopicProcessor topicProcessor = mgr.getProcessorMap().get(writePacket.getTopicName());
     if (topicProcessor != null) {
       writeRquestCounter.inc();
+      SlotManager sm = mgr.getSlotManager();
+      if (sm != null) {
+        InetSocketAddress remote = (InetSocketAddress) ctx.channel().remoteAddress();
+        sm.recordWrite(remote.getAddress().getHostAddress(), writePacket.getDataLength());
+      }
       topicProcessor.registerChannel(ctx.channel());
       topicProcessor.write(requestPacket, writePacket, ctx);
     } else if (governor.getTopicMetadataMap().containsKey(writePacket.getTopicName())) {

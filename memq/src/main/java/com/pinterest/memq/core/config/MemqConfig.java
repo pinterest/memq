@@ -76,6 +76,8 @@ public class MemqConfig extends Configuration {
   
   private GossipConfig gossipConfig = null;
   
+  private SlotAccountingConfig slotAccountingConfig = null;
+  
   private String topicCacheFile = "/tmp/.memq_topic_cache";
 
   private Map<String, Object> additionalConfigs = new HashMap<>();
@@ -276,6 +278,14 @@ public class MemqConfig extends Configuration {
 
   public void setGossipConfig(GossipConfig gossipConfig) {
     this.gossipConfig = gossipConfig;
+  }
+
+  public SlotAccountingConfig getSlotAccountingConfig() {
+    return slotAccountingConfig;
+  }
+
+  public void setSlotAccountingConfig(SlotAccountingConfig slotAccountingConfig) {
+    this.slotAccountingConfig = slotAccountingConfig;
   }
 
   public Map<String, Object> getAdditionalConfigs() {
