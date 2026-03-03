@@ -81,7 +81,7 @@ public class MemqMain extends Application<MemqConfig> {
         metricsRegistryMap, client);
 
     GossipServer gossipServer = initializeGossipServer(configuration, memqGovernor,
-        metricsRegistryMap);
+        metricsRegistryMap, client);
     logger.info("Memq started");
 
     initializeShutdownHooks(memqManager, memqGovernor, nettyServer, gossipServer);
@@ -146,16 +146,29 @@ public class MemqMain extends Application<MemqConfig> {
 
   private GossipServer initializeGossipServer(MemqConfig configuration,
                                                 MemqGovernor memqGovernor,
-                                                Map<String, MetricRegistry> metricsRegistryMap) throws Exception {
+                                                Map<String, MetricRegistry> metricsRegistryMap,
+                                                OpenTSDBClient client) throws Exception {
     GossipConfig gossipConfig = configuration.getGossipConfig();
     if (gossipConfig != null && gossipConfig.isEnabled()) {
       EnvironmentProvider provider = Class.forName(configuration.getEnvironmentProvider())
           .asSubclass(EnvironmentProvider.class).newInstance();
-      MetricRegistry gossipRegistry = metricsRegistryMap.computeIfAbsent("_gossip",
-          k -> new MetricRegistry());
+      MetricRegistry gossipRegistry = new MetricRegistry();
+      metricsRegistryMap.put("gossip", gossipRegistry);
       GossipServer gossipServer = new GossipServer(provider.getIP(), provider.getRack(),
           gossipConfig, memqGovernor, gossipRegistry);
       gossipServer.start();
+
+      if (client != null) {
+        String localHostname = MiscUtils.getHostname();
+        for (String metricName : gossipRegistry.getNames()) {
+          ScheduledReporter reporter = OpenTSDBReporter.createReporter("gossip", gossipRegistry,
+              metricName, (String name, Metric metric) -> true, TimeUnit.SECONDS, TimeUnit.SECONDS,
+              client, localHostname);
+          reporter.start(configuration.getOpenTsdbConfig().getFrequencyInSeconds(),
+              TimeUnit.SECONDS);
+        }
+      }
+
       logger.info("Gossip server started on port " + gossipConfig.getPort());
       return gossipServer;
     }
