@@ -50,7 +50,8 @@ public class SlotManager {
   private final long tickIntervalMs;
   private final long idleProducerTimeoutMs;
 
-  private final ConcurrentHashMap<String, ProducerSlotState> producers = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, ConcurrentHashMap<String, ProducerSlotState>> producers =
+      new ConcurrentHashMap<>();
   private final AtomicInteger totalOccupiedSlots = new AtomicInteger(0);
   private volatile long lastSlotChangeTimeMs = 0;
 
@@ -85,10 +86,12 @@ public class SlotManager {
 
   /**
    * Hot path -- called on every write request.
-   * Non-blocking: LongAdder.add + volatile write.
+   * Zero-allocation on steady state: two ConcurrentHashMap.get() calls using the caller's strings.
    */
-  public void recordWrite(String producerId, int bytes) {
-    ProducerSlotState state = producers.computeIfAbsent(producerId, k -> new ProducerSlotState());
+  public void recordWrite(String producerId, String topicName, int bytes) {
+    ConcurrentHashMap<String, ProducerSlotState> topicMap =
+        producers.computeIfAbsent(producerId, k -> new ConcurrentHashMap<>());
+    ProducerSlotState state = topicMap.computeIfAbsent(topicName, k -> new ProducerSlotState());
     state.bytesAccumulator.add(bytes);
     state.lastWriteMs = System.currentTimeMillis();
   }
@@ -119,59 +122,72 @@ public class SlotManager {
     try {
       long now = System.currentTimeMillis();
 
-      Iterator<Map.Entry<String, ProducerSlotState>> it = producers.entrySet().iterator();
-      while (it.hasNext()) {
-        Map.Entry<String, ProducerSlotState> entry = it.next();
-        String pid = entry.getKey();
-        ProducerSlotState state = entry.getValue();
+      Iterator<Map.Entry<String, ConcurrentHashMap<String, ProducerSlotState>>> outerIt =
+          producers.entrySet().iterator();
+      while (outerIt.hasNext()) {
+        Map.Entry<String, ConcurrentHashMap<String, ProducerSlotState>> outerEntry = outerIt.next();
+        String pid = outerEntry.getKey();
+        ConcurrentHashMap<String, ProducerSlotState> topicMap = outerEntry.getValue();
 
-        long bytes = state.bytesAccumulator.sumThenReset();
-        double instantRateMbps = bytes / (tickIntervalSec * BYTES_PER_MB);
+        Iterator<Map.Entry<String, ProducerSlotState>> innerIt = topicMap.entrySet().iterator();
+        while (innerIt.hasNext()) {
+          Map.Entry<String, ProducerSlotState> innerEntry = innerIt.next();
+          String topic = innerEntry.getKey();
+          ProducerSlotState state = innerEntry.getValue();
+          String label = pid + "/" + topic;
 
-        state.emaRateMbps = emaDecay * state.emaRateMbps + (1 - emaDecay) * instantRateMbps;
+          long bytes = state.bytesAccumulator.sumThenReset();
+          double instantRateMbps = bytes / (tickIntervalSec * BYTES_PER_MB);
 
-        registerProducerMetrics(pid, state);
+          state.emaRateMbps = emaDecay * state.emaRateMbps + (1 - emaDecay) * instantRateMbps;
 
-        int expectedSlots = (int) ceil(state.emaRateMbps / slotSizeMbps);
-        int currentSlots = state.currentSlots;
+          registerProducerMetrics(pid, topic);
 
-        if (expectedSlots > currentSlots) {
-          state.belowSinceMs = 0;
-          if (state.exceedsSinceMs == 0) {
-            state.exceedsSinceMs = now;
-          }
-          double exceedsDuration = now - state.exceedsSinceMs;
-          if (exceedsDuration >= acquireThresholdMs) {
-            int slotsToAcquire = expectedSlots - currentSlots;
-            if (tryAcquireSlots(pid, state, slotsToAcquire, now)) {
-              state.exceedsSinceMs = 0;
+          int expectedSlots = (int) ceil(state.emaRateMbps / slotSizeMbps);
+          int currentSlots = state.currentSlots;
+
+          if (expectedSlots > currentSlots) {
+            state.belowSinceMs = 0;
+            if (state.exceedsSinceMs == 0) {
+              state.exceedsSinceMs = now;
             }
-          }
-        } else if (expectedSlots < currentSlots) {
-          state.exceedsSinceMs = 0;
-          if (state.belowSinceMs == 0) {
-            state.belowSinceMs = now;
-          }
-          double belowDuration = now - state.belowSinceMs;
-          if (belowDuration >= releaseThresholdMs) {
-            int slotsToRelease = currentSlots - expectedSlots;
-            releaseSlots(pid, state, slotsToRelease, now);
+            double exceedsDuration = now - state.exceedsSinceMs;
+            if (exceedsDuration >= acquireThresholdMs) {
+              int slotsToAcquire = expectedSlots - currentSlots;
+              if (tryAcquireSlots(label, state, slotsToAcquire, now)) {
+                state.exceedsSinceMs = 0;
+              }
+            }
+          } else if (expectedSlots < currentSlots) {
+            state.exceedsSinceMs = 0;
+            if (state.belowSinceMs == 0) {
+              state.belowSinceMs = now;
+            }
+            double belowDuration = now - state.belowSinceMs;
+            if (belowDuration >= releaseThresholdMs) {
+              int slotsToRelease = currentSlots - expectedSlots;
+              releaseSlots(label, state, slotsToRelease, now);
+              state.belowSinceMs = 0;
+            }
+          } else {
+            state.exceedsSinceMs = 0;
             state.belowSinceMs = 0;
           }
-        } else {
-          state.exceedsSinceMs = 0;
-          state.belowSinceMs = 0;
+
+          if (now - state.lastWriteMs > idleProducerTimeoutMs) {
+            if (state.currentSlots > 0) {
+              totalOccupiedSlots.addAndGet(-state.currentSlots);
+              lastSlotChangeTimeMs = now;
+              logger.info("Released " + state.currentSlots + " slot(s) from idle producer: " + label);
+            }
+            innerIt.remove();
+            deregisterProducerMetrics(pid, topic);
+            logger.fine("Removed idle producer: " + label);
+          }
         }
 
-        if (now - state.lastWriteMs > idleProducerTimeoutMs) {
-          if (state.currentSlots > 0) {
-            totalOccupiedSlots.addAndGet(-state.currentSlots);
-            lastSlotChangeTimeMs = now;
-            logger.info("Released " + state.currentSlots + " slot(s) from idle producer: " + pid);
-          }
-          it.remove();
-          deregisterProducerMetrics(pid);
-          logger.fine("Removed idle producer: " + pid);
+        if (topicMap.isEmpty()) {
+          outerIt.remove();
         }
       }
     } catch (Exception e) {
@@ -228,50 +244,70 @@ public class SlotManager {
   }
 
   public int getProducerCount() {
-    return producers.size();
+    int count = 0;
+    for (ConcurrentHashMap<String, ProducerSlotState> topicMap : producers.values()) {
+      count += topicMap.size();
+    }
+    return count;
   }
 
-  public int getProducerSlots(String producerId) {
-    ProducerSlotState state = producers.get(producerId);
+  public int getProducerSlots(String producerId, String topicName) {
+    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(producerId);
+    if (topicMap == null) {
+      return 0;
+    }
+    ProducerSlotState state = topicMap.get(topicName);
     return state != null ? state.currentSlots : 0;
   }
 
-  public double getProducerEmaRate(String producerId) {
-    ProducerSlotState state = producers.get(producerId);
+  public double getProducerEmaRate(String producerId, String topicName) {
+    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(producerId);
+    if (topicMap == null) {
+      return 0.0;
+    }
+    ProducerSlotState state = topicMap.get(topicName);
     return state != null ? state.emaRateMbps : 0.0;
   }
 
-  static String sanitizeProducerId(String producerId) {
-    return producerId.replace('.', '_').replace(':', '_');
+  static String sanitize(String value) {
+    return value.replace('.', '_').replace(':', '_');
   }
 
-  private void registerProducerMetrics(String pid, ProducerSlotState state) {
+  static String metricSuffix(String pid, String topic) {
+    return sanitize(pid) + "." + sanitize(topic);
+  }
+
+  private void registerProducerMetrics(String pid, String topic) {
     if (registry == null) {
       return;
     }
-    String sanitized = sanitizeProducerId(pid);
-    String emaKey = "producer.ema." + sanitized;
+    String suffix = metricSuffix(pid, topic);
+    String emaKey = "producer.ema." + suffix;
     if (registeredProducerMetrics.add(emaKey)) {
       registry.gauge(emaKey, () -> (Gauge<Double>) () -> {
-        ProducerSlotState s = producers.get(pid);
+        ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
+        if (topicMap == null) return 0.0;
+        ProducerSlotState s = topicMap.get(topic);
         return s != null ? s.emaRateMbps : 0.0;
       });
-      String slotsKey = "producer.slots." + sanitized;
+      String slotsKey = "producer.slots." + suffix;
       registeredProducerMetrics.add(slotsKey);
       registry.gauge(slotsKey, () -> (Gauge<Integer>) () -> {
-        ProducerSlotState s = producers.get(pid);
+        ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
+        if (topicMap == null) return 0;
+        ProducerSlotState s = topicMap.get(topic);
         return s != null ? s.currentSlots : 0;
       });
     }
   }
 
-  private void deregisterProducerMetrics(String pid) {
+  private void deregisterProducerMetrics(String pid, String topic) {
     if (registry == null) {
       return;
     }
-    String sanitized = sanitizeProducerId(pid);
-    String emaKey = "producer.ema." + sanitized;
-    String slotsKey = "producer.slots." + sanitized;
+    String suffix = metricSuffix(pid, topic);
+    String emaKey = "producer.ema." + suffix;
+    String slotsKey = "producer.slots." + suffix;
     registry.remove(emaKey);
     registry.remove(slotsKey);
     registeredProducerMetrics.remove(emaKey);

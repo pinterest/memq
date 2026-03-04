@@ -30,6 +30,7 @@ import com.pinterest.memq.core.config.SlotAccountingConfig;
 public class TestSlotManager {
 
   private static final int MB = 1024 * 1024;
+  private static final String TOPIC = "topicA";
 
   private SlotAccountingConfig fastConfig() {
     SlotAccountingConfig config = new SlotAccountingConfig();
@@ -55,7 +56,7 @@ public class TestSlotManager {
     assertEquals(32, sm.getFreeSlots());
     assertFalse(sm.isFrozen());
     assertEquals(0, sm.getProducerCount());
-    assertEquals(0, sm.getProducerSlots("nonexistent"));
+    assertEquals(0, sm.getProducerSlots("nonexistent", TOPIC));
   }
 
   @Test
@@ -63,9 +64,9 @@ public class TestSlotManager {
     SlotAccountingConfig config = fastConfig();
     SlotManager sm = new SlotManager(config, 32);
 
-    sm.recordWrite("10.0.0.1", 1000);
+    sm.recordWrite("10.0.0.1", TOPIC, 1000);
     assertEquals(1, sm.getProducerCount());
-    sm.recordWrite("10.0.0.2", 2000);
+    sm.recordWrite("10.0.0.2", TOPIC, 2000);
     assertEquals(2, sm.getProducerCount());
   }
 
@@ -76,11 +77,11 @@ public class TestSlotManager {
     SlotManager sm = new SlotManager(config, 32);
 
     // Simulate writing 15 MB in a 1-second tick window (15 MB/s > 1 slot at 10 MB/s)
-    sm.recordWrite("producer-1", 15 * MB);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
 
     sm.tick();
 
-    assertEquals(2, sm.getProducerSlots("producer-1"));
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
     assertEquals(2, sm.getOccupiedSlots());
     assertEquals(30, sm.getFreeSlots());
   }
@@ -92,15 +93,15 @@ public class TestSlotManager {
     SlotManager sm = new SlotManager(config, 32);
 
     // Acquire 2 slots first
-    sm.recordWrite("producer-1", 15 * MB);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
-    assertEquals(2, sm.getProducerSlots("producer-1"));
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
 
     // Now send much less traffic (5 MB/s -> expect 1 slot)
-    sm.recordWrite("producer-1", 5 * MB);
+    sm.recordWrite("producer-1", TOPIC, 5 * MB);
     sm.tick();
 
-    assertEquals(1, sm.getProducerSlots("producer-1"));
+    assertEquals(1, sm.getProducerSlots("producer-1", TOPIC));
     assertEquals(1, sm.getOccupiedSlots());
   }
 
@@ -111,11 +112,11 @@ public class TestSlotManager {
     config.setAcquireThresholdSeconds(5.0);
     SlotManager sm = new SlotManager(config, 32);
 
-    sm.recordWrite("producer-1", 15 * MB);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
 
     // Should NOT have acquired yet -- threshold not reached
-    assertEquals(0, sm.getProducerSlots("producer-1"));
+    assertEquals(0, sm.getProducerSlots("producer-1", TOPIC));
   }
 
   @Test
@@ -126,14 +127,14 @@ public class TestSlotManager {
     SlotManager sm = new SlotManager(config, 32);
 
     // Acquire first (release threshold doesn't affect acquisition here since acquire=0)
-    sm.recordWrite("producer-1", 15 * MB);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
-    assertEquals(2, sm.getProducerSlots("producer-1"));
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
 
     // Drop traffic -- should NOT release immediately
-    sm.recordWrite("producer-1", 5 * MB);
+    sm.recordWrite("producer-1", TOPIC, 5 * MB);
     sm.tick();
-    assertEquals(2, sm.getProducerSlots("producer-1"));
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
   }
 
   @Test
@@ -144,14 +145,14 @@ public class TestSlotManager {
     SlotManager sm = new SlotManager(config, 32);
 
     // First acquisition should work
-    sm.recordWrite("producer-1", 15 * MB);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
-    assertEquals(2, sm.getProducerSlots("producer-1"));
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
 
     // Second producer tries to acquire -- should be blocked by cooldown
-    sm.recordWrite("producer-2", 15 * MB);
+    sm.recordWrite("producer-2", TOPIC, 15 * MB);
     sm.tick();
-    assertEquals(0, sm.getProducerSlots("producer-2"));
+    assertEquals(0, sm.getProducerSlots("producer-2", TOPIC));
   }
 
   @Test
@@ -160,9 +161,9 @@ public class TestSlotManager {
     config.setTickIntervalMs(1000);
     SlotManager sm = new SlotManager(config, 2);
 
-    sm.recordWrite("producer-1", 15 * MB);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
-    assertEquals(2, sm.getProducerSlots("producer-1"));
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
     assertEquals(0, sm.getFreeSlots());
 
     assertTrue("Should be frozen when at capacity", sm.isFrozen());
@@ -177,7 +178,7 @@ public class TestSlotManager {
 
     assertFalse("Should not be frozen initially", sm.isFrozen());
 
-    sm.recordWrite("producer-1", 15 * MB);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
 
     assertTrue("Should be frozen after slot change (cooldown active)", sm.isFrozen());
@@ -190,10 +191,10 @@ public class TestSlotManager {
     SlotManager sm = new SlotManager(config, 3);
 
     // Producer wants 5 slots but only 3 exist
-    sm.recordWrite("producer-1", 45 * MB);
+    sm.recordWrite("producer-1", TOPIC, 45 * MB);
     sm.tick();
 
-    assertTrue(sm.getProducerSlots("producer-1") <= 3);
+    assertTrue(sm.getProducerSlots("producer-1", TOPIC) <= 3);
     assertTrue(sm.getOccupiedSlots() <= 3);
     assertTrue(sm.getFreeSlots() >= 0);
   }
@@ -204,12 +205,12 @@ public class TestSlotManager {
     config.setTickIntervalMs(1000);
     SlotManager sm = new SlotManager(config, 32);
 
-    sm.recordWrite("producer-1", 15 * MB);
-    sm.recordWrite("producer-2", 25 * MB);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.recordWrite("producer-2", TOPIC, 25 * MB);
     sm.tick();
 
-    assertEquals(2, sm.getProducerSlots("producer-1"));
-    assertEquals(3, sm.getProducerSlots("producer-2"));
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
+    assertEquals(3, sm.getProducerSlots("producer-2", TOPIC));
     assertEquals(5, sm.getOccupiedSlots());
     assertEquals(27, sm.getFreeSlots());
   }
@@ -221,7 +222,7 @@ public class TestSlotManager {
     config.setIdleProducerTimeoutMs(200);
     SlotManager sm = new SlotManager(config, 32);
 
-    sm.recordWrite("producer-1", 1000);
+    sm.recordWrite("producer-1", TOPIC, 1000);
     sm.tick();
     assertEquals(1, sm.getProducerCount());
 
@@ -239,9 +240,9 @@ public class TestSlotManager {
     config.setIdleProducerTimeoutMs(200);
     SlotManager sm = new SlotManager(config, 32);
 
-    sm.recordWrite("producer-1", 15 * MB);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
-    assertEquals(2, sm.getProducerSlots("producer-1"));
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
     assertEquals(2, sm.getOccupiedSlots());
 
     // Wait for idle timeout
@@ -263,12 +264,12 @@ public class TestSlotManager {
 
     // Feed a steady 20 MB/s for many ticks so EMA converges
     for (int i = 0; i < 50; i++) {
-      sm.recordWrite("producer-1", 20 * MB);
+      sm.recordWrite("producer-1", TOPIC, 20 * MB);
       sm.tick();
     }
 
     // At 20 MB/s with 10 MB/s slots, expect 2 slots
-    assertEquals(2, sm.getProducerSlots("producer-1"));
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
   }
 
   @Test
@@ -282,12 +283,12 @@ public class TestSlotManager {
 
     // Feed writes across multiple tick windows
     for (int i = 0; i < 5; i++) {
-      sm.recordWrite("producer-1", 15 * MB);
+      sm.recordWrite("producer-1", TOPIC, 15 * MB);
       Thread.sleep(60);
     }
 
     assertTrue("Background tick should have acquired slots",
-        sm.getProducerSlots("producer-1") > 0);
+        sm.getProducerSlots("producer-1", TOPIC) > 0);
 
     sm.stop();
   }
@@ -351,10 +352,10 @@ public class TestSlotManager {
     config.setTickIntervalMs(1000);
     SlotManager sm = new SlotManager(config, 32);
 
-    sm.recordWrite("producer-1", 0);
+    sm.recordWrite("producer-1", TOPIC, 0);
     sm.tick();
 
-    assertEquals(0, sm.getProducerSlots("producer-1"));
+    assertEquals(0, sm.getProducerSlots("producer-1", TOPIC));
     assertEquals(0, sm.getOccupiedSlots());
   }
 
@@ -364,7 +365,7 @@ public class TestSlotManager {
     config.setTickIntervalMs(1000);
     SlotManager sm = new SlotManager(config, 2);
 
-    sm.recordWrite("producer-1", 50 * MB);
+    sm.recordWrite("producer-1", TOPIC, 50 * MB);
     sm.tick();
 
     assertTrue("Free slots should never be negative", sm.getFreeSlots() >= 0);
@@ -377,11 +378,11 @@ public class TestSlotManager {
     MetricRegistry registry = new MetricRegistry();
     SlotManager sm = new SlotManager(config, 32, registry);
 
-    sm.recordWrite("10.0.0.1", 15 * MB);
+    sm.recordWrite("10.0.0.1", TOPIC, 15 * MB);
     sm.tick();
 
-    Gauge<?> emaGauge = registry.getGauges().get("producer.ema.10_0_0_1");
-    Gauge<?> slotsGauge = registry.getGauges().get("producer.slots.10_0_0_1");
+    Gauge<?> emaGauge = registry.getGauges().get("producer.ema.10_0_0_1.topicA");
+    Gauge<?> slotsGauge = registry.getGauges().get("producer.slots.10_0_0_1.topicA");
     assertNotNull("EMA gauge should be registered for producer", emaGauge);
     assertNotNull("Slots gauge should be registered for producer", slotsGauge);
 
@@ -400,18 +401,18 @@ public class TestSlotManager {
     MetricRegistry registry = new MetricRegistry();
     SlotManager sm = new SlotManager(config, 32, registry);
 
-    sm.recordWrite("10.0.0.2", 15 * MB);
+    sm.recordWrite("10.0.0.2", TOPIC, 15 * MB);
     sm.tick();
-    assertNotNull(registry.getGauges().get("producer.ema.10_0_0_2"));
-    assertNotNull(registry.getGauges().get("producer.slots.10_0_0_2"));
+    assertNotNull(registry.getGauges().get("producer.ema.10_0_0_2.topicA"));
+    assertNotNull(registry.getGauges().get("producer.slots.10_0_0_2.topicA"));
 
     Thread.sleep(300);
     sm.tick();
 
     assertNull("EMA gauge should be removed after idle cleanup",
-        registry.getGauges().get("producer.ema.10_0_0_2"));
+        registry.getGauges().get("producer.ema.10_0_0_2.topicA"));
     assertNull("Slots gauge should be removed after idle cleanup",
-        registry.getGauges().get("producer.slots.10_0_0_2"));
+        registry.getGauges().get("producer.slots.10_0_0_2.topicA"));
     assertEquals(0, sm.getProducerCount());
   }
 
@@ -422,17 +423,17 @@ public class TestSlotManager {
     MetricRegistry registry = new MetricRegistry();
     SlotManager sm = new SlotManager(config, 32, registry);
 
-    sm.recordWrite("10.0.0.1", 15 * MB);
-    sm.recordWrite("10.0.0.2", 25 * MB);
+    sm.recordWrite("10.0.0.1", TOPIC, 15 * MB);
+    sm.recordWrite("10.0.0.2", TOPIC, 25 * MB);
     sm.tick();
 
-    assertNotNull(registry.getGauges().get("producer.ema.10_0_0_1"));
-    assertNotNull(registry.getGauges().get("producer.ema.10_0_0_2"));
-    assertNotNull(registry.getGauges().get("producer.slots.10_0_0_1"));
-    assertNotNull(registry.getGauges().get("producer.slots.10_0_0_2"));
+    assertNotNull(registry.getGauges().get("producer.ema.10_0_0_1.topicA"));
+    assertNotNull(registry.getGauges().get("producer.ema.10_0_0_2.topicA"));
+    assertNotNull(registry.getGauges().get("producer.slots.10_0_0_1.topicA"));
+    assertNotNull(registry.getGauges().get("producer.slots.10_0_0_2.topicA"));
 
-    assertEquals(2, ((Number) registry.getGauges().get("producer.slots.10_0_0_1").getValue()).intValue());
-    assertEquals(3, ((Number) registry.getGauges().get("producer.slots.10_0_0_2").getValue()).intValue());
+    assertEquals(2, ((Number) registry.getGauges().get("producer.slots.10_0_0_1.topicA").getValue()).intValue());
+    assertEquals(3, ((Number) registry.getGauges().get("producer.slots.10_0_0_2.topicA").getValue()).intValue());
   }
 
   @Test
@@ -441,12 +442,12 @@ public class TestSlotManager {
     config.setTickIntervalMs(1000);
     SlotManager sm = new SlotManager(config, 32);
 
-    assertEquals(0.0, sm.getProducerEmaRate("nonexistent"), 0.001);
+    assertEquals(0.0, sm.getProducerEmaRate("nonexistent", TOPIC), 0.001);
 
-    sm.recordWrite("producer-1", 20 * MB);
+    sm.recordWrite("producer-1", TOPIC, 20 * MB);
     sm.tick();
 
-    assertTrue("EMA rate should be > 0 after writes", sm.getProducerEmaRate("producer-1") > 0.0);
+    assertTrue("EMA rate should be > 0 after writes", sm.getProducerEmaRate("producer-1", TOPIC) > 0.0);
   }
 
   @Test
@@ -455,16 +456,38 @@ public class TestSlotManager {
     config.setTickIntervalMs(1000);
     SlotManager sm = new SlotManager(config, 32);
 
-    sm.recordWrite("producer-1", 15 * MB);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
 
-    assertEquals(2, sm.getProducerSlots("producer-1"));
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
   }
 
   @Test
-  public void testSanitizeProducerId() {
-    assertEquals("10_0_0_1", SlotManager.sanitizeProducerId("10.0.0.1"));
-    assertEquals("host_8080", SlotManager.sanitizeProducerId("host:8080"));
-    assertEquals("simple", SlotManager.sanitizeProducerId("simple"));
+  public void testSanitize() {
+    assertEquals("10_0_0_1", SlotManager.sanitize("10.0.0.1"));
+    assertEquals("host_8080", SlotManager.sanitize("host:8080"));
+    assertEquals("simple", SlotManager.sanitize("simple"));
+  }
+
+  @Test
+  public void testMetricSuffix() {
+    assertEquals("10_0_0_1.topicA", SlotManager.metricSuffix("10.0.0.1", "topicA"));
+    assertEquals("host.my_topic", SlotManager.metricSuffix("host", "my_topic"));
+  }
+
+  @Test
+  public void testSameProducerDifferentTopicsIndependent() {
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    SlotManager sm = new SlotManager(config, 32);
+
+    sm.recordWrite("10.0.0.1", "topicA", 15 * MB);
+    sm.recordWrite("10.0.0.1", "topicB", 25 * MB);
+    sm.tick();
+
+    assertEquals(2, sm.getProducerSlots("10.0.0.1", "topicA"));
+    assertEquals(3, sm.getProducerSlots("10.0.0.1", "topicB"));
+    assertEquals(5, sm.getOccupiedSlots());
+    assertEquals(2, sm.getProducerCount());
   }
 }

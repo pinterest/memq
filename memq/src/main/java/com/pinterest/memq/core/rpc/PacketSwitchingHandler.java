@@ -162,7 +162,8 @@ public class PacketSwitchingHandler {
       SlotManager sm = mgr.getSlotManager();
       if (sm != null) {
         InetSocketAddress remote = (InetSocketAddress) ctx.channel().remoteAddress();
-        sm.recordWrite(remote.getAddress().getHostAddress(), writePacket.getDataLength());
+        sm.recordWrite(remote.getAddress().getHostAddress(), writePacket.getTopicName(),
+            writePacket.getDataLength());
       }
       topicProcessor.registerChannel(ctx.channel());
       topicProcessor.write(requestPacket, writePacket, ctx);
