@@ -176,8 +176,7 @@ public class MemqManager implements Managed {
   }
 
   /**
-   * 
-   * @param topic
+   * @param topic the topic whose processor should be deleted
    * @return future task to track deletion
    */
   public Future<?> deleteTopicProcessor(String topic) {

@@ -307,7 +307,7 @@ public class MemqConfig extends Configuration {
   }
 
   /**
-   * @param serverConnectionIdleTimeoutSec
+   * @param serverConnectionIdleTimeoutSec the idle timeout in seconds before a server connection is closed
    */
   public void setServerConnectionIdleTimeoutSec(int serverConnectionIdleTimeoutSec) {
     this.serverConnectionIdleTimeoutSec = serverConnectionIdleTimeoutSec;
@@ -321,7 +321,7 @@ public class MemqConfig extends Configuration {
   }
 
   /**
-   * @param serverConnectionIdleTimeoutDeltaSec
+   * @param serverConnectionIdleTimeoutDeltaSec the random jitter range added to the idle timeout
    */
   public void setServerConnectionIdleTimeoutDeltaSec(int serverConnectionIdleTimeoutDeltaSec) {
       this.serverConnectionIdleTimeoutDeltaSec = serverConnectionIdleTimeoutDeltaSec;

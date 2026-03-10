@@ -92,8 +92,9 @@ public class EvictionManager {
   }
 
   /**
-   * Atomically retrieve and remove a pending eviction for the given producer IP.
+   * Atomically retrieve and remove a pending eviction for the given producer.
    *
+   * @param producerIp the producer identifier (UUID for v4, IP for v3)
    * @return the pending EvictionResult, or null if none exists
    */
   public EvictionResult pollEviction(String producerIp) {

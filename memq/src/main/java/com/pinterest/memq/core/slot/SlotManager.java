@@ -90,6 +90,10 @@ public class SlotManager {
   /**
    * Hot path -- called on every write request.
    * Zero-allocation on steady state: two ConcurrentHashMap.get() calls using the caller's strings.
+   *
+   * @param pid the producer identifier
+   * @param topic the topic name
+   * @param bytes the number of bytes written
    */
   public void recordWrite(String pid, String topic, int bytes) {
     ConcurrentHashMap<String, ProducerSlotState> topicMap =
@@ -347,6 +351,9 @@ public class SlotManager {
   /**
    * Force-release slots for a specific producer. Used by the eviction path.
    *
+   * @param pid the producer identifier
+   * @param topic the topic name
+   * @param count the number of slots to release
    * @return the actual number of slots released
    */
   public int releaseProducerSlots(String pid, String topic, int count) {
@@ -370,6 +377,9 @@ public class SlotManager {
   /**
    * Total slots held by a producer across all topics.
    * Direct read from the live structure — no allocation.
+   *
+   * @param pid the producer identifier
+   * @return the total number of slots held by this producer
    */
   public int getTotalProducerSlots(String pid) {
     ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
@@ -387,6 +397,9 @@ public class SlotManager {
    * Unmodifiable view of topic names for which this producer holds slots.
    * Zero allocation — backed by the live ConcurrentHashMap keySet.
    * Safe to iterate (weakly consistent). Callers must not cache the reference.
+   *
+   * @param pid the producer identifier
+   * @return unmodifiable collection of topic names
    */
   public Collection<String> getProducerTopics(String pid) {
     ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
@@ -398,6 +411,9 @@ public class SlotManager {
 
   /**
    * Whether the given producer currently holds any slots.  O(1).
+   *
+   * @param pid the producer identifier
+   * @return true if the producer holds at least one slot
    */
   public boolean producerHasSlots(String pid) {
     return producers.containsKey(pid);
@@ -406,6 +422,8 @@ public class SlotManager {
   /**
    * Unmodifiable view of producer IDs that currently hold at least one slot.
    * Zero allocation — backed by the live ConcurrentHashMap keySet.
+   *
+   * @return unmodifiable set of producer identifiers
    */
   public Set<String> getProducerIdsWithSlots() {
     return Collections.unmodifiableSet(producers.keySet());
@@ -418,6 +436,9 @@ public class SlotManager {
    * This map doubles as the <b>v4 producer registry</b>: only producers
    * present here are eligible for eviction. v3 producers never call this
    * method, so they are naturally excluded from eviction decisions.
+   *
+   * @param pid the producer identifier
+   * @param connections the set of broker IPs this producer is connected to
    */
   public void recordProducerConnections(String pid, Set<String> connections) {
     producerConnections.put(pid, connections);
@@ -426,6 +447,8 @@ public class SlotManager {
   /**
    * Get the current producer connections map (v4 producers only).
    * Used by EvictionManager to pass to the eviction strategy.
+   *
+   * @return unmodifiable map of producer IDs to their connected broker IPs
    */
   public Map<String, Set<String>> getProducerConnections() {
     return Collections.unmodifiableMap(producerConnections);

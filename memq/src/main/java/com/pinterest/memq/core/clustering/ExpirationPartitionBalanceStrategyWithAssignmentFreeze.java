@@ -23,9 +23,9 @@ public class ExpirationPartitionBalanceStrategyWithAssignmentFreeze extends Expi
     /**
      * Use the existing assignment and send alert.
      * Refresher the topic assignment timestamp.
-     * @param topics
-     * @param brokers
-     * @return brokers
+     * @param topics the set of topic configurations to balance
+     * @param brokers the set of available brokers
+     * @return brokers with refreshed assignment timestamps
      */
     @Override
     protected Set<Broker> handleBalancerError(Set<TopicConfig> topics, Set<Broker> brokers) {

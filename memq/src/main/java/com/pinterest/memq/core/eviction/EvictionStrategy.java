@@ -37,8 +37,8 @@ public interface EvictionStrategy {
    * Evaluate whether an eviction should be performed.
    *
    * @param slotManager this broker's slot manager
-   * @param peerStates gossip state from peer brokers (brokerId -> GossipState)
-   * @param producerConnections per-producer connection sets (producerIp -> set of broker IPs)
+   * @param peerStates gossip state from peer brokers (brokerId to GossipState)
+   * @param producerConnections per-producer connection sets (producerId to set of broker IPs)
    * @return an EvictionResult if eviction is warranted, or null if no eviction
    */
   EvictionResult evaluate(SlotManager slotManager,
