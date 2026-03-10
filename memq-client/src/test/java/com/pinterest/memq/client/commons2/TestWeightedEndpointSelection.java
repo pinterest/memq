@@ -102,7 +102,7 @@ public class TestWeightedEndpointSelection {
     client.getSlotsOwned().put("10.0.0.1", 5);
 
     InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    WriteResponsePacket evictionResponse = new WriteResponsePacket("10.0.0.4", 9092, 2, 3);
+    WriteResponsePacket evictionResponse = new WriteResponsePacket("10.0.0.4", 2, 3);
     client.handleWriteResponse(evictionResponse, sourceAddr);
 
     assertEquals(2, (int) client.getSlotsOwned().getOrDefault("10.0.0.4", 0));
@@ -111,7 +111,7 @@ public class TestWeightedEndpointSelection {
 
   @Test
   public void testNonEvictionResponseDoesNotCrash() {
-    WriteResponsePacket normalResponse = new WriteResponsePacket(null, 0, 0, 5);
+    WriteResponsePacket normalResponse = new WriteResponsePacket(null, 0, 5);
     client.handleWriteResponse(normalResponse, null);
   }
 
@@ -141,7 +141,7 @@ public class TestWeightedEndpointSelection {
     client.getSlotsOwned().put("10.0.0.3", 1);
 
     InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    WriteResponsePacket evictionResponse = new WriteResponsePacket("10.0.0.4", 9092, 1, 4);
+    WriteResponsePacket evictionResponse = new WriteResponsePacket("10.0.0.4", 1, 4);
     client.handleWriteResponse(evictionResponse, sourceAddr);
 
     assertTrue("Expected at most 2 connections, got " + client.getSlotsOwned().size(),

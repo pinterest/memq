@@ -54,8 +54,6 @@ public class TestCurrConnectionsEvictionStrategy {
     evictionConfig.setEvictionPercentageThreshold(0.0);
     evictionConfig.setPendingEvictionCooldownSeconds(0.0);
     evictionConfig.setTopNTargets(3);
-    evictionConfig.setBrokerPort(9092);
-
     slotConfig = new SlotAccountingConfig();
     slotConfig.setEnabled(true);
     slotConfig.setSlotSizeMbps(10.0);
@@ -250,7 +248,7 @@ public class TestCurrConnectionsEvictionStrategy {
     config.setEvictionPercentageThreshold(0.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(3);
-    config.setBrokerPort(9092);
+
 
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
@@ -439,7 +437,7 @@ public class TestCurrConnectionsEvictionStrategy {
     config.setEvictionPercentageThreshold(0.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(2);
-    config.setBrokerPort(9092);
+
 
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
@@ -479,7 +477,7 @@ public class TestCurrConnectionsEvictionStrategy {
     config.setEvictionPercentageThreshold(0.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(1);
-    config.setBrokerPort(9092);
+
 
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
@@ -513,7 +511,7 @@ public class TestCurrConnectionsEvictionStrategy {
     config.setEvictionPercentageThreshold(50.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(3);
-    config.setBrokerPort(9092);
+
 
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
@@ -534,7 +532,7 @@ public class TestCurrConnectionsEvictionStrategy {
     config.setEvictionPercentageThreshold(0.0);
     config.setPendingEvictionCooldownSeconds(60.0);
     config.setTopNTargets(3);
-    config.setBrokerPort(9092);
+
 
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
@@ -586,7 +584,7 @@ public class TestCurrConnectionsEvictionStrategy {
     config.setEvictionPercentageThreshold(0.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(3);
-    config.setBrokerPort(9092);
+
 
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
@@ -626,7 +624,7 @@ public class TestCurrConnectionsEvictionStrategy {
     config.setEvictionPercentageThreshold(0.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(3);
-    config.setBrokerPort(9092);
+
 
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);

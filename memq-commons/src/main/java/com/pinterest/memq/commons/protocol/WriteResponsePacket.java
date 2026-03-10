@@ -20,17 +20,14 @@ import io.netty.buffer.ByteBuf;
 public class WriteResponsePacket implements Packet {
 
   private String targetBrokerIp;
-  private int targetBrokerPort;
   private int numSlotsToEvict;
   private int numSlotsOwned;
 
   public WriteResponsePacket() {
   }
 
-  public WriteResponsePacket(String targetBrokerIp, int targetBrokerPort,
-                             int numSlotsToEvict, int numSlotsOwned) {
+  public WriteResponsePacket(String targetBrokerIp, int numSlotsToEvict, int numSlotsOwned) {
     this.targetBrokerIp = targetBrokerIp;
-    this.targetBrokerPort = targetBrokerPort;
     this.numSlotsToEvict = numSlotsToEvict;
     this.numSlotsOwned = numSlotsOwned;
   }
@@ -42,7 +39,6 @@ public class WriteResponsePacket implements Packet {
       if (targetBrokerIp != null && targetBrokerIp.isEmpty()) {
         targetBrokerIp = null;
       }
-      targetBrokerPort = buf.readInt();
       numSlotsToEvict = buf.readInt();
       numSlotsOwned = buf.readInt();
     }
@@ -52,7 +48,6 @@ public class WriteResponsePacket implements Packet {
   public void write(ByteBuf buf, short protocolVersion) {
     if (protocolVersion >= 4) {
       ProtocolUtils.writeStringWithTwoByteEncoding(buf, targetBrokerIp);
-      buf.writeInt(targetBrokerPort);
       buf.writeInt(numSlotsToEvict);
       buf.writeInt(numSlotsOwned);
     }
@@ -62,7 +57,7 @@ public class WriteResponsePacket implements Packet {
   public int getSize(short protocolVersion) {
     if (protocolVersion >= 4) {
       return ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(targetBrokerIp)
-          + Integer.BYTES + Integer.BYTES + Integer.BYTES;
+          + Integer.BYTES + Integer.BYTES;
     }
     return 0;
   }
@@ -73,14 +68,6 @@ public class WriteResponsePacket implements Packet {
 
   public void setTargetBrokerIp(String targetBrokerIp) {
     this.targetBrokerIp = targetBrokerIp;
-  }
-
-  public int getTargetBrokerPort() {
-    return targetBrokerPort;
-  }
-
-  public void setTargetBrokerPort(int targetBrokerPort) {
-    this.targetBrokerPort = targetBrokerPort;
   }
 
   public int getNumSlotsToEvict() {

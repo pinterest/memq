@@ -23,7 +23,6 @@ public class EvictionConfig {
   private double evictionPercentageThreshold = 10.0;
   private double pendingEvictionCooldownSeconds = 10.0;
   private int topNTargets = 3;
-  private int brokerPort = 9092;
 
   public boolean isEnabled() {
     return enabled;
@@ -73,11 +72,4 @@ public class EvictionConfig {
     this.topNTargets = topNTargets;
   }
 
-  public int getBrokerPort() {
-    return brokerPort;
-  }
-
-  public void setBrokerPort(int brokerPort) {
-    this.brokerPort = brokerPort;
-  }
 }

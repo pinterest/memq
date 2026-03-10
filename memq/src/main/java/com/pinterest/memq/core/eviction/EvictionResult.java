@@ -19,14 +19,11 @@ public class EvictionResult {
 
   private final String pid;
   private final String targetBrokerIp;
-  private final int targetBrokerPort;
   private final int numSlotsToEvict;
 
-  public EvictionResult(String pid, String targetBrokerIp, int targetBrokerPort,
-                        int numSlotsToEvict) {
+  public EvictionResult(String pid, String targetBrokerIp, int numSlotsToEvict) {
     this.pid = pid;
     this.targetBrokerIp = targetBrokerIp;
-    this.targetBrokerPort = targetBrokerPort;
     this.numSlotsToEvict = numSlotsToEvict;
   }
 
@@ -38,10 +35,6 @@ public class EvictionResult {
     return targetBrokerIp;
   }
 
-  public int getTargetBrokerPort() {
-    return targetBrokerPort;
-  }
-
   public int getNumSlotsToEvict() {
     return numSlotsToEvict;
   }
@@ -49,6 +42,6 @@ public class EvictionResult {
   @Override
   public String toString() {
     return "EvictionResult{pid='" + pid + "', targetBrokerIp='" + targetBrokerIp
-        + "', targetBrokerPort=" + targetBrokerPort + ", numSlotsToEvict=" + numSlotsToEvict + "}";
+        + "', numSlotsToEvict=" + numSlotsToEvict + "}";
   }
 }

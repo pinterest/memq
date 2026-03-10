@@ -356,13 +356,12 @@ public class Batch {
             sm.releaseProducerSlots(producerId, topic, eviction.getNumSlotsToEvict());
           }
           return new WriteResponsePacket(eviction.getTargetBrokerIp(),
-              eviction.getTargetBrokerPort(), eviction.getNumSlotsToEvict(),
-              sm.getTotalProducerSlots(producerId));
+              eviction.getNumSlotsToEvict(), sm.getTotalProducerSlots(producerId));
         }
       }
 
       int slotsOwned = sm != null ? sm.getTotalProducerSlots(producerId) : 0;
-      return new WriteResponsePacket(null, 0, 0, slotsOwned);
+      return new WriteResponsePacket(null, 0, slotsOwned);
     }
   }
 

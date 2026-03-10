@@ -29,7 +29,7 @@ public class TestWriteResponsePacketV4 {
 
   @Test
   public void testV4RoundTripWithEviction() {
-    WriteResponsePacket original = new WriteResponsePacket("10.0.0.5", 9092, 2, 5);
+    WriteResponsePacket original = new WriteResponsePacket("10.0.0.5", 2, 5);
     assertTrue(original.hasEviction());
 
     ByteBuf buf = PooledByteBufAllocator.DEFAULT.buffer();
@@ -39,7 +39,6 @@ public class TestWriteResponsePacketV4 {
     decoded.readFields(buf, (short) 4);
 
     assertEquals("10.0.0.5", decoded.getTargetBrokerIp());
-    assertEquals(9092, decoded.getTargetBrokerPort());
     assertEquals(2, decoded.getNumSlotsToEvict());
     assertEquals(5, decoded.getNumSlotsOwned());
     assertTrue(decoded.hasEviction());
@@ -49,7 +48,7 @@ public class TestWriteResponsePacketV4 {
 
   @Test
   public void testV4RoundTripNoEviction() {
-    WriteResponsePacket original = new WriteResponsePacket(null, 0, 0, 10);
+    WriteResponsePacket original = new WriteResponsePacket(null, 0, 10);
     assertFalse(original.hasEviction());
 
     ByteBuf buf = PooledByteBufAllocator.DEFAULT.buffer();
@@ -59,7 +58,6 @@ public class TestWriteResponsePacketV4 {
     decoded.readFields(buf, (short) 4);
 
     assertNull(decoded.getTargetBrokerIp());
-    assertEquals(0, decoded.getTargetBrokerPort());
     assertEquals(0, decoded.getNumSlotsToEvict());
     assertEquals(10, decoded.getNumSlotsOwned());
     assertFalse(decoded.hasEviction());
@@ -82,7 +80,7 @@ public class TestWriteResponsePacketV4 {
 
   @Test
   public void testV3ReadFieldsNoOp() {
-    WriteResponsePacket original = new WriteResponsePacket("10.0.0.1", 9092, 1, 3);
+    WriteResponsePacket original = new WriteResponsePacket("10.0.0.1", 1, 3);
 
     ByteBuf buf = PooledByteBufAllocator.DEFAULT.buffer();
     original.write(buf, (short) 4);
@@ -100,7 +98,7 @@ public class TestWriteResponsePacketV4 {
 
   @Test
   public void testV4SizeCalculation() {
-    WriteResponsePacket pkt = new WriteResponsePacket("192.168.1.100", 9092, 1, 7);
+    WriteResponsePacket pkt = new WriteResponsePacket("192.168.1.100", 1, 7);
 
     int size = pkt.getSize((short) 4);
     assertTrue(size > 0);
@@ -115,7 +113,7 @@ public class TestWriteResponsePacketV4 {
 
   @Test
   public void testV4BrokerWritesV3Response() {
-    WriteResponsePacket pkt = new WriteResponsePacket("10.0.0.1", 9092, 1, 3);
+    WriteResponsePacket pkt = new WriteResponsePacket("10.0.0.1", 1, 3);
 
     ByteBuf buf = PooledByteBufAllocator.DEFAULT.buffer();
     // broker writes v3 response (for v3 client)

@@ -140,7 +140,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
 
     pendingEvictionTargets.put(target.getKey(), now);
 
-    return new EvictionResult(pidToEvict, target.getKey(), config.getBrokerPort(), 1);
+    return new EvictionResult(pidToEvict, target.getKey(), 1);
   }
 
   private Map.Entry<String, Integer> selectTargetBroker(
