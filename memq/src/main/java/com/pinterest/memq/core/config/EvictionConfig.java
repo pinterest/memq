@@ -15,10 +15,12 @@
  */
 package com.pinterest.memq.core.config;
 
+import com.pinterest.memq.core.eviction.CurrConnectionsEvictionStrategy;
+
 public class EvictionConfig {
 
   private boolean enabled = false;
-  private String strategyClass = "com.pinterest.memq.core.eviction.CurrConnectionsEvictionStrategy";
+  private String strategyClass = CurrConnectionsEvictionStrategy.class.getName(); // default strategy
   private double intervalSeconds = 5.0;
   private double evictionPercentageThreshold = 10.0;
   private double pendingEvictionCooldownSeconds = 10.0;
