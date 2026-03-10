@@ -188,7 +188,7 @@ public class TestBucketingTopicProcessor {
         WriteRequestPacket payload = new WriteRequestPacket(true, "test".getBytes(), false, 0, buf);
         RequestPacket packet = new RequestPacket(RequestType.PROTOCOL_VERSION,
             ThreadLocalRandom.current().nextLong(), RequestType.WRITE, payload);
-        processor.write(packet, payload, getTestContext());
+        processor.write(packet, payload, getTestContext(), null);
         bytesWritten += bytes.length;
         Thread.sleep(500);
       }
@@ -266,7 +266,7 @@ public class TestBucketingTopicProcessor {
         RequestPacket packet = new RequestPacket(RequestType.PROTOCOL_VERSION,
             ThreadLocalRandom.current().nextLong(), RequestType.WRITE, payload);
 
-        processor.write(packet, payload, getTestContext());
+        processor.write(packet, payload, getTestContext(), null);
         bytesWritten += payloadBytes.readableBytes();
         Thread.sleep(200);
       }
@@ -334,7 +334,7 @@ public class TestBucketingTopicProcessor {
         WriteRequestPacket payload = new WriteRequestPacket(true, "test".getBytes(), false, 0, buf);
         RequestPacket packet = new RequestPacket(RequestType.PROTOCOL_VERSION,
             ThreadLocalRandom.current().nextLong(), RequestType.WRITE, payload);
-        processor.write(packet, payload, getTestContext());
+        processor.write(packet, payload, getTestContext(), null);
         bytesWritten += bytes.length;
       }
       processor.forceDispatch();
@@ -407,7 +407,7 @@ public class TestBucketingTopicProcessor {
             payloadBytes);
         RequestPacket packet = new RequestPacket(RequestType.PROTOCOL_VERSION,
             ThreadLocalRandom.current().nextLong(), RequestType.WRITE, payload);
-        processor.write(packet, payload, getTestContext());
+        processor.write(packet, payload, getTestContext(), null);
         bytesWritten += payloadBytes.readableBytes();
         Thread.sleep(500);
       }
