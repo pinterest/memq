@@ -35,9 +35,12 @@ import com.pinterest.memq.commons.mon.OpenTSDBClient;
 import com.pinterest.memq.commons.mon.OpenTSDBReporter;
 import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.config.EnvironmentProvider;
+import com.pinterest.memq.core.config.EvictionConfig;
 import com.pinterest.memq.core.config.GossipConfig;
 import com.pinterest.memq.core.config.MemqConfig;
 import com.pinterest.memq.core.config.SlotAccountingConfig;
+import com.pinterest.memq.core.eviction.EvictionManager;
+import com.pinterest.memq.core.eviction.EvictionStrategy;
 import com.pinterest.memq.core.gossip.GossipServer;
 import com.pinterest.memq.core.slot.SlotManager;
 import com.pinterest.memq.core.mon.MemqMgrHealthCheck;
@@ -87,9 +90,13 @@ public class MemqMain extends Application<MemqConfig> {
 
     GossipServer gossipServer = initializeGossipServer(configuration, memqGovernor,
         metricsRegistryMap, client, slotManager);
+
+    EvictionManager evictionManager = initializeEvictionManager(configuration, memqManager,
+        slotManager, gossipServer);
     logger.info("Memq started");
 
-    initializeShutdownHooks(memqManager, memqGovernor, nettyServer, gossipServer, slotManager);
+    initializeShutdownHooks(memqManager, memqGovernor, nettyServer, gossipServer, slotManager,
+        evictionManager);
     initializeAdditionalModules(configuration, environment, memqManager, memqGovernor);
   }
 
@@ -97,10 +104,14 @@ public class MemqMain extends Application<MemqConfig> {
                                        MemqGovernor memqGovernor,
                                        MemqNettyServer nettyServer,
                                        GossipServer gossipServer,
-                                       SlotManager slotManager) {
+                                       SlotManager slotManager,
+                                       EvictionManager evictionManager) {
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
       public void run() {
+        if (evictionManager != null) {
+          evictionManager.stop();
+        }
         if (slotManager != null) {
           slotManager.stop();
         }
@@ -116,6 +127,36 @@ public class MemqMain extends Application<MemqConfig> {
         }
       }
     });
+  }
+
+  private EvictionManager initializeEvictionManager(MemqConfig configuration,
+                                                      MemqManager memqManager,
+                                                      SlotManager slotManager,
+                                                      GossipServer gossipServer) throws Exception {
+    EvictionConfig evictionConfig = configuration.getEvictionConfig();
+    if (evictionConfig == null || !evictionConfig.isEnabled()) {
+      return null;
+    }
+    if (slotManager == null || gossipServer == null) {
+      logger.warning("Eviction enabled but SlotManager or GossipServer is not available; "
+          + "disabling eviction");
+      return null;
+    }
+
+    EnvironmentProvider provider = Class.forName(configuration.getEnvironmentProvider())
+        .asSubclass(EnvironmentProvider.class).newInstance();
+
+    EvictionStrategy strategy = Class.forName(evictionConfig.getStrategyClass())
+        .asSubclass(EvictionStrategy.class)
+        .getConstructor(String.class, EvictionConfig.class)
+        .newInstance(provider.getIP(), evictionConfig);
+    EvictionManager evictionManager = new EvictionManager(strategy, slotManager,
+        gossipServer::getPeerStates, evictionConfig);
+    memqManager.setEvictionManager(evictionManager);
+    evictionManager.start();
+
+    logger.info("Eviction manager started (interval=" + evictionConfig.getIntervalSeconds() + "s)");
+    return evictionManager;
   }
 
   private void enableJVMMetrics(Map<String, MetricRegistry> metricsRegistryMap) {

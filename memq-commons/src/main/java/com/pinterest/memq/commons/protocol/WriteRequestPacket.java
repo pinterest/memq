@@ -17,6 +17,9 @@ package com.pinterest.memq.commons.protocol;
 
 import java.io.IOException;
 import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
@@ -29,6 +32,8 @@ public class WriteRequestPacket implements Packet {
   protected int checksum;
   protected int dataLength;
   protected ByteBuf data;
+  protected String producerId;
+  protected List<String> currentConnections;
 
   public WriteRequestPacket() {
   }
@@ -47,6 +52,11 @@ public class WriteRequestPacket implements Packet {
 
   @Override
   public int getSize(short protocolVersion) {
+    if (protocolVersion >= 4) {
+      return Byte.BYTES + Short.BYTES + topicName.length + Integer.BYTES
+          + ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(producerId)
+          + getConnectionsSerializedSize() + Integer.BYTES + dataLength;
+    }
     return Byte.BYTES + Short.BYTES + topicName.length + Integer.BYTES + dataLength
         + (protocolVersion >= 1 ? Integer.BYTES : 0);
   }
@@ -56,8 +66,59 @@ public class WriteRequestPacket implements Packet {
         + (protocolVersion >= 1 ? Integer.BYTES : 0);
   }
 
+  public static int getHeaderSize(short protocolVersion, String topicName,
+                                   String producerId, List<String> currentConnections) {
+    if (protocolVersion >= 4) {
+      int size = Byte.BYTES + Short.BYTES + topicName.length() + Integer.BYTES
+          + ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(producerId)
+          + Short.BYTES + Integer.BYTES;
+      if (currentConnections != null) {
+        for (String conn : currentConnections) {
+          size += ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(conn);
+        }
+      }
+      return size;
+    }
+    return getHeaderSize(protocolVersion, topicName);
+  }
+
   @Override
   public void readFields(ByteBuf inBuffer, short protocolVersion) {
+    if (protocolVersion >= 4) {
+      readFieldsV4(inBuffer);
+    } else {
+      readFieldsV3(inBuffer, protocolVersion);
+    }
+  }
+
+  private void readFieldsV4(ByteBuf inBuffer) {
+    disableAcks = inBuffer.readBoolean();
+    short topicNameLength = inBuffer.readShort();
+    topicName = new byte[topicNameLength];
+    inBuffer.readBytes(topicName);
+    checksum = inBuffer.readInt();
+    checksumExists = true;
+
+    producerId = ProtocolUtils.readStringWithTwoByteEncoding(inBuffer);
+
+    short connCount = inBuffer.readShort();
+    if (connCount > 0) {
+      currentConnections = new ArrayList<>(connCount);
+      for (int i = 0; i < connCount; i++) {
+        currentConnections.add(ProtocolUtils.readStringWithTwoByteEncoding(inBuffer));
+      }
+    } else {
+      currentConnections = Collections.emptyList();
+    }
+
+    dataLength = inBuffer.readInt();
+    data = inBuffer;
+    if (data.readableBytes() != dataLength) {
+      System.out.println("Invalid length:" + data.readableBytes() + "vs" + dataLength);
+    }
+  }
+
+  private void readFieldsV3(ByteBuf inBuffer, short protocolVersion) {
     disableAcks = inBuffer.readBoolean();
     short topicNameLength = inBuffer.readShort();
     topicName = new byte[topicNameLength];
@@ -69,7 +130,6 @@ public class WriteRequestPacket implements Packet {
     dataLength = inBuffer.readInt();
     data = inBuffer;
     if (data.readableBytes() != dataLength) {
-      // request error
       System.out.println("Invalid length:" + data.readableBytes() + "vs" + dataLength);
     }
   }
@@ -77,16 +137,54 @@ public class WriteRequestPacket implements Packet {
   @Override
   public void write(ByteBuf buf, short protocolVersion) {
     writeHeader(buf, protocolVersion);
-    buf.writeBytes(data); // payload
+    buf.writeBytes(data);
   }
 
   @Override
   public void writeHeader(ByteBuf headerBuf, short protocolVersion) {
-    headerBuf.writeBoolean(disableAcks); // if ack all is enabled or not
-    headerBuf.writeShort((short) topicName.length); // topic name length
-    headerBuf.writeBytes(topicName); // topic name
+    if (protocolVersion >= 4) {
+      writeHeaderV4(headerBuf);
+    } else {
+      writeHeaderV3(headerBuf);
+    }
+  }
+
+  private void writeHeaderV4(ByteBuf headerBuf) {
+    headerBuf.writeBoolean(disableAcks);
+    headerBuf.writeShort((short) topicName.length);
+    headerBuf.writeBytes(topicName);
     headerBuf.writeInt(checksum);
-    headerBuf.writeInt(dataLength); // payload length
+
+    ProtocolUtils.writeStringWithTwoByteEncoding(headerBuf, producerId);
+
+    if (currentConnections != null && !currentConnections.isEmpty()) {
+      headerBuf.writeShort((short) currentConnections.size());
+      for (String conn : currentConnections) {
+        ProtocolUtils.writeStringWithTwoByteEncoding(headerBuf, conn);
+      }
+    } else {
+      headerBuf.writeShort(0);
+    }
+
+    headerBuf.writeInt(dataLength);
+  }
+
+  private void writeHeaderV3(ByteBuf headerBuf) {
+    headerBuf.writeBoolean(disableAcks);
+    headerBuf.writeShort((short) topicName.length);
+    headerBuf.writeBytes(topicName);
+    headerBuf.writeInt(checksum);
+    headerBuf.writeInt(dataLength);
+  }
+
+  private int getConnectionsSerializedSize() {
+    int size = Short.BYTES;
+    if (currentConnections != null) {
+      for (String conn : currentConnections) {
+        size += ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(conn);
+      }
+    }
+    return size;
   }
 
   public boolean isDisableAcks() {
@@ -138,6 +236,22 @@ public class WriteRequestPacket implements Packet {
 
   public void setChecksumExists(boolean checksumExists) {
     this.checksumExists = checksumExists;
+  }
+
+  public String getProducerId() {
+    return producerId;
+  }
+
+  public void setProducerId(String producerId) {
+    this.producerId = producerId;
+  }
+
+  public List<String> getCurrentConnections() {
+    return currentConnections;
+  }
+
+  public void setCurrentConnections(List<String> currentConnections) {
+    this.currentConnections = currentConnections;
   }
 
   @Override

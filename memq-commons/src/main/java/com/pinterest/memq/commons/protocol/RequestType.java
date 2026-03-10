@@ -46,7 +46,7 @@ public enum RequestType {
     this.responseImplementationSupplier = responseImplementationSupplier;
   }
 
-  public static final short PROTOCOL_VERSION = 3;
+  public static final short PROTOCOL_VERSION = 4;
 
   public static RequestType extractPacketType(ByteBuf inBuffer) throws IOException {
     int requestTypeCode = (int) inBuffer.readByte();

@@ -48,10 +48,11 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.commons.storage.StorageHandler;
 import com.pinterest.memq.commons.storage.StorageHandlerTable;
 import com.pinterest.memq.core.config.MemqConfig;
+import com.pinterest.memq.core.eviction.EvictionManager;
 import com.pinterest.memq.core.processing.TopicProcessor;
-import com.pinterest.memq.core.slot.SlotManager;
 import com.pinterest.memq.core.processing.TopicProcessorState;
 import com.pinterest.memq.core.processing.bucketing.BucketingTopicProcessor;
+import com.pinterest.memq.core.slot.SlotManager;
 import com.pinterest.memq.core.utils.DaemonThreadFactory;
 import com.pinterest.memq.core.utils.MiscUtils;
 
@@ -71,6 +72,7 @@ public class MemqManager implements Managed {
   private String topicCacheFile;
   private OpenTSDBClient client;
   private SlotManager slotManager;
+  private EvictionManager evictionManager;
 
   public MemqManager(OpenTSDBClient client,
                      MemqConfig configuration,
@@ -146,7 +148,13 @@ public class MemqManager implements Managed {
     if (topicConfig.getRingBufferSize() == 0) {
       topicConfig.setRingBufferSize(configuration.getDefaultRingBufferSize());
     }
-    TopicProcessor tp = new BucketingTopicProcessor(registry, topicConfig, storageHandler, timerService, reporter);
+    BucketingTopicProcessor tp = new BucketingTopicProcessor(registry, topicConfig, storageHandler, timerService, reporter);
+    if (evictionManager != null) {
+      tp.setEvictionManager(evictionManager);
+    }
+    if (slotManager != null) {
+      tp.setSlotManager(slotManager);
+    }
 
     processorMap.put(topicConfig.getTopic(), tp);
     topicMap.put(topicConfig.getTopic(), topicConfig);
@@ -217,8 +225,26 @@ public class MemqManager implements Managed {
     return slotManager;
   }
 
+  public EvictionManager getEvictionManager() {
+    return evictionManager;
+  }
+
+  public void setEvictionManager(EvictionManager evictionManager) {
+    this.evictionManager = evictionManager;
+    for (TopicProcessor tp : processorMap.values()) {
+      if (tp instanceof BucketingTopicProcessor) {
+        ((BucketingTopicProcessor) tp).setEvictionManager(evictionManager);
+      }
+    }
+  }
+
   public void setSlotManager(SlotManager slotManager) {
     this.slotManager = slotManager;
+    for (TopicProcessor tp : processorMap.values()) {
+      if (tp instanceof BucketingTopicProcessor) {
+        ((BucketingTopicProcessor) tp).setSlotManager(slotManager);
+      }
+    }
   }
 
   @Override

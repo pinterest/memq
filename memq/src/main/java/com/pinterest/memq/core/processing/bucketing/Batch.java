@@ -41,6 +41,9 @@ import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.commons.storage.StorageHandler;
 import com.pinterest.memq.commons.storage.WriteFailedException;
 import com.pinterest.memq.core.commons.Message;
+import com.pinterest.memq.core.eviction.EvictionManager;
+import com.pinterest.memq.core.eviction.EvictionResult;
+import com.pinterest.memq.core.slot.SlotManager;
 import com.pinterest.memq.core.utils.CoreUtils;
 import com.pinterest.memq.core.utils.MiscUtils;
 
@@ -151,7 +154,8 @@ public class Batch {
                        long serverRequestId,
                        long clientRequestId,
                        short protocolVersion,
-                       ChannelHandlerContext ctx) {
+                       ChannelHandlerContext ctx,
+                       String producerId) {
     int dataLength = writePacket.getDataLength();
     activeWrites.incrementAndGet();
     try {
@@ -167,7 +171,8 @@ public class Batch {
               clientRequestId,
               serverRequestId,
               ctx,
-              protocolVersion
+              protocolVersion,
+              producerId
           );
           messagesCount.getAndIncrement();
           if (idx == countDispatchThreshold - 1) {
@@ -308,19 +313,56 @@ public class Batch {
 
     protected void ackMessages(List<Message> messages, short responseCode) {
       Timer.Context ackTimer = ackLatency.time();
+      EvictionManager em = manager.getEvictionManager();
+      SlotManager sm = manager.getSlotManager();
       for (Message m : messages) {
         ChannelHandlerContext channelRef = m.getPipelineReference();
         if (channelRef != null) {
           try {
+            WriteResponsePacket writeResponse = buildWriteResponse(m, responseCode, em, sm);
             channelRef.writeAndFlush(new ResponsePacket(m.getClientProtocolVersion(),
                 m.getClientRequestId(), RequestType.WRITE, responseCode,
-                new WriteResponsePacket()));
+                writeResponse));
           } catch (Exception e2) {
             ackChannelWriteError.inc();
           }
         }
       }
       ackTimer.stop();
+    }
+
+    /**
+     * v3 producers receive an empty WriteResponsePacket (no eviction fields).
+     * v4 producers receive slot ownership info and, if applicable, eviction
+     * directives. The producer is identified by the client-generated UUID
+     * stored in {@link Message#getProducerId()}, which was resolved in
+     * PacketSwitchingHandler (UUID for v4, IP fallback for v3).
+     */
+    private WriteResponsePacket buildWriteResponse(Message m, short responseCode,
+                                                   EvictionManager em, SlotManager sm) {
+      if (m.getClientProtocolVersion() < 4 || responseCode != ResponseCodes.OK) {
+        return new WriteResponsePacket();
+      }
+
+      String producerId = m.getProducerId();
+      if (producerId == null || producerId.isEmpty()) {
+        return new WriteResponsePacket();
+      }
+
+      if (em != null) {
+        EvictionResult eviction = em.pollEviction(producerId);
+        if (eviction != null && sm != null) {
+          for (String topic : sm.getProducerTopics(producerId)) {
+            sm.releaseProducerSlots(producerId, topic, eviction.getNumSlotsToEvict());
+          }
+          return new WriteResponsePacket(eviction.getTargetBrokerIp(),
+              eviction.getTargetBrokerPort(), eviction.getNumSlotsToEvict(),
+              sm.getTotalProducerSlots(producerId));
+        }
+      }
+
+      int slotsOwned = sm != null ? sm.getTotalProducerSlots(producerId) : 0;
+      return new WriteResponsePacket(null, 0, 0, slotsOwned);
     }
   }
 

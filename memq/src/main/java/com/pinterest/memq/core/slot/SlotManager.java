@@ -19,6 +19,8 @@ import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.core.config.SlotAccountingConfig;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
@@ -57,6 +59,7 @@ public class SlotManager {
 
   private final MetricRegistry registry;
   private final Set<String> registeredProducerMetrics = new HashSet<>();
+  private final ConcurrentHashMap<String, Set<String>> producerConnections = new ConcurrentHashMap<>();
 
   private ScheduledExecutorService tickExecutor;
 
@@ -88,10 +91,10 @@ public class SlotManager {
    * Hot path -- called on every write request.
    * Zero-allocation on steady state: two ConcurrentHashMap.get() calls using the caller's strings.
    */
-  public void recordWrite(String producerId, String topicName, int bytes) {
+  public void recordWrite(String pid, String topic, int bytes) {
     ConcurrentHashMap<String, ProducerSlotState> topicMap =
-        producers.computeIfAbsent(producerId, k -> new ConcurrentHashMap<>());
-    ProducerSlotState state = topicMap.computeIfAbsent(topicName, k -> new ProducerSlotState());
+        producers.computeIfAbsent(pid, k -> new ConcurrentHashMap<>());
+    ProducerSlotState state = topicMap.computeIfAbsent(topic, k -> new ProducerSlotState());
     state.bytesAccumulator.add(bytes);
     state.lastWriteMs = System.currentTimeMillis();
   }
@@ -134,7 +137,6 @@ public class SlotManager {
           Map.Entry<String, ProducerSlotState> innerEntry = innerIt.next();
           String topic = innerEntry.getKey();
           ProducerSlotState state = innerEntry.getValue();
-          String label = pid + "/" + topic;
 
           long bytes = state.bytesAccumulator.sumThenReset();
           double instantRateMbps = bytes / (tickIntervalSec * BYTES_PER_MB);
@@ -154,7 +156,7 @@ public class SlotManager {
             double exceedsDuration = now - state.exceedsSinceMs;
             if (exceedsDuration >= acquireThresholdMs) {
               int slotsToAcquire = expectedSlots - currentSlots;
-              if (tryAcquireSlots(label, state, slotsToAcquire, now)) {
+              if (tryAcquireSlots(pid, topic, state, slotsToAcquire, now)) {
                 state.exceedsSinceMs = 0;
               }
             }
@@ -166,7 +168,7 @@ public class SlotManager {
             double belowDuration = now - state.belowSinceMs;
             if (belowDuration >= releaseThresholdMs) {
               int slotsToRelease = currentSlots - expectedSlots;
-              releaseSlots(label, state, slotsToRelease, now);
+              releaseSlots(pid, topic, topicMap, state, slotsToRelease);
               state.belowSinceMs = 0;
             }
           } else {
@@ -176,18 +178,13 @@ public class SlotManager {
 
           if (now - state.lastWriteMs > idleProducerTimeoutMs) {
             if (state.currentSlots > 0) {
-              totalOccupiedSlots.addAndGet(-state.currentSlots);
-              lastSlotChangeTimeMs = now;
-              logger.info("Released " + state.currentSlots + " slot(s) from idle producer: " + label);
+              decrementSlots(pid, topic, topicMap, state, state.currentSlots);
+              logger.info("Released idle producer: " + pid + "/" + topic);
+            } else {
+              removeProducerTopic(pid, topic, topicMap);
             }
-            innerIt.remove();
             deregisterProducerMetrics(pid, topic);
-            logger.fine("Removed idle producer: " + label);
           }
-        }
-
-        if (topicMap.isEmpty()) {
-          outerIt.remove();
         }
       }
     } catch (Exception e) {
@@ -195,7 +192,8 @@ public class SlotManager {
     }
   }
 
-  private boolean tryAcquireSlots(String pid, ProducerSlotState state, int count, long now) {
+  private boolean tryAcquireSlots(String pid, String topic, ProducerSlotState state,
+                                  int count, long now) {
     if (now - lastSlotChangeTimeMs < cooldownMs) {
       return false;
     }
@@ -207,23 +205,55 @@ public class SlotManager {
     state.currentSlots += actual;
     totalOccupiedSlots.addAndGet(actual);
     lastSlotChangeTimeMs = now;
-    logger.info("+" + actual + " slot(s) for pid=" + pid
+    logger.info("+" + actual + " slot(s) for pid=" + pid + "/" + topic
         + " | total=" + state.currentSlots
         + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots);
     return true;
   }
 
-  private void releaseSlots(String pid, ProducerSlotState state, int count, long now) {
+  /**
+   * Single point for all slot decrements. Adjusts totalOccupiedSlots, sets
+   * lastSlotChangeTimeMs, and removes the topic/producer entry when the
+   * producer's slot count for that topic reaches 0.
+   *
+   * Every path that reduces currentSlots MUST go through this method so
+   * the invariant "no zero-slot entries in the map" is maintained in one place.
+   *
+   * @return actual number of slots released
+   */
+  private int decrementSlots(String pid, String topic,
+                             ConcurrentHashMap<String, ProducerSlotState> topicMap,
+                             ProducerSlotState state, int count) {
     int actual = Math.min(count, state.currentSlots);
     if (actual <= 0) {
-      return;
+      return 0;
     }
     state.currentSlots -= actual;
     totalOccupiedSlots.addAndGet(-actual);
-    lastSlotChangeTimeMs = now;
-    logger.info("-" + actual + " slot(s) for pid=" + pid
-        + " | total=" + state.currentSlots
-        + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots);
+    lastSlotChangeTimeMs = System.currentTimeMillis();
+    if (state.currentSlots == 0) {
+      removeProducerTopic(pid, topic, topicMap);
+    }
+    return actual;
+  }
+
+  private void removeProducerTopic(String pid, String topic,
+                                   ConcurrentHashMap<String, ProducerSlotState> topicMap) {
+    topicMap.remove(topic);
+    if (topicMap.isEmpty()) {
+      producers.remove(pid, topicMap);
+    }
+  }
+
+  private void releaseSlots(String pid, String topic,
+                            ConcurrentHashMap<String, ProducerSlotState> topicMap,
+                            ProducerSlotState state, int count) {
+    int actual = decrementSlots(pid, topic, topicMap, state, count);
+    if (actual > 0) {
+      logger.info("-" + actual + " slot(s) for pid=" + pid + "/" + topic
+          + " | total=" + state.currentSlots
+          + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots);
+    }
   }
 
   public int getFreeSlots() {
@@ -251,21 +281,21 @@ public class SlotManager {
     return count;
   }
 
-  public int getProducerSlots(String producerId, String topicName) {
-    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(producerId);
+  public int getProducerSlots(String pid, String topic) {
+    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
     if (topicMap == null) {
       return 0;
     }
-    ProducerSlotState state = topicMap.get(topicName);
+    ProducerSlotState state = topicMap.get(topic);
     return state != null ? state.currentSlots : 0;
   }
 
-  public double getProducerEmaRate(String producerId, String topicName) {
-    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(producerId);
+  public double getProducerEmaRate(String pid, String topic) {
+    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
     if (topicMap == null) {
       return 0.0;
     }
-    ProducerSlotState state = topicMap.get(topicName);
+    ProducerSlotState state = topicMap.get(topic);
     return state != null ? state.emaRateMbps : 0.0;
   }
 
@@ -312,6 +342,93 @@ public class SlotManager {
     registry.remove(slotsKey);
     registeredProducerMetrics.remove(emaKey);
     registeredProducerMetrics.remove(slotsKey);
+  }
+
+  /**
+   * Force-release slots for a specific producer. Used by the eviction path.
+   *
+   * @return the actual number of slots released
+   */
+  public int releaseProducerSlots(String pid, String topic, int count) {
+    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
+    if (topicMap == null) {
+      return 0;
+    }
+    ProducerSlotState state = topicMap.get(topic);
+    if (state == null) {
+      return 0;
+    }
+    int actual = decrementSlots(pid, topic, topicMap, state, count);
+    if (actual > 0) {
+      logger.info("Eviction: -" + actual + " slot(s) for pid=" + pid + "/" + topic
+          + " | remaining=" + state.currentSlots
+          + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots);
+    }
+    return actual;
+  }
+
+  /**
+   * Total slots held by a producer across all topics.
+   * Direct read from the live structure — no allocation.
+   */
+  public int getTotalProducerSlots(String pid) {
+    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
+    if (topicMap == null) {
+      return 0;
+    }
+    int total = 0;
+    for (ProducerSlotState state : topicMap.values()) {
+      total += state.currentSlots;
+    }
+    return total;
+  }
+
+  /**
+   * Unmodifiable view of topic names for which this producer holds slots.
+   * Zero allocation — backed by the live ConcurrentHashMap keySet.
+   * Safe to iterate (weakly consistent). Callers must not cache the reference.
+   */
+  public Collection<String> getProducerTopics(String pid) {
+    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
+    if (topicMap == null) {
+      return Collections.emptySet();
+    }
+    return Collections.unmodifiableSet(topicMap.keySet());
+  }
+
+  /**
+   * Whether the given producer currently holds any slots.  O(1).
+   */
+  public boolean producerHasSlots(String pid) {
+    return producers.containsKey(pid);
+  }
+
+  /**
+   * Unmodifiable view of producer IDs that currently hold at least one slot.
+   * Zero allocation — backed by the live ConcurrentHashMap keySet.
+   */
+  public Set<String> getProducerIdsWithSlots() {
+    return Collections.unmodifiableSet(producers.keySet());
+  }
+
+  /**
+   * Record which brokers a producer is currently connected to.
+   * Called on the write request hot path for v4 producers only.
+   * <p>
+   * This map doubles as the <b>v4 producer registry</b>: only producers
+   * present here are eligible for eviction. v3 producers never call this
+   * method, so they are naturally excluded from eviction decisions.
+   */
+  public void recordProducerConnections(String pid, Set<String> connections) {
+    producerConnections.put(pid, connections);
+  }
+
+  /**
+   * Get the current producer connections map (v4 producers only).
+   * Used by EvictionManager to pass to the eviction strategy.
+   */
+  public Map<String, Set<String>> getProducerConnections() {
+    return Collections.unmodifiableMap(producerConnections);
   }
 
   /**

@@ -44,6 +44,8 @@ import com.pinterest.memq.core.security.Authorizer;
 import com.pinterest.memq.core.slot.SlotManager;
 
 import java.net.InetSocketAddress;
+import java.util.HashSet;
+import java.util.List;
 
 import io.netty.channel.ChannelHandlerContext;
 
@@ -159,14 +161,30 @@ public class PacketSwitchingHandler {
     TopicProcessor topicProcessor = mgr.getProcessorMap().get(writePacket.getTopicName());
     if (topicProcessor != null) {
       writeRquestCounter.inc();
+      // Resolve the canonical producer ID. v4 clients send a client-generated
+      // UUID so multiple producers on the same host are distinguished. v3
+      // clients don't send one, so we fall back to the remote IP.
+      String producerId;
+      if (requestPacket.getProtocolVersion() >= 4
+          && writePacket.getProducerId() != null
+          && !writePacket.getProducerId().isEmpty()) {
+        producerId = writePacket.getProducerId();
+      } else {
+        InetSocketAddress remote = (InetSocketAddress) ctx.channel().remoteAddress();
+        producerId = remote.getAddress().getHostAddress();
+      }
       SlotManager sm = mgr.getSlotManager();
       if (sm != null) {
-        InetSocketAddress remote = (InetSocketAddress) ctx.channel().remoteAddress();
-        sm.recordWrite(remote.getAddress().getHostAddress(), writePacket.getTopicName(),
-            writePacket.getDataLength());
+        sm.recordWrite(producerId, writePacket.getTopicName(), writePacket.getDataLength());
+        if (requestPacket.getProtocolVersion() >= 4) {
+          List<String> connections = writePacket.getCurrentConnections();
+          if (connections != null && !connections.isEmpty()) {
+            sm.recordProducerConnections(producerId, new HashSet<>(connections));
+          }
+        }
       }
       topicProcessor.registerChannel(ctx.channel());
-      topicProcessor.write(requestPacket, writePacket, ctx);
+      topicProcessor.write(requestPacket, writePacket, ctx, producerId);
     } else if (governor.getTopicMetadataMap().containsKey(writePacket.getTopicName())) {
       throw new RedirectionException(301, null);
     } else {

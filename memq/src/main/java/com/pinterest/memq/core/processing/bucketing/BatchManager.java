@@ -18,6 +18,8 @@ package com.pinterest.memq.core.processing.bucketing;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
 import com.pinterest.memq.commons.storage.StorageHandler;
 import com.pinterest.memq.core.commons.MemqProcessingThreadFactory;
+import com.pinterest.memq.core.eviction.EvictionManager;
+import com.pinterest.memq.core.slot.SlotManager;
 import com.pinterest.memq.core.utils.MiscUtils;
 
 import com.codahale.metrics.Counter;
@@ -49,6 +51,8 @@ public class BatchManager {
   private volatile int countDispatchThreshold;
   private final StorageHandler handler;
   private final MetricRegistry registry;
+  private volatile EvictionManager evictionManager;
+  private volatile SlotManager slotManager;
 
   private static final int PAYLOAD_CACHE_SIZE_LIMIT = 10;
 
@@ -104,7 +108,8 @@ public class BatchManager {
                     long serverRequestId,
                     long clientRequestId,
                     short protocolVersion,
-                    ChannelHandlerContext ctx) {
+                    ChannelHandlerContext ctx,
+                    String producerId) {
     if (writePacket.isChecksumExists()) {
       Timer.Context payloadValidationTimer = payloadValidationTime.time();
       try {
@@ -120,7 +125,7 @@ public class BatchManager {
     Timer.Context payloadWriteTimeTimer = payloadWriteTime.time();
     try {
       while (batch != null) {
-        if(batch.write(writePacket, serverRequestId, clientRequestId, protocolVersion, ctx)) {
+        if(batch.write(writePacket, serverRequestId, clientRequestId, protocolVersion, ctx, producerId)) {
           payloadRetries.update(retries);
           return;
         } else {
@@ -197,5 +202,21 @@ public class BatchManager {
   public void forceDispatch() {
     currentBatch.seal();
     currentBatch.dispatch(false);
+  }
+
+  public EvictionManager getEvictionManager() {
+    return evictionManager;
+  }
+
+  public void setEvictionManager(EvictionManager evictionManager) {
+    this.evictionManager = evictionManager;
+  }
+
+  public SlotManager getSlotManager() {
+    return slotManager;
+  }
+
+  public void setSlotManager(SlotManager slotManager) {
+    this.slotManager = slotManager;
   }
 }

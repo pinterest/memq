@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -57,6 +58,7 @@ import com.pinterest.memq.commons.protocol.ResponsePacket;
 import com.pinterest.memq.commons.protocol.TopicMetadata;
 import com.pinterest.memq.commons.protocol.TopicMetadataRequestPacket;
 import com.pinterest.memq.commons.protocol.TopicMetadataResponsePacket;
+import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 
 public class MemqCommonClient implements Closeable {
 
@@ -75,6 +77,10 @@ public class MemqCommonClient implements Closeable {
   private Map<Endpoint, Integer> failureCounts;
   private final AtomicInteger writeRotateIdx = new AtomicInteger(0);
   private final AtomicInteger localityRotateIdx = new AtomicInteger(0);
+  private volatile TreeMap<Double, Endpoint> weightedEndpointMap;
+  private final String producerId = java.util.UUID.randomUUID().toString();
+  private final ConcurrentHashMap<String, Integer> slotsOwned = new ConcurrentHashMap<>();
+  private int maxConnections = 0;
 
   protected MemqCommonClient(SSLConfig sslConfig, Properties networkProperties) {
     if (networkProperties != null) {
@@ -261,6 +267,7 @@ public class MemqCommonClient implements Closeable {
     }
     TopicMetadataResponsePacket resp = ((TopicMetadataResponsePacket) responsePacket.getPacket());
     writeEndpoints = Collections.emptyList();
+    rebuildWeightedMap();
     return resp.getMetadata();
   }
 
@@ -342,13 +349,18 @@ public class MemqCommonClient implements Closeable {
    * @return the endpoints to try
    */
   protected List<Endpoint> getEndpointsToTry() {
-    // Snapshot current lists to avoid races and in-place mutation
+    // Weighted path (v4 with slot data) — entirely separate from legacy
+    TreeMap<Double, Endpoint> wm = this.weightedEndpointMap;
+    if (wm != null && !wm.isEmpty()) {
+      return selectWeightedEndpoint(wm);
+    }
+
+    // Legacy round-robin path (v3 / no slot data)
     List<Endpoint> writes = this.writeEndpoints;
     List<Endpoint> locals = this.localityEndpoints;
     List<Endpoint> endpointsToTry = new ArrayList<>(writes.size() + locals.size());
 
     if (writes.size() == numWriteEndpoints) {
-      // If the set of writeEndpoints is full, rotate the writeEndpoints by 1 and add the localityEndpoints that are not in the set of writeEndpoints to the end of the list
       int start = Math.floorMod(writeRotateIdx.getAndIncrement(), Math.max(1, writes.size()));
       for (int i = 0; i < writes.size(); i++) {
         endpointsToTry.add(writes.get((start + i) % writes.size()));
@@ -359,7 +371,6 @@ public class MemqCommonClient implements Closeable {
         }
       }
     } else {
-      // If the set of writeEndpoints is not full, rotate the localityEndpoints by 1
       int start = Math.floorMod(localityRotateIdx.getAndIncrement(), Math.max(1, locals.size()));
       for (int i = 0; i < locals.size(); i++) {
         endpointsToTry.add(locals.get((start + i) % locals.size()));
@@ -367,6 +378,59 @@ public class MemqCommonClient implements Closeable {
     }
 
     return endpointsToTry;
+  }
+
+  /**
+   * Probabilistic endpoint selection using normalized cumulative weights (0.0 to 1.0).
+   * O(log n) lookup via TreeMap.higherEntry, then appends remaining endpoints as fallbacks.
+   */
+  private List<Endpoint> selectWeightedEndpoint(TreeMap<Double, Endpoint> wm) {
+    List<Endpoint> locals = this.localityEndpoints;
+    List<Endpoint> writes = this.writeEndpoints;
+
+    double rand = ThreadLocalRandom.current().nextDouble();
+    Endpoint chosen = wm.higherEntry(rand).getValue();
+
+    List<Endpoint> result = new ArrayList<>(writes.size() + locals.size());
+    result.add(chosen);
+    for (Endpoint ep : wm.values()) {
+      if (!ep.equals(chosen)) {
+        result.add(ep);
+      }
+    }
+    for (Endpoint ep : locals) {
+      if (!writes.contains(ep)) {
+        result.add(ep);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Rebuild the normalized weight map from slotsOwned + writeEndpoints.
+   * Keys are cumulative weights normalized to [0.0, 1.0], so the last key is always 1.0.
+   * Called whenever either data source changes. The map is set to null when
+   * weighted selection is not applicable (no slot data or insufficient write endpoints).
+   */
+  void rebuildWeightedMap() {
+    List<Endpoint> writes = this.writeEndpoints;
+    if (slotsOwned.isEmpty() || writes.size() < numWriteEndpoints) {
+      this.weightedEndpointMap = null;
+      return;
+    }
+    int totalSlots = 0;
+    for (Endpoint ep : writes) {
+      String ip = ep.getAddress().getHostString();
+      totalSlots += Math.max(slotsOwned.getOrDefault(ip, 1), 1);
+    }
+    TreeMap<Double, Endpoint> map = new TreeMap<>();
+    double cumulative = 0;
+    for (Endpoint ep : writes) {
+      String ip = ep.getAddress().getHostString();
+      cumulative += (double) Math.max(slotsOwned.getOrDefault(ip, 1), 1) / totalSlots;
+      map.put(cumulative, ep);
+    }
+    this.weightedEndpointMap = map;
   }
 
   /**
@@ -387,6 +451,7 @@ public class MemqCommonClient implements Closeable {
       List<Endpoint> newWrites = new ArrayList<>(currentWrites);
       newWrites.add(endpoint);
       this.writeEndpoints = Collections.unmodifiableList(newWrites);
+      rebuildWeightedMap();
     }
     List<Endpoint> currentLocals = this.localityEndpoints;
     if (!currentLocals.contains(endpoint)) {
@@ -429,6 +494,7 @@ public class MemqCommonClient implements Closeable {
 
       this.localityEndpoints = Collections.unmodifiableList(newLocals);
       this.writeEndpoints = Collections.unmodifiableList(newWrites);
+      rebuildWeightedMap();
       validateEndpoints();
   }
 
@@ -468,6 +534,72 @@ public class MemqCommonClient implements Closeable {
       String[] parts = e.split(":");
       return new Endpoint(InetSocketAddress.createUnresolved(parts[0], Short.parseShort(parts[1])));
     }).collect(Collectors.toList());
+  }
+
+  public void handleWriteResponse(WriteResponsePacket writeResp, InetSocketAddress sourceAddress) {
+    if (writeResp == null) {
+      return;
+    }
+
+    if (writeResp.hasEviction()) {
+      String targetIp = writeResp.getTargetBrokerIp();
+      int slotsToEvict = writeResp.getNumSlotsToEvict();
+
+      slotsOwned.merge(targetIp, slotsToEvict, Integer::sum);
+
+      if (sourceAddress != null) {
+        String sourceIp = sourceAddress.getHostString();
+        int remaining = writeResp.getNumSlotsOwned();
+        if (remaining > 0) {
+          slotsOwned.put(sourceIp, remaining);
+        } else {
+          slotsOwned.remove(sourceIp);
+        }
+      }
+
+      enforceMaxConnections();
+      rebuildWeightedMap();
+      logger.info("Eviction received: source=" + sourceAddress + " target=" + targetIp
+          + " slotsToEvict=" + slotsToEvict + " remaining=" + writeResp.getNumSlotsOwned());
+    }
+  }
+
+  private void enforceMaxConnections() {
+    if (maxConnections <= 0) return;
+    while (slotsOwned.size() > maxConnections) {
+      String minIp = null;
+      int minSlots = Integer.MAX_VALUE;
+      for (Map.Entry<String, Integer> entry : slotsOwned.entrySet()) {
+        if (entry.getValue() < minSlots) {
+          minSlots = entry.getValue();
+          minIp = entry.getKey();
+        }
+      }
+      if (minIp != null) {
+        slotsOwned.remove(minIp);
+      } else {
+        break;
+      }
+    }
+  }
+
+  public String getProducerId() {
+    return producerId;
+  }
+
+  public List<String> getCurrentConnectionsList() {
+    if (slotsOwned.isEmpty()) {
+      return Collections.emptyList();
+    }
+    return new ArrayList<>(slotsOwned.keySet());
+  }
+
+  public ConcurrentHashMap<String, Integer> getSlotsOwned() {
+    return slotsOwned;
+  }
+
+  public void setMaxConnections(int maxConnections) {
+    this.maxConnections = maxConnections;
   }
 
   public boolean isClosed() {

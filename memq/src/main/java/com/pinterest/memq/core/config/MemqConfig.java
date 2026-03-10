@@ -77,6 +77,8 @@ public class MemqConfig extends Configuration {
   private GossipConfig gossipConfig = null;
   
   private SlotAccountingConfig slotAccountingConfig = null;
+
+  private EvictionConfig evictionConfig = null;
   
   private String topicCacheFile = "/tmp/.memq_topic_cache";
 
@@ -286,6 +288,14 @@ public class MemqConfig extends Configuration {
 
   public void setSlotAccountingConfig(SlotAccountingConfig slotAccountingConfig) {
     this.slotAccountingConfig = slotAccountingConfig;
+  }
+
+  public EvictionConfig getEvictionConfig() {
+    return evictionConfig;
+  }
+
+  public void setEvictionConfig(EvictionConfig evictionConfig) {
+    this.evictionConfig = evictionConfig;
   }
 
   public Map<String, Object> getAdditionalConfigs() {

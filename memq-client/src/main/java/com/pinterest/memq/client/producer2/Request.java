@@ -29,6 +29,7 @@ import com.pinterest.memq.commons.protocol.RequestType;
 import com.pinterest.memq.commons.protocol.ResponseCodes;
 import com.pinterest.memq.commons.protocol.ResponsePacket;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
+import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.core.utils.MemqUtils;
 import com.pinterest.memq.core.utils.MiscUtils;
 
@@ -44,6 +45,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.List;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -101,6 +103,8 @@ public class Request {
   private final ByteBuf requestPacketHeaderByteBuf;
   private final ByteBuf writeRequestPacketHeaderByteBuf;
   private final ByteBuf payloadByteBuf;
+  private final String snapshotProducerId;
+  private final List<String> snapshotConnections;
   private OutputStream outputStream;
   private byte[] messageIdHash;
   private int messageCount;
@@ -148,10 +152,25 @@ public class Request {
     int bufferCapacity = getByteBufCapacity(maxRequestSize, compression);
     largeByteBuf = MemqPooledByteBufAllocator.buffer(bufferCapacity, bufferCapacity, maxBlockMs);
     requestPacketHeaderByteBuf = largeByteBuf.retainedSlice(0, RequestPacket.getHeaderSize());
-    writeRequestPacketHeaderByteBuf = largeByteBuf.retainedSlice(RequestPacket.getHeaderSize(), WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, topic));
-    payloadByteBuf = largeByteBuf.retainedSlice(RequestPacket.getHeaderSize() + WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, topic), bufferCapacity - requestPacketHeaderByteBuf.readableBytes() - writeRequestPacketHeaderByteBuf.readableBytes());
-    requestPacketHeaderByteBuf.resetWriterIndex();
+    int writeHeaderSize;
+    if (RequestType.PROTOCOL_VERSION >= 4) {
+      snapshotProducerId = client.getProducerId();
+      snapshotConnections = client.getCurrentConnectionsList();
+      writeHeaderSize = WriteRequestPacket.getHeaderSize(
+          RequestType.PROTOCOL_VERSION, topic, snapshotProducerId, snapshotConnections);
+    } else {
+      snapshotProducerId = null;
+      snapshotConnections = null;
+      writeHeaderSize = WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, topic);
+    }
+    writeRequestPacketHeaderByteBuf = largeByteBuf.retainedSlice(
+        RequestPacket.getHeaderSize(), writeHeaderSize);
+    payloadByteBuf = largeByteBuf.retainedSlice(
+        RequestPacket.getHeaderSize() + writeHeaderSize,
+        bufferCapacity - requestPacketHeaderByteBuf.readableBytes()
+            - writeRequestPacketHeaderByteBuf.readableBytes());
     writeRequestPacketHeaderByteBuf.resetWriterIndex();
+    requestPacketHeaderByteBuf.resetWriterIndex();
     payloadByteBuf.resetWriterIndex();
     try {
       initializeOutputStream();
@@ -315,14 +334,21 @@ public class Request {
 
     WriteRequestPacket writeRequestPacket = new WriteRequestPacket(disableAcks,
             topic.getBytes(), true, checksum, payload.duplicate());
-    writeRequestPacket.writeHeader(writeRequestPacketHeaderByteBuf, RequestType.PROTOCOL_VERSION);
+    if (RequestType.PROTOCOL_VERSION >= 4) {
+      writeRequestPacket.setProducerId(snapshotProducerId);
+      writeRequestPacket.setCurrentConnections(snapshotConnections);
+    }
+
+    ByteBuf headerBuf = writeRequestPacketHeaderByteBuf;
+    writeRequestPacket.writeHeader(headerBuf, RequestType.PROTOCOL_VERSION);
+
     RequestPacket requestPacket = new RequestPacket(RequestType.PROTOCOL_VERSION, clientRequestId, RequestType.WRITE,
             writeRequestPacket);
     requestPacket.writeHeader(requestPacketHeaderByteBuf, RequestType.PROTOCOL_VERSION);
 
     CompositeByteBuf finalCompositeByteBuf = PooledByteBufAllocator.DEFAULT.compositeBuffer();
     finalCompositeByteBuf.addComponent(true, requestPacketHeaderByteBuf);
-    finalCompositeByteBuf.addComponent(true, writeRequestPacketHeaderByteBuf);
+    finalCompositeByteBuf.addComponent(true, headerBuf);
     finalCompositeByteBuf.addComponent(true, payloadByteBuf);
     requestPacket.setPreAllocOutBuf(finalCompositeByteBuf);
     return requestPacket;
@@ -506,6 +532,10 @@ public class Request {
           int ackLatency = (int) (System.currentTimeMillis() - writeTimestamp);
           ackTime.stop();
           logger.debug("Request acked in:" + ackLatency + " " + clientRequestId);
+          if (responsePacket.getPacket() instanceof WriteResponsePacket) {
+            WriteResponsePacket writeResp = (WriteResponsePacket) responsePacket.getPacket();
+            client.handleWriteResponse(writeResp, responsePacket.getSourceAddress());
+          }
           resolve(new MemqWriteResult(clientRequestId, writeLatency, ackLatency, payloadSizeBytes));
           break;
         case ResponseCodes.REDIRECT:

@@ -49,8 +49,10 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
 import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.commons.storage.StorageHandler;
+import com.pinterest.memq.core.eviction.EvictionManager;
 import com.pinterest.memq.core.processing.Ackable;
 import com.pinterest.memq.core.processing.TopicProcessor;
+import com.pinterest.memq.core.slot.SlotManager;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
@@ -114,7 +116,8 @@ public class BucketingTopicProcessor extends TopicProcessor {
   @Override
   public long write(RequestPacket basePacket,
                     WriteRequestPacket writePacket,
-                    ChannelHandlerContext ctx) {
+                    ChannelHandlerContext ctx,
+                    String producerId) {
     if (writePacket.isDisableAcks()) {
       // send an OK to producer even if ack is disabled
       ctx.writeAndFlush(new ResponsePacket(basePacket.getProtocolVersion(),
@@ -149,7 +152,7 @@ public class BucketingTopicProcessor extends TopicProcessor {
 
     Timer.Context totalWriteLatencyTimer = totalWriteLatency.time();
     batchManager.write(writePacket, serverRequestId, basePacket.getClientRequestId(),
-        basePacket.getProtocolVersion(), ctx);
+        basePacket.getProtocolVersion(), ctx, producerId);
     totalWriteLatencyTimer.stop();
     return serverRequestId;
   }
@@ -276,6 +279,14 @@ public class BucketingTopicProcessor extends TopicProcessor {
     } catch (IOException e) {
       throw new InternalServerErrorException(Response.serverError().build(), e);
     }
+  }
+
+  public void setEvictionManager(EvictionManager evictionManager) {
+    batchManager.setEvictionManager(evictionManager);
+  }
+
+  public void setSlotManager(SlotManager slotManager) {
+    batchManager.setSlotManager(slotManager);
   }
 
   @Override
