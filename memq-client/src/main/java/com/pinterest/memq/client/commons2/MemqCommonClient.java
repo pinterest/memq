@@ -270,6 +270,13 @@ public class MemqCommonClient implements Closeable {
     return getTopicMetadata(topic, connectTimeout);
   }
 
+  /**
+   * Get all topics from the MemQ cluster.
+   * @return a collection of TopicMetadata objects
+   * @throws ExecutionException
+   * @throws InterruptedException
+   * @throws TimeoutException
+   */
   public Collection<TopicMetadata> getTopics() throws ExecutionException, InterruptedException,
                                                TimeoutException {
     Future<ResponsePacket> response = sendRequestPacketAndReturnResponseFuture(

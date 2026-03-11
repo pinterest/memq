@@ -471,6 +471,11 @@ public final class MemqConsumer<K, V> implements Closeable {
     return notificationSource.getLatestOffsets(partitions);
   }
 
+  /**
+   * Get all topics from the MemQ cluster. This method is only available for non-direct consumers.
+   * @return a collection of TopicMetadata objects
+   * @throws Exception
+   */
   public Collection<TopicMetadata> getTopics() throws Exception {
     if (client == null) {
       throw new IllegalStateException("getTopics() requires a non-direct consumer with bootstrap servers");
