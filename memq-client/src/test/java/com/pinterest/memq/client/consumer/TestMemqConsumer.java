@@ -476,6 +476,20 @@ public class TestMemqConsumer {
     assertEquals("Skip to last MUST yield only 1 message", 1, i);
   }
 
+  @Test(expected = IllegalStateException.class)
+  public void testGetTopicsThrowsForDirectConsumer() throws Exception {
+    Properties mcProps = new Properties();
+    mcProps.put(DRY_RUN_KEY, "true");
+    mcProps.put(KEY_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
+    mcProps.put(VALUE_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
+    MemqConsumer<byte[], byte[]> mc = new MemqConsumer<>(mcProps);
+    try {
+      mc.getTopics();
+    } finally {
+      mc.close();
+    }
+  }
+
   public abstract class MemqInput implements StorageHandler {
 
     @Override

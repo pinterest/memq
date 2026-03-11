@@ -270,7 +270,7 @@ public class MemqCommonClient implements Closeable {
     return getTopicMetadata(topic, connectTimeout);
   }
 
-  public Collection<String> getTopics() throws ExecutionException, InterruptedException,
+  public Collection<TopicMetadata> getTopics() throws ExecutionException, InterruptedException,
                                                TimeoutException {
     Future<ResponsePacket> response = sendRequestPacketAndReturnResponseFuture(
         new RequestPacket(RequestType.PROTOCOL_VERSION, ThreadLocalRandom.current().nextLong(),
@@ -278,12 +278,8 @@ public class MemqCommonClient implements Closeable {
         "", connectTimeout);
     ResponsePacket responsePacket = response.get(connectTimeout, TimeUnit.MILLISECONDS);
     TopicMetadataResponsePacket resp = (TopicMetadataResponsePacket) responsePacket.getPacket();
-    List<String> topicNames = new ArrayList<>();
-    for (TopicMetadata md : resp.getMetadataList()) {
-      topicNames.add(md.getTopicName());
-    }
     writeEndpoints = Collections.emptyList();
-    return topicNames;
+    return resp.getMetadataList();
   }
 
   public synchronized void reconnect(String topic, boolean isConsumer) throws Exception {

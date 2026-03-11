@@ -533,4 +533,44 @@ public class TestMemqCommonClient {
     client.close();
     server.stop();
   }
+
+  @Test
+  public void testGetTopics() throws Exception {
+    Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
+
+    map.put(RequestType.TOPIC_METADATA, (ctx, req) -> {
+      TopicMetadataRequestPacket mdPkt = (TopicMetadataRequestPacket) req.getPayload();
+      if (mdPkt.getTopics().isEmpty()) {
+        List<TopicMetadata> allMetadata = Arrays.asList(
+            new TopicMetadata("topicA", "handler", new Properties()),
+            new TopicMetadata("topicB", "handler", new Properties()),
+            new TopicMetadata("topicC", "handler", new Properties()));
+        ctx.writeAndFlush(new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+            req.getRequestType(), ResponseCodes.OK, new TopicMetadataResponsePacket(allMetadata)));
+      } else {
+        TopicMetadata md = new TopicMetadata(mdPkt.getTopic(), "handler", new Properties());
+        ctx.writeAndFlush(new ResponsePacket(req.getProtocolVersion(), req.getClientRequestId(),
+            req.getRequestType(), ResponseCodes.OK, new TopicMetadataResponsePacket(md)));
+      }
+    });
+
+    MockMemqServer mockServer = new MockMemqServer(port, map);
+    mockServer.start();
+
+    MemqCommonClient client = new MemqCommonClient("", null, new Properties());
+    client.initialize(Collections.singletonList(commonEndpoint));
+
+    java.util.Collection<TopicMetadata> topics = client.getTopics();
+    assertEquals(3, topics.size());
+    Set<String> topicNames = new HashSet<>();
+    for (TopicMetadata md : topics) {
+      topicNames.add(md.getTopicName());
+    }
+    assertTrue(topicNames.contains("topicA"));
+    assertTrue(topicNames.contains("topicB"));
+    assertTrue(topicNames.contains("topicC"));
+
+    client.close();
+    mockServer.stop();
+  }
 }

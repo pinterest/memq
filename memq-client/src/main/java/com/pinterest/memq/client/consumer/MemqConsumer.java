@@ -471,7 +471,7 @@ public final class MemqConsumer<K, V> implements Closeable {
     return notificationSource.getLatestOffsets(partitions);
   }
 
-  public Collection<String> getTopics() throws Exception {
+  public Collection<TopicMetadata> getTopics() throws Exception {
     if (client == null) {
       throw new IllegalStateException("getTopics() requires a non-direct consumer with bootstrap servers");
     }
