@@ -18,6 +18,7 @@ package com.pinterest.memq.client.commons2;
 import static com.pinterest.memq.client.commons2.Endpoint.DEFAULT_LOCALITY;
 
 import java.io.Closeable;
+import java.util.Collection;
 import java.io.File;
 import java.io.IOException;
 import java.net.ConnectException;
@@ -267,6 +268,22 @@ public class MemqCommonClient implements Closeable {
                                                       ExecutionException, InterruptedException,
                                                       TimeoutException {
     return getTopicMetadata(topic, connectTimeout);
+  }
+
+  public Collection<String> getTopics() throws ExecutionException, InterruptedException,
+                                               TimeoutException {
+    Future<ResponsePacket> response = sendRequestPacketAndReturnResponseFuture(
+        new RequestPacket(RequestType.PROTOCOL_VERSION, ThreadLocalRandom.current().nextLong(),
+            RequestType.TOPIC_METADATA, new TopicMetadataRequestPacket(Collections.emptyList())),
+        "", connectTimeout);
+    ResponsePacket responsePacket = response.get(connectTimeout, TimeUnit.MILLISECONDS);
+    TopicMetadataResponsePacket resp = (TopicMetadataResponsePacket) responsePacket.getPacket();
+    List<String> topicNames = new ArrayList<>();
+    for (TopicMetadata md : resp.getMetadataList()) {
+      topicNames.add(md.getTopicName());
+    }
+    writeEndpoints = Collections.emptyList();
+    return topicNames;
   }
 
   public synchronized void reconnect(String topic, boolean isConsumer) throws Exception {

@@ -16,6 +16,8 @@
 package com.pinterest.memq.core.rpc;
 
 import java.security.Principal;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.logging.Logger;
 
 import javax.ws.rs.InternalServerErrorException;
@@ -88,15 +90,23 @@ public class PacketSwitchingHandler {
     case TOPIC_METADATA:
       TopicMetadataRequestPacket mdRequest = (TopicMetadataRequestPacket) requestPacket
           .getPayload();
-      TopicMetadata md = governor.getTopicMetadataMap().get(mdRequest.getTopic());
-      if (md == null) {
-        throw TOPIC_NOT_FOUND;
+      List<String> requestedTopics = mdRequest.getTopics();
+      List<TopicMetadata> results;
+      if (requestedTopics.isEmpty()) {
+        results = new ArrayList<>(governor.getTopicMetadataMap().values());
       } else {
-        ResponsePacket msg = new ResponsePacket(requestPacket.getProtocolVersion(),
-            requestPacket.getClientRequestId(), requestPacket.getRequestType(), ResponseCodes.OK,
-            new TopicMetadataResponsePacket(md));
-        ctx.writeAndFlush(msg);
+        results = new ArrayList<>(requestedTopics.size());
+        for (String t : requestedTopics) {
+          TopicMetadata md = governor.getTopicMetadataMap().get(t);
+          if (md == null) {
+            throw new NotFoundException("Topic not found:" + t);
+          }
+          results.add(md);
+        }
       }
+      ctx.writeAndFlush(new ResponsePacket(requestPacket.getProtocolVersion(),
+          requestPacket.getClientRequestId(), requestPacket.getRequestType(), ResponseCodes.OK,
+          new TopicMetadataResponsePacket(results)));
       break;
     case READ:
       ReadRequestPacket readPacket = (ReadRequestPacket) requestPacket.getPayload();
