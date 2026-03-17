@@ -171,6 +171,9 @@ public final class MemqConsumer<K, V> implements Closeable {
     this.isBufferToFile = Boolean
         .parseBoolean(props.getProperty(BUFFER_TO_FILE_CONFIG_KEY, "false"));
     this.isDirectBuffer = Boolean.parseBoolean(props.getProperty(USE_DIRECT_BUFFER_KEY, "false"));
+    if (isDirectBuffer) {
+      logger.info("Using direct buffer");
+    }
 
     String clientId = props.getProperty(CLIENT_ID, UUID.randomUUID().toString());
     checkAndConfigureTmpFileBuffering(props, clientId);
@@ -255,12 +258,10 @@ public final class MemqConsumer<K, V> implements Closeable {
       iteratorExceptionCounter = metricRegistry.counter("iterator.exception");
       loadBatchExceptionCounter = metricRegistry.counter("loading.exception");
 
-      if (isDirectBuffer) {
-        metricRegistry.gauge("netty.direct.memory.used",
-            () -> () -> PooledByteBufAllocator.DEFAULT.metric().usedDirectMemory());
-        metricRegistry.gauge("netty.heap.memory.used",
-            () -> () -> PooledByteBufAllocator.DEFAULT.metric().usedHeapMemory());
-      }
+      metricRegistry.gauge("netty.direct.memory.used",
+              () -> () -> PooledByteBufAllocator.DEFAULT.metric().usedDirectMemory());
+      metricRegistry.gauge("netty.heap.memory.used",
+              () -> () -> PooledByteBufAllocator.DEFAULT.metric().usedHeapMemory());
     }
   }
 
