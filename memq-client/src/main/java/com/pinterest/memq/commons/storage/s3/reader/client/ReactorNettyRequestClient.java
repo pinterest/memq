@@ -27,6 +27,8 @@ import com.codahale.metrics.MetricRegistry;
 import io.netty.handler.ssl.SslClosedEngineException;
 import io.netty.handler.timeout.ReadTimeoutException;
 import reactor.netty.http.client.HttpClient;
+import reactor.netty.resources.ConnectionProvider;
+import reactor.netty.resources.LoopResources;
 import reactor.util.retry.RetrySpec;
 import software.amazon.awssdk.http.SdkHttpFullRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
@@ -55,14 +57,20 @@ public class ReactorNettyRequestClient implements RequestClient {
   public static final String READ_TIMEOUT_MS = "readTimeoutMs";
   public static final String RESPONSE_TIMEOUT_MS = "responseTimeoutMs";
   public static final String MAX_RETRIES = "maxRetries";
+  public static final String EVENT_LOOP_THREADS = "eventLoopThreads";
+  public static final String MAX_CONNECTIONS = "maxConnections";
   private static final Logger logger = LoggerFactory.getLogger(ReactorNettyRequestClient.class);
 
   private static final long DEFAULT_READ_TIMEOUT_MS = 10000;
+  private static final int DEFAULT_EVENT_LOOP_THREADS = 2;
+  private static final int DEFAULT_MAX_CONNECTIONS = 64;
 
   private final S3Presigner presigner;
   private final MetricRegistry metricRegistry;
 
   private HttpClient client;
+  private LoopResources loopResources;
+  private ConnectionProvider connectionProvider;
   private int maxRetries = 4;
   private Duration readTimeoutDuration;
   private Duration responseTimeoutDuration;
@@ -87,15 +95,28 @@ public class ReactorNettyRequestClient implements RequestClient {
     if (properties.containsKey(RESPONSE_TIMEOUT_MS)) {
       responseTimeoutDuration = Duration.ofMillis(Long.parseLong(properties.getProperty(RESPONSE_TIMEOUT_MS)));
     } else {
-      // default to max number of attempts times read timeout plus a small buffer to avoid competing with read timeouts
       responseTimeoutDuration = readTimeoutDuration.multipliedBy(maxRetries + 1).plusMillis(100);
     }
+
+    int eventLoopThreads = Integer.parseInt(
+        properties.getProperty(EVENT_LOOP_THREADS, String.valueOf(DEFAULT_EVENT_LOOP_THREADS)));
+    int maxConns = Integer.parseInt(
+        properties.getProperty(MAX_CONNECTIONS, String.valueOf(DEFAULT_MAX_CONNECTIONS)));
+
+    this.loopResources = LoopResources.create("memq-s3", eventLoopThreads, true);
+    this.connectionProvider = ConnectionProvider.builder("memq-s3")
+        .maxConnections(maxConns)
+        .build();
+
+    logger.info("Initialized ReactorNettyRequestClient with {} event loop threads and {} max connections",
+        eventLoopThreads, maxConns);
 
     this.client = createHttpClient();
   }
 
   private HttpClient createHttpClient() {
-    return HttpClient.create()
+    return HttpClient.create(connectionProvider)
+        .runOn(loopResources)
         .option(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
         .option(ChannelOption.SO_LINGER, 0)
         .responseTimeout(readTimeoutDuration)
@@ -228,5 +249,19 @@ public class ReactorNettyRequestClient implements RequestClient {
   @Override
   public void close() throws IOException {
     presigner.close();
+    try {
+      if (connectionProvider != null) {
+        connectionProvider.disposeLater().block(Duration.ofSeconds(5));
+      }
+    } catch (Exception e) {
+      logger.warn("Error disposing connection provider", e);
+    }
+    try {
+      if (loopResources != null) {
+        loopResources.disposeLater().block(Duration.ofSeconds(5));
+      }
+    } catch (Exception e) {
+      logger.warn("Error disposing loop resources", e);
+    }
   }
 }
