@@ -173,6 +173,8 @@ public final class MemqConsumer<K, V> implements Closeable {
     this.isDirectBuffer = Boolean.parseBoolean(props.getProperty(USE_DIRECT_BUFFER_KEY, "false"));
     if (isDirectBuffer) {
       logger.info("Using direct buffer");
+    } else {
+      logger.info("Using heap buffer");
     }
 
     String clientId = props.getProperty(CLIENT_ID, UUID.randomUUID().toString());
@@ -324,10 +326,15 @@ public final class MemqConsumer<K, V> implements Closeable {
       } else if (isDirectBuffer) {
         ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT
             .directBuffer(storageHandler.getBatchSizeFromNotification(nextNotificationToProcess));
-        ByteBufOutputStream out = new ByteBufOutputStream(byteBuf);
-        IOUtils.copy(stream, out);
-        newStream = new ByteBufInputStream(byteBuf, true);
-        out.close();
+        try {
+          ByteBufOutputStream out = new ByteBufOutputStream(byteBuf);
+          IOUtils.copy(stream, out);
+          newStream = new ByteBufInputStream(byteBuf, true);
+          out.close();
+        } catch (Exception e) {
+          byteBuf.release();
+          throw e;
+        }
       } else {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         IOUtils.copy(stream, out);
