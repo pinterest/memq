@@ -61,13 +61,16 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.mutable.MutableInt;
+import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 
@@ -148,6 +151,7 @@ public final class MemqConsumer<K, V> implements Closeable {
   private volatile boolean closed = false;
 
   // metrics
+  private final AtomicLong bytesConsumedTotal = new AtomicLong(0);
   private MetricRegistry metricRegistry;
   private File bufferFile;
   private String cluster;
@@ -320,15 +324,16 @@ public final class MemqConsumer<K, V> implements Closeable {
     InputStream stream = fetchBatchStreamForNotification(nextNotificationToProcess);
     InputStream newStream;
     try {
+      long bytesCopied;
       if (isBufferToFile) {
-        IOUtils.copy(stream, new FileOutputStream(bufferFile));
+        bytesCopied = IOUtils.copy(stream, new FileOutputStream(bufferFile));
         newStream = new FileInputStream(bufferFile);
       } else if (isDirectBuffer) {
         ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT
             .directBuffer(storageHandler.getBatchSizeFromNotification(nextNotificationToProcess));
         try {
           ByteBufOutputStream out = new ByteBufOutputStream(byteBuf);
-          IOUtils.copy(stream, out);
+          bytesCopied = IOUtils.copy(stream, out);
           newStream = new ByteBufInputStream(byteBuf, true);
           out.close();
         } catch (Exception e) {
@@ -337,10 +342,11 @@ public final class MemqConsumer<K, V> implements Closeable {
         }
       } else {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        IOUtils.copy(stream, out);
+        bytesCopied = IOUtils.copy(stream, out);
         newStream = new ByteArrayInputStream(out.toByteArray());
         out.close();
       }
+      bytesConsumedTotal.addAndGet(bytesCopied);
       return new DataInputStream(newStream);
     } finally {
       try {
@@ -734,6 +740,21 @@ public final class MemqConsumer<K, V> implements Closeable {
 
   public MetricRegistry getMetricRegistry() {
     return metricRegistry;
+  }
+
+  public long getBytesConsumedTotal() {
+    return bytesConsumedTotal.get();
+  }
+
+  public Map<MetricName, ? extends org.apache.kafka.common.Metric> getNotificationConsumerMetrics() {
+    if (notificationSource == null) {
+      return Collections.emptyMap();
+    }
+    Object raw = notificationSource.getRawObject();
+    if (raw instanceof Consumer) {
+      return ((Consumer<?, ?>) raw).metrics();
+    }
+    return Collections.emptyMap();
   }
 
   public String getTopicName() {
