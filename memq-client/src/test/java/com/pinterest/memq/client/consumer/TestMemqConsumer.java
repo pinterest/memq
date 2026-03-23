@@ -20,6 +20,7 @@ import static com.pinterest.memq.client.commons.ConsumerConfigs.KEY_DESERIALIZER
 import static com.pinterest.memq.client.commons.ConsumerConfigs.VALUE_DESERIALIZER_CLASS_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -488,6 +489,158 @@ public class TestMemqConsumer {
     } finally {
       mc.close();
     }
+  }
+
+  @Test
+  public void testBytesConsumedTotalTracksBytes() throws Exception {
+    byte[] batchData = new byte[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    Properties mcProps = new Properties();
+    mcProps.put(KEY_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
+    mcProps.put(VALUE_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
+    mcProps.put(DRY_RUN_KEY, "true");
+    MemqInput input = new MemqInput() {
+      @Override
+      public InputStream fetchBatchStreamForNotification(JsonObject nextNotificationToProcess) {
+        return new ByteArrayInputStream(batchData);
+      }
+
+      @Override
+      public DataInputStream fetchMessageAtIndex(JsonObject objectNotification,
+                                                 IndexEntry index) throws IOException {
+        return null;
+      }
+
+      @Override
+      public BatchHeader fetchHeaderForBatch(JsonObject nextNotificationToProcess) throws IOException {
+        return null;
+      }
+
+      @Override
+      public void initReader(Properties properties, MetricRegistry registry) throws Exception {
+      }
+    };
+    MemqConsumer<byte[], byte[]> mc = new MemqConsumer<>(mcProps, input);
+
+    assertEquals(0, mc.getBytesConsumedTotal());
+
+    JsonObject notification = new JsonObject();
+    notification.addProperty("objectSize", batchData.length);
+
+    mc.fetchObjectToInputStream(notification);
+    assertEquals(batchData.length, mc.getBytesConsumedTotal());
+
+    mc.fetchObjectToInputStream(notification);
+    assertEquals(batchData.length * 2, mc.getBytesConsumedTotal());
+
+    mc.close();
+  }
+
+  @Test
+  public void testBytesConsumedTotalNotIncrementedOnError() throws Exception {
+    Properties mcProps = new Properties();
+    mcProps.put(KEY_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
+    mcProps.put(VALUE_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
+    mcProps.put(DRY_RUN_KEY, "true");
+    MemqInput input = new MemqInput() {
+      @Override
+      public InputStream fetchBatchStreamForNotification(JsonObject nextNotificationToProcess)
+          throws IOException {
+        throw new IOException("simulated S3 failure");
+      }
+
+      @Override
+      public DataInputStream fetchMessageAtIndex(JsonObject objectNotification,
+                                                 IndexEntry index) throws IOException {
+        return null;
+      }
+
+      @Override
+      public BatchHeader fetchHeaderForBatch(JsonObject nextNotificationToProcess) throws IOException {
+        return null;
+      }
+
+      @Override
+      public void initReader(Properties properties, MetricRegistry registry) throws Exception {
+      }
+    };
+    MemqConsumer<byte[], byte[]> mc = new MemqConsumer<>(mcProps, input);
+
+    assertEquals(0, mc.getBytesConsumedTotal());
+
+    JsonObject notification = new JsonObject();
+    notification.addProperty("objectSize", 100);
+
+    try {
+      mc.fetchObjectToInputStream(notification);
+      fail("Expected IOException");
+    } catch (IOException expected) {
+    }
+
+    assertEquals(0, mc.getBytesConsumedTotal());
+    mc.close();
+  }
+
+  @Test
+  public void testGetNotificationConsumerMetricsWithoutNotificationSource() throws Exception {
+    Properties mcProps = new Properties();
+    mcProps.put(DRY_RUN_KEY, "true");
+    mcProps.put(KEY_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
+    mcProps.put(VALUE_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
+    MemqConsumer<byte[], byte[]> mc = new MemqConsumer<>(mcProps);
+
+    Map<org.apache.kafka.common.MetricName, ? extends org.apache.kafka.common.Metric> metrics =
+        mc.getNotificationConsumerMetrics();
+    assertNotNull(metrics);
+    assertTrue(metrics.isEmpty());
+
+    mc.close();
+  }
+
+  @Test
+  public void testGetNotificationConsumerMetricsWithMockConsumer() throws Exception {
+    Properties mcProps = new Properties();
+    mcProps.put(DRY_RUN_KEY, "true");
+    mcProps.put(KEY_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
+    mcProps.put(VALUE_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
+    MemqInput input = new MemqInput() {
+      @Override
+      public InputStream fetchBatchStreamForNotification(JsonObject nextNotificationToProcess) {
+        return new ByteArrayInputStream(new byte[0]);
+      }
+
+      @Override
+      public DataInputStream fetchMessageAtIndex(JsonObject objectNotification,
+                                                 IndexEntry index) throws IOException {
+        return null;
+      }
+
+      @Override
+      public BatchHeader fetchHeaderForBatch(JsonObject nextNotificationToProcess) throws IOException {
+        return null;
+      }
+
+      @Override
+      public void initReader(Properties properties, MetricRegistry registry) throws Exception {
+      }
+    };
+    MemqConsumer<byte[], byte[]> mc = new MemqConsumer<>(mcProps, input);
+
+    // before setting notification source, metrics should be empty
+    assertTrue(mc.getNotificationConsumerMetrics().isEmpty());
+
+    MockConsumer<String, String> mockKafkaConsumer = new MockConsumer<>(OffsetResetStrategy.EARLIEST);
+    KafkaNotificationSource notificationSource = new KafkaNotificationSource(mockKafkaConsumer);
+    notificationSource.setParentConsumer(mc);
+    mc.setNotificationSource(notificationSource);
+
+    // after setting notification source, should delegate to the underlying Kafka consumer
+    Map<org.apache.kafka.common.MetricName, ? extends org.apache.kafka.common.Metric> metrics =
+        mc.getNotificationConsumerMetrics();
+    assertNotNull(metrics);
+    // metrics map is the same instance as what the underlying consumer returns
+    assertEquals(mockKafkaConsumer.metrics(), metrics);
+
+    mc.close();
   }
 
   public abstract class MemqInput implements StorageHandler {
