@@ -20,7 +20,6 @@ import static com.pinterest.memq.client.commons.ConsumerConfigs.KEY_DESERIALIZER
 import static com.pinterest.memq.client.commons.ConsumerConfigs.VALUE_DESERIALIZER_CLASS_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -53,6 +52,7 @@ import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.utils.ByteBufferOutputStream;
 import org.junit.Test;
 
+import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -521,16 +521,18 @@ public class TestMemqConsumer {
     };
     MemqConsumer<byte[], byte[]> mc = new MemqConsumer<>(mcProps, input);
 
-    assertEquals(0, mc.getBytesConsumedTotal());
+    com.codahale.metrics.Counter bytesCounter =
+        mc.getMetricRegistry().counter(MemqConsumer.BYTES_CONSUMED_TOTAL_METRIC);
+    assertEquals(0, bytesCounter.getCount());
 
     JsonObject notification = new JsonObject();
     notification.addProperty("objectSize", batchData.length);
 
     mc.fetchObjectToInputStream(notification);
-    assertEquals(batchData.length, mc.getBytesConsumedTotal());
+    assertEquals(batchData.length, bytesCounter.getCount());
 
     mc.fetchObjectToInputStream(notification);
-    assertEquals(batchData.length * 2, mc.getBytesConsumedTotal());
+    assertEquals(batchData.length * 2, bytesCounter.getCount());
 
     mc.close();
   }
@@ -565,7 +567,9 @@ public class TestMemqConsumer {
     };
     MemqConsumer<byte[], byte[]> mc = new MemqConsumer<>(mcProps, input);
 
-    assertEquals(0, mc.getBytesConsumedTotal());
+    com.codahale.metrics.Counter bytesCounter =
+        mc.getMetricRegistry().counter(MemqConsumer.BYTES_CONSUMED_TOTAL_METRIC);
+    assertEquals(0, bytesCounter.getCount());
 
     JsonObject notification = new JsonObject();
     notification.addProperty("objectSize", 100);
@@ -576,28 +580,28 @@ public class TestMemqConsumer {
     } catch (IOException expected) {
     }
 
-    assertEquals(0, mc.getBytesConsumedTotal());
+    assertEquals(0, bytesCounter.getCount());
     mc.close();
   }
 
   @Test
-  public void testGetNotificationConsumerMetricsWithoutNotificationSource() throws Exception {
+  public void testNotificationRecordsLagGaugeWithoutNotificationSource() throws Exception {
     Properties mcProps = new Properties();
     mcProps.put(DRY_RUN_KEY, "true");
     mcProps.put(KEY_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
     mcProps.put(VALUE_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
     MemqConsumer<byte[], byte[]> mc = new MemqConsumer<>(mcProps);
 
-    Map<org.apache.kafka.common.MetricName, ? extends org.apache.kafka.common.Metric> metrics =
-        mc.getNotificationConsumerMetrics();
-    assertNotNull(metrics);
-    assertTrue(metrics.isEmpty());
+    // without notification source, no lag gauge should be registered
+    assertFalse(mc.getMetricRegistry().getGauges()
+        .containsKey(MemqConsumer.NOTIFICATION_RECORDS_LAG_MAX_METRIC));
 
     mc.close();
   }
 
+  @SuppressWarnings("unchecked")
   @Test
-  public void testGetNotificationConsumerMetricsWithMockConsumer() throws Exception {
+  public void testNotificationRecordsLagGaugeWithMockConsumer() throws Exception {
     Properties mcProps = new Properties();
     mcProps.put(DRY_RUN_KEY, "true");
     mcProps.put(KEY_DESERIALIZER_CLASS_KEY, ByteArrayDeserializer.class.getName());
@@ -625,20 +629,24 @@ public class TestMemqConsumer {
     };
     MemqConsumer<byte[], byte[]> mc = new MemqConsumer<>(mcProps, input);
 
-    // before setting notification source, metrics should be empty
-    assertTrue(mc.getNotificationConsumerMetrics().isEmpty());
+    // before setting notification source, gauge should not be registered
+    assertFalse(mc.getMetricRegistry().getGauges()
+        .containsKey(MemqConsumer.NOTIFICATION_RECORDS_LAG_MAX_METRIC));
 
     MockConsumer<String, String> mockKafkaConsumer = new MockConsumer<>(OffsetResetStrategy.EARLIEST);
     KafkaNotificationSource notificationSource = new KafkaNotificationSource(mockKafkaConsumer);
     notificationSource.setParentConsumer(mc);
     mc.setNotificationSource(notificationSource);
 
-    // after setting notification source, should delegate to the underlying Kafka consumer
-    Map<org.apache.kafka.common.MetricName, ? extends org.apache.kafka.common.Metric> metrics =
-        mc.getNotificationConsumerMetrics();
-    assertNotNull(metrics);
-    // metrics map is the same instance as what the underlying consumer returns
-    assertEquals(mockKafkaConsumer.metrics(), metrics);
+    // after setting notification source, gauge should be registered
+    assertTrue(mc.getMetricRegistry().getGauges()
+        .containsKey(MemqConsumer.NOTIFICATION_RECORDS_LAG_MAX_METRIC));
+
+    // MockConsumer has no records-lag-max metric, so gauge should return NaN
+    Gauge<Double> lagGauge =
+        (Gauge<Double>) mc.getMetricRegistry().getGauges()
+            .get(MemqConsumer.NOTIFICATION_RECORDS_LAG_MAX_METRIC);
+    assertTrue(Double.isNaN(lagGauge.getValue()));
 
     mc.close();
   }
