@@ -73,6 +73,7 @@ import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 
 import com.codahale.metrics.Counter;
+import com.codahale.metrics.MetricFilter;
 import com.codahale.metrics.MetricRegistry;
 import com.google.common.collect.ImmutableMap;
 import com.google.gson.JsonObject;
@@ -536,6 +537,9 @@ public final class MemqConsumer<K, V> implements Closeable {
   @Override
   public void close() throws IOException {
     closed = true;
+    if (metricRegistry != null) {
+      metricRegistry.removeMatching(MetricFilter.ALL);
+    }
     notificationQueue.clear();
     if (notificationSource != null) {
       notificationSource.close();
