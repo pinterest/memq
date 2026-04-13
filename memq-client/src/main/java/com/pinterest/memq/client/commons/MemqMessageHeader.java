@@ -125,31 +125,31 @@ public class MemqMessageHeader {
     // because buffer may be a PooledSlicedByteBuf whose duplicate() translates indices
     // to the parent buffer's coordinate space, breaking writerIndex(0).
     int idx = 0;
-    buffer.setShort(idx, getHeaderLength()); idx += 2;
+    buffer.setShort(idx, getHeaderLength()); idx += Short.BYTES;
     if (useTaskRequest) {
-      buffer.setShort(idx, taskRequest.getVersion()); idx += 2;
+      buffer.setShort(idx, taskRequest.getVersion()); idx += Short.BYTES;
     } else {
-      buffer.setShort(idx, request.getVersion()); idx += 2;
+      buffer.setShort(idx, request.getVersion()); idx += Short.BYTES;
     }
     byte[] extraHeaderContent = getExtraHeaderContent();
-    buffer.setShort(idx, (short) extraHeaderContent.length); idx += 2;
+    buffer.setShort(idx, (short) extraHeaderContent.length); idx += Short.BYTES;
     buffer.setBytes(idx, extraHeaderContent); idx += extraHeaderContent.length;
 
     ByteBuf bodySlice = buffer.slice(getHeaderLength(), buffer.writerIndex() - getHeaderLength());
     crc.update(bodySlice.nioBuffer());
     int checkSum = (int) crc.getValue();
 
-    buffer.setInt(idx, checkSum); idx += 4;
+    buffer.setInt(idx, checkSum); idx += Integer.BYTES;
     if (useTaskRequest) {
-      buffer.setByte(idx, taskRequest.getCompression().id); idx += 1;
-      buffer.setInt(idx, taskRequest.getLogmessageCount()); idx += 4;
+      buffer.setByte(idx, taskRequest.getCompression().id); idx += Byte.BYTES;
+      buffer.setInt(idx, taskRequest.getLogmessageCount()); idx += Integer.BYTES;
     } else {
-      buffer.setByte(idx, request.getCompression().id); idx += 1;
-      buffer.setInt(idx, request.getMessageCount()); idx += 4;
+      buffer.setByte(idx, request.getCompression().id); idx += Byte.BYTES;
+      buffer.setInt(idx, request.getMessageCount()); idx += Integer.BYTES;
     }
 
     int payloadLength = buffer.readableBytes() - getHeaderLength();
-    buffer.setInt(idx, payloadLength); idx += 4;
+    buffer.setInt(idx, payloadLength); idx += Integer.BYTES;
   }
 
   private byte[] getExtraHeaderContent() {
