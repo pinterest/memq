@@ -120,38 +120,36 @@ public class MemqMessageHeader {
   public void writeHeader(final ByteBuf buffer) {
     boolean useTaskRequest = taskRequest != null;
     CRC32 crc = new CRC32();
-    ByteBuf wrap = buffer.duplicate();
-    wrap.writerIndex(0);
-    wrap.writeShort(getHeaderLength()); // 2bytes
+
+    // Use absolute-index set methods instead of duplicate() + relative write methods,
+    // because buffer may be a PooledSlicedByteBuf whose duplicate() translates indices
+    // to the parent buffer's coordinate space, breaking writerIndex(0).
+    int idx = 0;
+    buffer.setShort(idx, getHeaderLength()); idx += Short.BYTES;
     if (useTaskRequest) {
-      wrap.writeShort(taskRequest.getVersion()); // 2bytes
+      buffer.setShort(idx, taskRequest.getVersion()); idx += Short.BYTES;
     } else {
-      wrap.writeShort(request.getVersion()); // 2bytes
+      buffer.setShort(idx, request.getVersion()); idx += Short.BYTES;
     }
-    // add extra stuff
     byte[] extraHeaderContent = getExtraHeaderContent();
-    wrap.writeShort((short) extraHeaderContent.length);// 2bytes
-    wrap.writeBytes(extraHeaderContent);
+    buffer.setShort(idx, (short) extraHeaderContent.length); idx += Short.BYTES;
+    buffer.setBytes(idx, extraHeaderContent); idx += extraHeaderContent.length;
 
-    ByteBuf tmp = buffer.duplicate();
-    tmp.readerIndex(getHeaderLength());
-    ByteBuf slice = tmp.slice();
-    crc.update(slice.nioBuffer());
+    ByteBuf bodySlice = buffer.slice(getHeaderLength(), buffer.writerIndex() - getHeaderLength());
+    crc.update(bodySlice.nioBuffer());
     int checkSum = (int) crc.getValue();
-    // write crc checksum of the body
-    wrap.writeInt(checkSum);// 4bytes
-    // compression scheme encoding
+
+    buffer.setInt(idx, checkSum); idx += Integer.BYTES;
     if (useTaskRequest) {
-      wrap.writeByte(taskRequest.getCompression().id);// 1byte
-      wrap.writeInt(taskRequest.getLogmessageCount()); // 4bytes
+      buffer.setByte(idx, taskRequest.getCompression().id); idx += Byte.BYTES;
+      buffer.setInt(idx, taskRequest.getLogmessageCount()); idx += Integer.BYTES;
     } else {
-      wrap.writeByte(request.getCompression().id);// 1byte
-      wrap.writeInt(request.getMessageCount()); // 4bytes
+      buffer.setByte(idx, request.getCompression().id); idx += Byte.BYTES;
+      buffer.setInt(idx, request.getMessageCount()); idx += Integer.BYTES;
     }
 
-    // write the length of remaining bytes
     int payloadLength = buffer.readableBytes() - getHeaderLength();
-    wrap.writeInt(payloadLength); // 4bytes
+    buffer.setInt(idx, payloadLength); idx += Integer.BYTES;
   }
 
   private byte[] getExtraHeaderContent() {

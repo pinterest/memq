@@ -67,11 +67,13 @@ import java.util.stream.Collectors;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.mutable.MutableInt;
+import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 
 import com.codahale.metrics.Counter;
+import com.codahale.metrics.MetricFilter;
 import com.codahale.metrics.MetricRegistry;
 import com.google.common.collect.ImmutableMap;
 import com.google.gson.JsonObject;
@@ -117,6 +119,9 @@ public final class MemqConsumer<K, V> implements Closeable {
   private static final Logger logger = Logger.getLogger(MemqConsumer.class.getCanonicalName());
 
   public static final String METRICS_PREFIX = "memq.consumer";
+  public static final String BYTES_CONSUMED_TOTAL_METRIC = "bytes.consumed.total";
+  public static final String NOTIFICATION_RECORDS_LAG_MAX_METRIC = "notification.records.lag.max";
+  
   private final MemqLogMessage<K, V> EMPTY_MESSAGE = new MemqLogMessage<>(null, null, null, null, true);
 
   public MemqLogMessageIterator<K, V> EMPTY_ITERATOR = new MemqLogMessageIterator<K, V>() {
@@ -171,6 +176,11 @@ public final class MemqConsumer<K, V> implements Closeable {
     this.isBufferToFile = Boolean
         .parseBoolean(props.getProperty(BUFFER_TO_FILE_CONFIG_KEY, "false"));
     this.isDirectBuffer = Boolean.parseBoolean(props.getProperty(USE_DIRECT_BUFFER_KEY, "false"));
+    if (isDirectBuffer) {
+      logger.info("Using direct buffer");
+    } else {
+      logger.info("Using heap buffer");
+    }
 
     String clientId = props.getProperty(CLIENT_ID, UUID.randomUUID().toString());
     checkAndConfigureTmpFileBuffering(props, clientId);
@@ -254,13 +264,12 @@ public final class MemqConsumer<K, V> implements Closeable {
     if (metricRegistry != null) {
       iteratorExceptionCounter = metricRegistry.counter("iterator.exception");
       loadBatchExceptionCounter = metricRegistry.counter("loading.exception");
+      metricRegistry.counter(BYTES_CONSUMED_TOTAL_METRIC);
 
-      if (isDirectBuffer) {
-        metricRegistry.gauge("netty.direct.memory.used",
-            () -> () -> PooledByteBufAllocator.DEFAULT.metric().usedDirectMemory());
-        metricRegistry.gauge("netty.heap.memory.used",
-            () -> () -> PooledByteBufAllocator.DEFAULT.metric().usedHeapMemory());
-      }
+      metricRegistry.gauge("netty.direct.memory.used",
+              () -> () -> PooledByteBufAllocator.DEFAULT.metric().usedDirectMemory());
+      metricRegistry.gauge("netty.heap.memory.used",
+              () -> () -> PooledByteBufAllocator.DEFAULT.metric().usedHeapMemory());
     }
   }
 
@@ -317,21 +326,30 @@ public final class MemqConsumer<K, V> implements Closeable {
     InputStream stream = fetchBatchStreamForNotification(nextNotificationToProcess);
     InputStream newStream;
     try {
+      long bytesCopied;
       if (isBufferToFile) {
-        IOUtils.copy(stream, new FileOutputStream(bufferFile));
+        bytesCopied = IOUtils.copy(stream, new FileOutputStream(bufferFile));
         newStream = new FileInputStream(bufferFile);
       } else if (isDirectBuffer) {
         ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT
             .directBuffer(storageHandler.getBatchSizeFromNotification(nextNotificationToProcess));
-        ByteBufOutputStream out = new ByteBufOutputStream(byteBuf);
-        IOUtils.copy(stream, out);
-        newStream = new ByteBufInputStream(byteBuf, true);
-        out.close();
+        try {
+          ByteBufOutputStream out = new ByteBufOutputStream(byteBuf);
+          bytesCopied = IOUtils.copy(stream, out);
+          newStream = new ByteBufInputStream(byteBuf, true);
+          out.close();
+        } catch (Exception e) {
+          byteBuf.release();
+          throw e;
+        }
       } else {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        IOUtils.copy(stream, out);
+        bytesCopied = IOUtils.copy(stream, out);
         newStream = new ByteArrayInputStream(out.toByteArray());
         out.close();
+      }
+      if (metricRegistry != null) {
+        metricRegistry.counter(BYTES_CONSUMED_TOTAL_METRIC).inc(bytesCopied);
       }
       return new DataInputStream(newStream);
     } finally {
@@ -401,6 +419,7 @@ public final class MemqConsumer<K, V> implements Closeable {
           .get(NOTIFICATION_SOURCE_PROPS_KEY);
       this.notificationSource = new KafkaNotificationSource(notificationSourceProperties);
       notificationSource.setParentConsumer(this);
+      registerNotificationLagGauge();
     } catch (Exception e) {
       logger.log(Level.SEVERE, "Failed to initialize notification source", e);
       throw e;
@@ -426,6 +445,27 @@ public final class MemqConsumer<K, V> implements Closeable {
     if (notificationSource == null) {
       notificationSource = new KafkaNotificationSource(notificationSourceProps);
       notificationSource.setParentConsumer(this);
+      registerNotificationLagGauge();
+    }
+  }
+
+  private void registerNotificationLagGauge() {
+    if (metricRegistry != null && notificationSource != null) {
+      metricRegistry.gauge(NOTIFICATION_RECORDS_LAG_MAX_METRIC, () -> () -> {
+        Object raw = notificationSource.getRawObject();
+        if (raw instanceof Consumer) {
+          for (Map.Entry<org.apache.kafka.common.MetricName, ? extends org.apache.kafka.common.Metric> entry
+              : ((Consumer<?, ?>) raw).metrics().entrySet()) {
+            if ("records-lag-max".equals(entry.getKey().name())) {
+              Object value = entry.getValue().metricValue();
+              if (value instanceof Number) {
+                return ((Number) value).doubleValue();
+              }
+            }
+          }
+        }
+        return Double.NaN;
+      });
     }
   }
 
@@ -471,6 +511,18 @@ public final class MemqConsumer<K, V> implements Closeable {
     return notificationSource.getLatestOffsets(partitions);
   }
 
+  /**
+   * Get all topics from the MemQ cluster. This method is only available for non-direct consumers.
+   * @return a collection of TopicMetadata objects
+   * @throws Exception
+   */
+  public Collection<TopicMetadata> getTopics() throws Exception {
+    if (client == null) {
+      throw new IllegalStateException("getTopics() requires a non-direct consumer with bootstrap servers");
+    }
+    return client.getTopics();
+  }
+
   public long position(int partition) {
     return notificationSource.position(partition);
   }
@@ -485,6 +537,9 @@ public final class MemqConsumer<K, V> implements Closeable {
   @Override
   public void close() throws IOException {
     closed = true;
+    if (metricRegistry != null) {
+      metricRegistry.removeMatching(MetricFilter.ALL);
+    }
     notificationQueue.clear();
     if (notificationSource != null) {
       notificationSource.close();
@@ -710,6 +765,7 @@ public final class MemqConsumer<K, V> implements Closeable {
 
   public void setNotificationSource(KafkaNotificationSource notificationSource) {
     this.notificationSource = notificationSource;
+    registerNotificationLagGauge();
   }
 
   public MetricRegistry getMetricRegistry() {
