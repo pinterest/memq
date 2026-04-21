@@ -536,20 +536,44 @@ public class MemqCommonClient implements Closeable {
     }).collect(Collectors.toList());
   }
 
-  public void handleWriteResponse(WriteResponsePacket writeResp, InetSocketAddress sourceAddress) {
+  /**
+   * Process a v4 WriteResponsePacket. There are two paths:
+   * <p>
+   * 1. Eviction path ({@code writeResp.hasEviction()}): the broker is shedding the
+   *    producer to {@code targetBrokerIp}. We:
+   *    <ul>
+   *      <li>apply the eviction normally (bump target, update source remaining),</li>
+   *      <li>if the result would exceed {@code maxConnections}, perform a connection
+   *          swap: drop the evicting source entirely and redistribute its remaining
+   *          slots evenly across surviving brokers (including the new target),</li>
+   *      <li>register the target as an active write endpoint <b>immediately</b> so
+   *          the next dispatch can route to it (no waiting for an existing endpoint
+   *          to die or a reconnect to surface the new broker), and</li>
+   *      <li>rebuild the weighted endpoint map with the updated slot data.</li>
+   *    </ul>
+   * <p>
+   * 2. Non-eviction path: the broker reports the producer's current slot ownership
+   *    (numSlotsOwned). We refresh {@code slotsOwned[sourceIp]} so weighted
+   *    selection reflects broker-side accounting over time, but only for sources
+   *    we are already tracking (or already writing to) so the map cannot grow
+   *    unboundedly from transient touches.
+   */
+  public synchronized void handleWriteResponse(WriteResponsePacket writeResp,
+                                               InetSocketAddress sourceAddress) {
     if (writeResp == null) {
       return;
     }
+
+    String sourceIp = sourceAddress != null ? sourceAddress.getHostString() : null;
+    int remaining = writeResp.getNumSlotsOwned();
 
     if (writeResp.hasEviction()) {
       String targetIp = writeResp.getTargetBrokerIp();
       int slotsToEvict = writeResp.getNumSlotsToEvict();
 
+      // Step 1: apply eviction normally
       slotsOwned.merge(targetIp, slotsToEvict, Integer::sum);
-
-      if (sourceAddress != null) {
-        String sourceIp = sourceAddress.getHostString();
-        int remaining = writeResp.getNumSlotsOwned();
+      if (sourceIp != null) {
         if (remaining > 0) {
           slotsOwned.put(sourceIp, remaining);
         } else {
@@ -557,30 +581,165 @@ public class MemqCommonClient implements Closeable {
         }
       }
 
-      enforceMaxConnections();
+      // Step 2: enforce maxConnections via connection swap (drop source, redistribute)
+      boolean sourceDropped = false;
+      if (sourceIp != null && maxConnections > 0 && slotsOwned.size() > maxConnections) {
+        sourceDropped = swapEvictingBroker(sourceIp);
+      }
+
+      // Step 3: make target an active write endpoint immediately, drop dropped source
+      syncEndpointsAfterEviction(targetIp, sourceIp, sourceDropped);
+
+      // Step 4: rebuild the weighted endpoint map
       rebuildWeightedMap();
+
       logger.info("Eviction received: source=" + sourceAddress + " target=" + targetIp
-          + " slotsToEvict=" + slotsToEvict + " remaining=" + writeResp.getNumSlotsOwned());
+          + " slotsToEvict=" + slotsToEvict + " remaining=" + remaining
+          + (sourceDropped ? " (source dropped, slots redistributed)" : "")
+          + " slotsOwned=" + slotsOwned);
+      return;
+    }
+
+    // Non-eviction v4 response: keep slot accounting current for accurate weighting.
+    // Only update sources we are already tracking (avoids unbounded growth from
+    // transient writes to brokers that are not part of the active set).
+    if (sourceIp != null
+        && (slotsOwned.containsKey(sourceIp) || writeEndpointsContains(sourceIp))) {
+      if (remaining > 0) {
+        slotsOwned.put(sourceIp, remaining);
+      } else {
+        // numSlotsOwned == 0 may be transient (broker EMA briefly at 0); leave entry
+        // alone if we already had it, otherwise don't add a zero entry.
+        slotsOwned.computeIfPresent(sourceIp, (k, v) -> v);
+      }
+      rebuildWeightedMap();
     }
   }
 
-  private void enforceMaxConnections() {
-    if (maxConnections <= 0) return;
-    while (slotsOwned.size() > maxConnections) {
-      String minIp = null;
-      int minSlots = Integer.MAX_VALUE;
-      for (Map.Entry<String, Integer> entry : slotsOwned.entrySet()) {
-        if (entry.getValue() < minSlots) {
-          minSlots = entry.getValue();
-          minIp = entry.getKey();
-        }
+  /**
+   * Drop the evicting source broker entirely from {@code slotsOwned} and
+   * redistribute its remaining slots evenly across the surviving brokers
+   * (which includes the new eviction target). Returns true if the source was
+   * present and dropped.
+   * <p>
+   * The redistribution preserves the total slot count: per-survivor share is
+   * {@code dropped / n}, with the {@code dropped % n} remainder spread one-by-one
+   * across iteration order so no slots are lost.
+   */
+  private boolean swapEvictingBroker(String sourceIp) {
+    Integer dropped = slotsOwned.remove(sourceIp);
+    if (dropped == null) {
+      return false;
+    }
+    if (slotsOwned.isEmpty() || dropped <= 0) {
+      return true;
+    }
+    int n = slotsOwned.size();
+    int per = dropped / n;
+    int rem = dropped % n;
+    for (Map.Entry<String, Integer> entry : slotsOwned.entrySet()) {
+      int extra = per + (rem > 0 ? 1 : 0);
+      if (rem > 0) rem--;
+      entry.setValue(entry.getValue() + extra);
+    }
+    return true;
+  }
+
+  /**
+   * Make {@code targetIp} an active write endpoint immediately (so the next
+   * dispatch can route to it), and drop {@code sourceIp} from the write set if
+   * the connection swap removed it from {@code slotsOwned}.
+   * <p>
+   * If the target IP is unknown (not in current locality/write endpoints) we
+   * synthesize an {@link Endpoint} for it by reusing the port of an existing
+   * endpoint (MemQ broker fleets share a port) and tagging it with the
+   * producer's configured locality.
+   */
+  private void syncEndpointsAfterEviction(String targetIp, String sourceIp,
+                                          boolean sourceDropped) {
+    Endpoint targetEp = findOrCreateEndpoint(targetIp);
+
+    // Add target to localityEndpoints if missing so future failovers and
+    // reconnects also see it.
+    List<Endpoint> currentLocals = this.localityEndpoints;
+    if (!containsByIp(currentLocals, targetIp)) {
+      List<Endpoint> newLocals = new ArrayList<>(currentLocals.size() + 1);
+      newLocals.addAll(currentLocals);
+      newLocals.add(targetEp);
+      this.localityEndpoints = Collections.unmodifiableList(newLocals);
+    }
+
+    // Sync writeEndpoints: drop source if swap removed it; add target if missing.
+    List<Endpoint> currentWrites = this.writeEndpoints;
+    boolean needsRebuild = sourceDropped || !containsByIp(currentWrites, targetIp);
+    if (!needsRebuild) {
+      return;
+    }
+    List<Endpoint> newWrites = new ArrayList<>(currentWrites.size() + 1);
+    for (Endpoint e : currentWrites) {
+      if (sourceDropped && sourceIp != null
+          && e.getAddress().getHostString().equals(sourceIp)) {
+        continue;
       }
-      if (minIp != null) {
-        slotsOwned.remove(minIp);
-      } else {
-        break;
+      newWrites.add(e);
+    }
+    if (!containsByIp(newWrites, targetIp)) {
+      newWrites.add(targetEp);
+    }
+    this.writeEndpoints = Collections.unmodifiableList(newWrites);
+    if (sourceDropped && sourceIp != null) {
+      // Source is no longer eligible for writes; clear any failure record so a
+      // future reconnect-induced revisit is not penalised.
+      failureCounts.keySet().removeIf(
+          ep -> ep.getAddress().getHostString().equals(sourceIp));
+    }
+  }
+
+  private boolean writeEndpointsContains(String ip) {
+    return containsByIp(this.writeEndpoints, ip);
+  }
+
+  private static boolean containsByIp(List<Endpoint> list, String ip) {
+    for (Endpoint e : list) {
+      if (e.getAddress().getHostString().equals(ip)) {
+        return true;
       }
     }
+    return false;
+  }
+
+  /**
+   * Look up an Endpoint by IP across known endpoint sets, or synthesize a new
+   * one. The port is inferred from existing endpoints (MemQ brokers in a
+   * cluster share the same port). The locality is set to the producer's
+   * configured locality so the synthesized endpoint participates in
+   * locality-aware filtering on future reconnects.
+   */
+  private Endpoint findOrCreateEndpoint(String ip) {
+    for (Endpoint e : this.localityEndpoints) {
+      if (e.getAddress().getHostString().equals(ip)) {
+        return e;
+      }
+    }
+    for (Endpoint e : this.writeEndpoints) {
+      if (e.getAddress().getHostString().equals(ip)) {
+        return e;
+      }
+    }
+    int port = inferDefaultPort();
+    return new Endpoint(InetSocketAddress.createUnresolved(ip, port), this.locality);
+  }
+
+  private int inferDefaultPort() {
+    List<Endpoint> locals = this.localityEndpoints;
+    if (locals != null && !locals.isEmpty()) {
+      return locals.get(0).getAddress().getPort();
+    }
+    List<Endpoint> writes = this.writeEndpoints;
+    if (writes != null && !writes.isEmpty()) {
+      return writes.get(0).getAddress().getPort();
+    }
+    return 9092;
   }
 
   public String getProducerId() {

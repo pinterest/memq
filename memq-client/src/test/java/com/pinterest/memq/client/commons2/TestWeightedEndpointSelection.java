@@ -110,6 +110,173 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
+  public void testEvictionImmediatelyRegistersTargetAsWriteEndpoint() throws Exception {
+    // Pre-eviction: producer is actively writing to 10.0.0.1 and 10.0.0.2
+    setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 2)));
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    // Target broker (10.0.0.99) is brand new — not in locality endpoints
+    WriteResponsePacket evictionResponse = new WriteResponsePacket("10.0.0.99", 1, 4);
+    client.handleWriteResponse(evictionResponse, sourceAddr);
+
+    boolean targetInWrites = client.currentWriteEndpoints().stream()
+        .anyMatch(e -> e.getAddress().getHostString().equals("10.0.0.99"));
+    assertTrue("Target broker must be added to writeEndpoints immediately, got "
+        + client.currentWriteEndpoints(), targetInWrites);
+    // Synthesized endpoint should reuse the cluster port (9092 in this fixture)
+    Endpoint targetEp = client.currentWriteEndpoints().stream()
+        .filter(e -> e.getAddress().getHostString().equals("10.0.0.99"))
+        .findFirst().orElseThrow(AssertionError::new);
+    assertEquals(9092, targetEp.getAddress().getPort());
+  }
+
+  @Test
+  public void testEvictionAddsTargetToLocalityEndpointsForFutureDiscovery() throws Exception {
+    setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 1)));
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    WriteResponsePacket evictionResponse = new WriteResponsePacket("10.0.0.99", 1, 0);
+    client.handleWriteResponse(evictionResponse, sourceAddr);
+
+    Field localsField = MemqCommonClient.class.getDeclaredField("localityEndpoints");
+    localsField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    List<Endpoint> locals = (List<Endpoint>) localsField.get(client);
+    assertTrue("Target must also be added to localityEndpoints",
+        locals.stream().anyMatch(e -> e.getAddress().getHostString().equals("10.0.0.99")));
+  }
+
+  @Test
+  public void testConnectionSwapPreservesTotalSlotsAndDropsSource() throws Exception {
+    // Mirrors the spec example: maxConnections = 3, current
+    // [broker_0: 10, broker_1: 10, broker_2: 10]; broker_2 evicts 1 slot to broker_4.
+    // Naive result would be size 4 -> swap drops source (broker_2), redistributing
+    // its 9 remaining slots evenly across the 3 survivors -> [13, 13, 4].
+    Properties props = new Properties();
+    props.setProperty("numWriteEndpoints", "3");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    List<Endpoint> eps = new ArrayList<>();
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.0", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
+    c.initialize(eps);
+    setWriteEndpoints(c, new ArrayList<>(eps));
+    c.setMaxConnections(3);
+
+    c.getSlotsOwned().put("10.0.0.0", 10);
+    c.getSlotsOwned().put("10.0.0.1", 10);
+    c.getSlotsOwned().put("10.0.0.2", 10);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.2", 9092);
+    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.4", 1, 9);
+    c.handleWriteResponse(eviction, sourceAddr);
+
+    Map<String, Integer> result = c.getSlotsOwned();
+    assertEquals("Connection count must be capped at maxConnections", 3, result.size());
+    assertFalse("Evicting source must be dropped entirely",
+        result.containsKey("10.0.0.2"));
+    assertTrue("Eviction target must be present", result.containsKey("10.0.0.4"));
+
+    int total = result.values().stream().mapToInt(Integer::intValue).sum();
+    assertEquals("Total slots must be preserved by redistribution", 30, total);
+    assertEquals(13, (int) result.get("10.0.0.0"));
+    assertEquals(13, (int) result.get("10.0.0.1"));
+    assertEquals(4, (int) result.get("10.0.0.4"));
+
+    // writeEndpoints must also reflect the swap: source out, target in
+    boolean targetInWrites = c.currentWriteEndpoints().stream()
+        .anyMatch(e -> e.getAddress().getHostString().equals("10.0.0.4"));
+    boolean sourceInWrites = c.currentWriteEndpoints().stream()
+        .anyMatch(e -> e.getAddress().getHostString().equals("10.0.0.2"));
+    assertTrue("Target must be a write endpoint after swap", targetInWrites);
+    assertFalse("Dropped source must be removed from write endpoints", sourceInWrites);
+    assertEquals(3, c.currentWriteEndpoints().size());
+
+    c.close();
+  }
+
+  @Test
+  public void testRedistributionHandlesUnevenRemainder() throws Exception {
+    // 7 slots over 3 survivors -> 3,2,2 (each survivor gets at least floor(7/3)=2,
+    // and 7%3=1 remainder is given to one survivor).
+    Properties props = new Properties();
+    props.setProperty("numWriteEndpoints", "2");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    List<Endpoint> eps = new ArrayList<>();
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.0", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    c.initialize(eps);
+    setWriteEndpoints(c, new ArrayList<>(eps));
+    c.setMaxConnections(2);
+
+    c.getSlotsOwned().put("10.0.0.0", 5);
+    c.getSlotsOwned().put("10.0.0.1", 5);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.0", 9092);
+    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.9", 1, 7);
+    c.handleWriteResponse(eviction, sourceAddr);
+
+    Map<String, Integer> result = c.getSlotsOwned();
+    assertEquals(2, result.size());
+    assertFalse(result.containsKey("10.0.0.0"));
+    int total = result.values().stream().mapToInt(Integer::intValue).sum();
+    // 5 (10.0.0.1, kept) + 1 (target: from eviction) + 7 (redistributed) = 13
+    assertEquals(13, total);
+    c.close();
+  }
+
+  @Test
+  public void testEvictionWithoutMaxConnectionsKeepsSourceWhenRemainingPositive()
+      throws Exception {
+    Properties props = new Properties();
+    props.setProperty("numWriteEndpoints", "3");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    List<Endpoint> eps = new ArrayList<>();
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.0", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
+    c.initialize(eps);
+    setWriteEndpoints(c, new ArrayList<>(eps));
+    // maxConnections == 0 means unbounded — no swap should happen.
+
+    c.getSlotsOwned().put("10.0.0.0", 10);
+    c.getSlotsOwned().put("10.0.0.1", 10);
+    c.getSlotsOwned().put("10.0.0.2", 10);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.2", 9092);
+    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.4", 1, 9);
+    c.handleWriteResponse(eviction, sourceAddr);
+
+    Map<String, Integer> result = c.getSlotsOwned();
+    assertEquals("Without maxConnections cap, set may grow", 4, result.size());
+    assertEquals(9, (int) result.get("10.0.0.2"));
+    assertEquals(1, (int) result.get("10.0.0.4"));
+    c.close();
+  }
+
+  @Test
+  public void testNonEvictionResponseUpdatesSlotsForKnownSource() throws Exception {
+    setWriteEndpoints(client, new ArrayList<>(endpoints));
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    WriteResponsePacket normalResponse = new WriteResponsePacket(null, 0, 7);
+    client.handleWriteResponse(normalResponse, sourceAddr);
+
+    assertEquals("Non-eviction response must refresh slot count for known sources",
+        7, (int) client.getSlotsOwned().getOrDefault("10.0.0.1", 0));
+  }
+
+  @Test
+  public void testNonEvictionResponseIgnoresUnknownSource() {
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.99.99.99", 9092);
+    WriteResponsePacket normalResponse = new WriteResponsePacket(null, 0, 5);
+    client.handleWriteResponse(normalResponse, sourceAddr);
+
+    assertFalse("Unknown sources must not be added to slotsOwned by non-eviction responses",
+        client.getSlotsOwned().containsKey("10.99.99.99"));
+  }
+
+  @Test
   public void testNonEvictionResponseDoesNotCrash() {
     WriteResponsePacket normalResponse = new WriteResponsePacket(null, 0, 5);
     client.handleWriteResponse(normalResponse, null);
@@ -131,21 +298,6 @@ public class TestWeightedEndpointSelection {
     assertEquals(2, connections.size());
     assertTrue(connections.contains("10.0.0.1"));
     assertTrue(connections.contains("10.0.0.2"));
-  }
-
-  @Test
-  public void testMaxConnectionsEnforcement() {
-    client.setMaxConnections(2);
-    client.getSlotsOwned().put("10.0.0.1", 5);
-    client.getSlotsOwned().put("10.0.0.2", 3);
-    client.getSlotsOwned().put("10.0.0.3", 1);
-
-    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    WriteResponsePacket evictionResponse = new WriteResponsePacket("10.0.0.4", 1, 4);
-    client.handleWriteResponse(evictionResponse, sourceAddr);
-
-    assertTrue("Expected at most 2 connections, got " + client.getSlotsOwned().size(),
-        client.getSlotsOwned().size() <= 2);
   }
 
   @Test
