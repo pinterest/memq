@@ -81,6 +81,12 @@ public class MemqCommonClient implements Closeable {
   private final String producerId = java.util.UUID.randomUUID().toString();
   private final ConcurrentHashMap<String, Integer> slotsOwned = new ConcurrentHashMap<>();
   private int maxConnections = 0;
+  // Sticky: flips to true the first time we observe a v4-only signal from any
+  // broker (eviction directive or non-zero slot ownership). Once true, the
+  // legacy numWriteEndpoints gates become no-ops and weighted selection
+  // governs routing. Stays false forever when talking to v3 brokers, which
+  // keeps the legacy round-robin behavior fully intact for them.
+  private volatile boolean v4Active = false;
 
   protected MemqCommonClient(SSLConfig sslConfig, Properties networkProperties) {
     if (networkProperties != null) {
@@ -410,11 +416,16 @@ public class MemqCommonClient implements Closeable {
    * Rebuild the normalized weight map from slotsOwned + writeEndpoints.
    * Keys are cumulative weights normalized to [0.0, 1.0], so the last key is always 1.0.
    * Called whenever either data source changes. The map is set to null when
-   * weighted selection is not applicable (no slot data or insufficient write endpoints).
+   * weighted selection is not applicable (no slot data or no write endpoints).
+   * <p>
+   * Note: this is not gated on {@code numWriteEndpoints}. As soon as we have
+   * any slot data (i.e. v4 broker), weighted selection takes over so the
+   * legacy fan-out width knob no longer matters. v3 brokers never populate
+   * {@code slotsOwned}, so the legacy round-robin path keeps running for them.
    */
   void rebuildWeightedMap() {
     List<Endpoint> writes = this.writeEndpoints;
-    if (slotsOwned.isEmpty() || writes.size() < numWriteEndpoints) {
+    if (slotsOwned.isEmpty() || writes.isEmpty()) {
       this.weightedEndpointMap = null;
       return;
     }
@@ -434,19 +445,29 @@ public class MemqCommonClient implements Closeable {
   }
 
   /**
-   * The provided endpoint had just succeeded, so register the endpoint as a write endpoint if it is not already in the set of write endpoints and if the set of write endpoints is not full.
-   * 
+   * The provided endpoint had just succeeded, so register the endpoint as a
+   * write endpoint if it is not already in the set of write endpoints and the
+   * set of write endpoints is not full.
+   * <p>
    * The endpoint's failure count is reset to 0 since it had just succeeded.
-   * 
-   * If the set of write endpoints is full, nothing is done.
-   * 
+   * <p>
+   * <b>v3 (legacy) brokers</b>: the writeEndpoints set is grown until it
+   * reaches {@code numWriteEndpoints} (round-robin fan-out width).
+   * <p>
+   * <b>v4 brokers</b>: once {@code v4Active} flips, write endpoint membership
+   * is managed dynamically by the eviction logic
+   * ({@link #syncEndpointsAfterEviction}) and capped by {@code maxConnections}.
+   * This method then only ensures locality discovery and clears failure counts
+   * for the succeeding endpoint.
+   *
    * @param endpoint
    * @param topic
    */
   protected void maybeRegisterWriteEndpoint(Endpoint endpoint, String topic) {
     failureCounts.remove(endpoint);
     List<Endpoint> currentWrites = this.writeEndpoints;
-    if (currentWrites.size() < numWriteEndpoints && !currentWrites.contains(endpoint)) {
+    if (!v4Active && currentWrites.size() < numWriteEndpoints
+        && !currentWrites.contains(endpoint)) {
       logger.info("Registering write endpoint: " + endpoint + " for topic: " + topic);
       List<Endpoint> newWrites = new ArrayList<>(currentWrites);
       newWrites.add(endpoint);
@@ -566,6 +587,15 @@ public class MemqCommonClient implements Closeable {
 
     String sourceIp = sourceAddress != null ? sourceAddress.getHostString() : null;
     int remaining = writeResp.getNumSlotsOwned();
+
+    // Detect that we are talking to a v4-aware broker. Any of: an eviction
+    // directive, or a non-zero slot ownership reading. Once flipped, this
+    // is sticky for the lifetime of the client; v3 brokers never set either
+    // field, so v4Active stays false and the legacy round-robin path keeps
+    // running for them.
+    if (writeResp.hasEviction() || remaining > 0) {
+      v4Active = true;
+    }
 
     if (writeResp.hasEviction()) {
       String targetIp = writeResp.getTargetBrokerIp();
@@ -759,6 +789,16 @@ public class MemqCommonClient implements Closeable {
 
   public void setMaxConnections(int maxConnections) {
     this.maxConnections = maxConnections;
+  }
+
+  /**
+   * Whether the client has observed any v4-only signal from a broker (eviction
+   * directive or non-zero slot ownership). Once true, the legacy
+   * {@code numWriteEndpoints} fan-out gates are no-ops and routing is governed
+   * by the weighted endpoint map.
+   */
+  public boolean isV4Active() {
+    return v4Active;
   }
 
   public boolean isClosed() {

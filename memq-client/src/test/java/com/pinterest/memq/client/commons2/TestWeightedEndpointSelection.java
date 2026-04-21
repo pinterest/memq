@@ -301,6 +301,100 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
+  public void testV4ActivatesOnFirstEviction() throws Exception {
+    // Bootstrap: legacy round-robin path active, v4Active false.
+    setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 1)));
+    assertFalse("v4Active must start false", client.isV4Active());
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    client.handleWriteResponse(new WriteResponsePacket("10.0.0.99", 1, 4), sourceAddr);
+
+    assertTrue("First eviction must flip v4Active sticky-on", client.isV4Active());
+  }
+
+  @Test
+  public void testV4ActivatesOnFirstNonZeroSlotsOwned() throws Exception {
+    setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 1)));
+    assertFalse(client.isV4Active());
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    // Non-eviction v4 response: just reports slot ownership.
+    client.handleWriteResponse(new WriteResponsePacket(null, 0, 3), sourceAddr);
+
+    assertTrue("Non-zero numSlotsOwned must flip v4Active", client.isV4Active());
+  }
+
+  @Test
+  public void testV4StaysInactiveForV3Brokers() throws Exception {
+    // v3 brokers send a default WriteResponsePacket (all fields zero/null).
+    setWriteEndpoints(client, new ArrayList<>(endpoints));
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+
+    for (int i = 0; i < 20; i++) {
+      client.handleWriteResponse(new WriteResponsePacket(), sourceAddr);
+    }
+
+    assertFalse("v4Active must remain false against v3 brokers",
+        client.isV4Active());
+  }
+
+  @Test
+  public void testWeightedActivatesImmediatelyOnFirstSlotData() throws Exception {
+    // numWriteEndpoints=3 (configured), only 1 endpoint actively writing.
+    // Pre-fix this would block weighted activation until writes.size() >= 3.
+    // Post-fix, weighted activates as soon as we have any slot data.
+    setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 1)));
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    client.handleWriteResponse(new WriteResponsePacket(null, 0, 5), sourceAddr);
+
+    // Weighted should be active even though writes.size()=1 < numWriteEndpoints=3.
+    boolean usedWeighted = false;
+    for (int i = 0; i < 20; i++) {
+      List<Endpoint> picks = client.getEndpointsToTry();
+      // The weighted path always puts the chosen endpoint first; with only one
+      // slot-data entry (10.0.0.1) it must always be picked first.
+      if (picks.get(0).getAddress().getHostString().equals("10.0.0.1")) {
+        usedWeighted = true;
+      }
+    }
+    assertTrue("Weighted selection must activate without waiting for numWriteEndpoints",
+        usedWeighted);
+  }
+
+  @Test
+  public void testV4ActiveDisablesNumWriteEndpointsCapInMaybeRegister() throws Exception {
+    // numWriteEndpoints=3, but with v4Active flipped on, maybeRegisterWriteEndpoint
+    // should NOT keep growing writeEndpoints — eviction logic owns the set now.
+    // Bootstrap: 1 write endpoint, then v4 flip.
+    setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 1)));
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    client.handleWriteResponse(new WriteResponsePacket(null, 0, 5), sourceAddr);
+    assertTrue(client.isV4Active());
+
+    int sizeBefore = client.currentWriteEndpoints().size();
+    // Simulate a successful send to a brand-new locality endpoint (10.0.0.2).
+    Endpoint freshLocality = endpoints.get(1);
+    client.maybeRegisterWriteEndpoint(freshLocality, "topic");
+
+    assertEquals("v4Active must prevent legacy growth via maybeRegisterWriteEndpoint",
+        sizeBefore, client.currentWriteEndpoints().size());
+  }
+
+  @Test
+  public void testLegacyRegisterStillGrowsWhenV4Inactive() throws Exception {
+    // Pure v3 path: maybeRegisterWriteEndpoint should keep adding up to numWriteEndpoints.
+    setWriteEndpoints(client, new ArrayList<>());
+    assertFalse(client.isV4Active());
+
+    client.maybeRegisterWriteEndpoint(endpoints.get(0), "topic");
+    client.maybeRegisterWriteEndpoint(endpoints.get(1), "topic");
+    client.maybeRegisterWriteEndpoint(endpoints.get(2), "topic");
+    // numWriteEndpoints=3 here (set in setUp), so we should have exactly 3.
+    assertEquals(3, client.currentWriteEndpoints().size());
+  }
+
+  @Test
   public void testWeightedFallsBackToRoundRobinWhenNoSlotData() throws Exception {
     setWriteEndpoints(client, endpoints);
     List<Endpoint> result1 = client.getEndpointsToTry();
