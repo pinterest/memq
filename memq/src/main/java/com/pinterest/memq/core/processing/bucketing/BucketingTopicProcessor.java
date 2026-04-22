@@ -119,10 +119,19 @@ public class BucketingTopicProcessor extends TopicProcessor {
                     ChannelHandlerContext ctx,
                     String producerId) {
     if (writePacket.isDisableAcks()) {
-      // send an OK to producer even if ack is disabled
+      // send an OK to producer even if ack is disabled. v4 producers still
+      // need slot ownership / eviction info on every response so weighted
+      // routing and evictions work; without this they would only see empty
+      // packets here and v4Active would never flip on the producer.
+      WriteResponsePacket writeResponse = WriteResponseBuilder.build(
+          producerId,
+          basePacket.getProtocolVersion(),
+          ResponseCodes.OK,
+          batchManager.getEvictionManager(),
+          batchManager.getSlotManager());
       ctx.writeAndFlush(new ResponsePacket(basePacket.getProtocolVersion(),
           basePacket.getClientRequestId(), basePacket.getRequestType(), ResponseCodes.OK,
-          new WriteResponsePacket()));
+          writeResponse));
       // context no longer needed during the write, set it to null so acks won't be sent
       ctx = null;
     }

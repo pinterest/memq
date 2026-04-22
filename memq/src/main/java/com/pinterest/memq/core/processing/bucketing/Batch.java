@@ -42,7 +42,6 @@ import com.pinterest.memq.commons.storage.StorageHandler;
 import com.pinterest.memq.commons.storage.WriteFailedException;
 import com.pinterest.memq.core.commons.Message;
 import com.pinterest.memq.core.eviction.EvictionManager;
-import com.pinterest.memq.core.eviction.EvictionResult;
 import com.pinterest.memq.core.slot.SlotManager;
 import com.pinterest.memq.core.utils.CoreUtils;
 import com.pinterest.memq.core.utils.MiscUtils;
@@ -340,33 +339,8 @@ public class Batch {
      */
     private WriteResponsePacket buildWriteResponse(Message m, short responseCode,
                                                    EvictionManager em, SlotManager sm) {
-      if (m.getClientProtocolVersion() < 4 || responseCode != ResponseCodes.OK) {
-        return new WriteResponsePacket();
-      }
-
-      String producerId = m.getProducerId();
-      if (producerId == null || producerId.isEmpty()) {
-        return new WriteResponsePacket();
-      }
-
-      if (em != null) {
-        EvictionResult eviction = em.pollEviction(producerId);
-        if (eviction != null && sm != null) {
-          for (String topic : sm.getProducerTopics(producerId)) {
-            sm.releaseProducerSlots(producerId, topic, eviction.getNumSlotsToEvict());
-          }
-          int remaining = sm.getTotalProducerSlots(producerId);
-          logger.info("Eviction delivered to producer=" + producerId
-              + " target=" + eviction.getTargetBrokerIp()
-              + " slotsToEvict=" + eviction.getNumSlotsToEvict()
-              + " remainingSlotsForProducer=" + remaining);
-          return new WriteResponsePacket(eviction.getTargetBrokerIp(),
-              eviction.getNumSlotsToEvict(), remaining);
-        }
-      }
-
-      int slotsOwned = sm != null ? sm.getTotalProducerSlots(producerId) : 0;
-      return new WriteResponsePacket(null, 0, slotsOwned);
+      return WriteResponseBuilder.build(
+          m.getProducerId(), m.getClientProtocolVersion(), responseCode, em, sm);
     }
   }
 
