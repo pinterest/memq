@@ -21,6 +21,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import com.codahale.metrics.MetricRegistry;
+import com.pinterest.memq.commons.protocol.RequestType;
 import com.pinterest.memq.commons.protocol.ResponseCodes;
 import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.core.config.EvictionConfig;
@@ -106,6 +107,41 @@ public class TestWriteResponseBuilder {
     assertEquals("v3 must never receive a slot count", 0, resp.getNumSlotsOwned());
     assertFalse("v3 must never receive an eviction directive", resp.hasEviction());
     assertEquals(0, resp.getNumSlotsToEvict());
+    // The broker still stamps its capability so the producer can know it
+    // could speak v4 if it upgraded.
+    assertEquals("broker must always stamp its protocol version",
+        RequestType.PROTOCOL_VERSION, resp.getServerProtocolVersion());
+  }
+
+  @Test
+  public void testEveryReturnedPacketStampsServerProtocolVersion() throws Exception {
+    // The fix for "v4Active never flips when slots=0": the broker must
+    // declare its capability on every response, regardless of whether
+    // there is any v4 payload to deliver. Pin all four code paths.
+    SlotManager sm = createSlotManager();
+
+    // Path 1: v3 client
+    WriteResponsePacket v3 = WriteResponseBuilder.build(
+        V4_PID, (short) 3, ResponseCodes.OK, null, sm);
+    assertEquals(RequestType.PROTOCOL_VERSION, v3.getServerProtocolVersion());
+
+    // Path 2: non-OK
+    WriteResponsePacket err = WriteResponseBuilder.build(
+        V4_PID, (short) 4, ResponseCodes.INTERNAL_SERVER_ERROR, null, sm);
+    assertEquals(RequestType.PROTOCOL_VERSION, err.getServerProtocolVersion());
+
+    // Path 3: missing producerId
+    WriteResponsePacket noPid = WriteResponseBuilder.build(
+        null, (short) 4, ResponseCodes.OK, null, sm);
+    assertEquals(RequestType.PROTOCOL_VERSION, noPid.getServerProtocolVersion());
+
+    // Path 4: v4 happy path with zero slots — this is the regression case.
+    // Without the explicit stamp, the producer cannot tell v3 from v4 here.
+    WriteResponsePacket zeroSlots = WriteResponseBuilder.build(
+        V4_PID, (short) 4, ResponseCodes.OK, null, sm);
+    assertEquals("v4 broker must stamp version even when numSlotsOwned=0",
+        RequestType.PROTOCOL_VERSION, zeroSlots.getServerProtocolVersion());
+    assertEquals(0, zeroSlots.getNumSlotsOwned());
   }
 
   @Test

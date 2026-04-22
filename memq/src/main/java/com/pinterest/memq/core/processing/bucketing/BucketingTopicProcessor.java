@@ -151,12 +151,17 @@ public class BucketingTopicProcessor extends TopicProcessor {
     long serverRequestId = serverRequestIdGenerator.getAndIncrement();
     writeCounter.inc();
     if (writePacket.getDataLength() == MemqMessageHeader.getHeaderLength()) {
-      // empty data, immediately respond without writing anything
       emptyDataCounter.inc();
       if (ctx != null) {
+        WriteResponsePacket emptyResponse = WriteResponseBuilder.build(
+            producerId,
+            basePacket.getProtocolVersion(),
+            ResponseCodes.OK,
+            batchManager.getEvictionManager(),
+            batchManager.getSlotManager());
         ctx.writeAndFlush(
             new ResponsePacket(basePacket.getProtocolVersion(), basePacket.getClientRequestId(),
-                basePacket.getRequestType(), ResponseCodes.OK, new WriteResponsePacket()));
+                basePacket.getRequestType(), ResponseCodes.OK, emptyResponse));
       }
       return serverRequestId;
     }

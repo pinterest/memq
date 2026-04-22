@@ -123,4 +123,60 @@ public class TestWriteResponsePacketV4 {
 
     buf.release();
   }
+
+  @Test
+  public void testServerProtocolVersionRoundTrip() {
+    WriteResponsePacket original = new WriteResponsePacket(null, 0, 0);
+    original.setServerProtocolVersion((short) 4);
+
+    ByteBuf buf = PooledByteBufAllocator.DEFAULT.buffer();
+    original.write(buf, (short) 4);
+
+    WriteResponsePacket decoded = new WriteResponsePacket();
+    decoded.readFields(buf, (short) 4);
+
+    assertEquals("serverProtocolVersion must round-trip even on otherwise"
+        + " empty (no eviction, zero slots) v4 responses",
+        4, decoded.getServerProtocolVersion());
+    buf.release();
+  }
+
+  @Test
+  public void testServerProtocolVersionBackwardCompatRead() {
+    // Simulate a packet written by an older v4 broker that does not yet
+    // know about serverProtocolVersion: write the old-format bytes
+    // manually (ip + numSlotsToEvict + numSlotsOwned, NO trailing short).
+    ByteBuf buf = PooledByteBufAllocator.DEFAULT.buffer();
+    ProtocolUtils.writeStringWithTwoByteEncoding(buf, "10.0.0.5");
+    buf.writeInt(2);
+    buf.writeInt(7);
+    // Note: NO serverProtocolVersion short.
+
+    WriteResponsePacket decoded = new WriteResponsePacket();
+    decoded.readFields(buf, (short) 4);
+
+    assertEquals("10.0.0.5", decoded.getTargetBrokerIp());
+    assertEquals(2, decoded.getNumSlotsToEvict());
+    assertEquals(7, decoded.getNumSlotsOwned());
+    assertEquals("missing trailing field must default to 0 (broker did not"
+        + " declare its capability)", 0, decoded.getServerProtocolVersion());
+    buf.release();
+  }
+
+  @Test
+  public void testServerProtocolVersionDefaultIsZero() {
+    // Default-constructed packet (the v3 broker / pre-feature path) must
+    // serialize serverProtocolVersion=0 so the producer correctly leaves
+    // v4Active off.
+    WriteResponsePacket pkt = new WriteResponsePacket();
+
+    ByteBuf buf = PooledByteBufAllocator.DEFAULT.buffer();
+    pkt.write(buf, (short) 4);
+
+    WriteResponsePacket decoded = new WriteResponsePacket();
+    decoded.readFields(buf, (short) 4);
+
+    assertEquals(0, decoded.getServerProtocolVersion());
+    buf.release();
+  }
 }

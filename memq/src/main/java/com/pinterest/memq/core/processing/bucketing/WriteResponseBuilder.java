@@ -15,6 +15,7 @@
  */
 package com.pinterest.memq.core.processing.bucketing;
 
+import com.pinterest.memq.commons.protocol.RequestType;
 import com.pinterest.memq.commons.protocol.ResponseCodes;
 import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.core.eviction.EvictionManager;
@@ -50,11 +51,17 @@ public final class WriteResponseBuilder {
                                           short responseCode,
                                           EvictionManager em,
                                           SlotManager sm) {
+    // Even responses we can't enrich with v4 fields (v3 client, non-OK,
+    // missing producerId) are still stamped: producers need an explicit
+    // signal that the BROKER speaks v4, independent of whether this
+    // particular response carries any v4 payload. Without the stamp, the
+    // producer cannot distinguish a v4 broker from a v3 broker until the
+    // first numSlotsOwned > 0 or eviction arrives — which may be never.
     if (clientProtocolVersion < 4 || responseCode != ResponseCodes.OK) {
-      return new WriteResponsePacket();
+      return stamped(new WriteResponsePacket());
     }
     if (producerId == null || producerId.isEmpty()) {
-      return new WriteResponsePacket();
+      return stamped(new WriteResponsePacket());
     }
 
     if (em != null) {
@@ -68,12 +75,17 @@ public final class WriteResponseBuilder {
             + " target=" + eviction.getTargetBrokerIp()
             + " slotsToEvict=" + eviction.getNumSlotsToEvict()
             + " remainingSlotsForProducer=" + remaining);
-        return new WriteResponsePacket(eviction.getTargetBrokerIp(),
-            eviction.getNumSlotsToEvict(), remaining);
+        return stamped(new WriteResponsePacket(eviction.getTargetBrokerIp(),
+            eviction.getNumSlotsToEvict(), remaining));
       }
     }
 
     int slotsOwned = sm != null ? sm.getTotalProducerSlots(producerId) : 0;
-    return new WriteResponsePacket(null, 0, slotsOwned);
+    return stamped(new WriteResponsePacket(null, 0, slotsOwned));
+  }
+
+  private static WriteResponsePacket stamped(WriteResponsePacket p) {
+    p.setServerProtocolVersion(RequestType.PROTOCOL_VERSION);
+    return p;
   }
 }

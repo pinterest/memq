@@ -57,6 +57,21 @@ public class TestWeightedEndpointSelection {
     writeEndpointsField.set(c, eps);
   }
 
+  /**
+   * Build a WriteResponsePacket as a v4 broker would send it: stamped with
+   * an explicit {@code serverProtocolVersion=4} so the producer's v4
+   * detection flips to active. Tests that simulate v3 brokers should NOT
+   * use this helper — they should use {@code new WriteResponsePacket(...)}
+   * directly (which leaves serverProtocolVersion at the default 0).
+   */
+  private static WriteResponsePacket v4Response(String targetIp,
+                                                int slotsToEvict,
+                                                int slotsOwned) {
+    WriteResponsePacket p = new WriteResponsePacket(targetIp, slotsToEvict, slotsOwned);
+    p.setServerProtocolVersion((short) 4);
+    return p;
+  }
+
   @Test
   public void testFallbackToRoundRobinWithNoSlotData() {
     List<Endpoint> result = client.getEndpointsToTry();
@@ -303,32 +318,54 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
-  public void testV4ActivatesOnFirstEviction() throws Exception {
-    // Bootstrap: legacy round-robin path active, v4Active false.
+  public void testV4ActivatesWhenServerDeclaresV4() throws Exception {
+    // The producer flips v4Active EXPLICITLY off the broker's declared
+    // protocol version, never inferring from slot counts.
     setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 1)));
     assertFalse("v4Active must start false", client.isV4Active());
 
     InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    client.handleWriteResponse(new WriteResponsePacket("10.0.0.99", 1, 4), sourceAddr);
+    // numSlotsOwned=0, no eviction — but the v4 broker stamps its version.
+    client.handleWriteResponse(v4Response(null, 0, 0), sourceAddr);
 
-    assertTrue("First eviction must flip v4Active sticky-on", client.isV4Active());
+    assertTrue("Explicit serverProtocolVersion>=4 must flip v4Active even"
+        + " when slot count is 0 (regression test: pre-fix this needed"
+        + " numSlotsOwned>0, which was just a heuristic)",
+        client.isV4Active());
   }
 
   @Test
-  public void testV4ActivatesOnFirstNonZeroSlotsOwned() throws Exception {
+  public void testV4ActivatesOnFirstEviction() throws Exception {
+    setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 1)));
+    assertFalse("v4Active must start false", client.isV4Active());
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    client.handleWriteResponse(v4Response("10.0.0.99", 1, 4), sourceAddr);
+
+    assertTrue("Eviction from v4-stamped broker must flip v4Active", client.isV4Active());
+  }
+
+  @Test
+  public void testV4StaysInactiveWhenSlotsArrivedButServerVersionMissing()
+      throws Exception {
+    // Even a non-zero numSlotsOwned must NOT flip v4Active — the activation
+    // signal is exclusively the broker's declared serverProtocolVersion.
     setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 1)));
     assertFalse(client.isV4Active());
 
     InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    // Non-eviction v4 response: just reports slot ownership.
+    // Slot fields populated, but serverProtocolVersion left at 0.
     client.handleWriteResponse(new WriteResponsePacket(null, 0, 3), sourceAddr);
 
-    assertTrue("Non-zero numSlotsOwned must flip v4Active", client.isV4Active());
+    assertFalse("numSlotsOwned alone must NOT flip v4Active — that was the"
+        + " old heuristic; activation is now driven exclusively by the"
+        + " broker's declared serverProtocolVersion",
+        client.isV4Active());
   }
 
   @Test
   public void testV4StaysInactiveForV3Brokers() throws Exception {
-    // v3 brokers send a default WriteResponsePacket (all fields zero/null).
+    // v3 brokers send a default WriteResponsePacket (serverProtocolVersion=0).
     setWriteEndpoints(client, new ArrayList<>(endpoints));
     InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
 
@@ -344,13 +381,13 @@ public class TestWeightedEndpointSelection {
   public void testWeightedActivatesImmediatelyOnFirstSlotData() throws Exception {
     // numWriteEndpoints=3 (configured), only 1 endpoint actively writing.
     // Pre-fix this would block weighted activation until writes.size() >= 3.
-    // Post-fix, weighted activates as soon as we have any slot data.
+    // Post-fix, weighted activates as soon as we have any slot data from a
+    // v4-stamped broker.
     setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 1)));
 
     InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    client.handleWriteResponse(new WriteResponsePacket(null, 0, 5), sourceAddr);
+    client.handleWriteResponse(v4Response(null, 0, 5), sourceAddr);
 
-    // Weighted should be active even though writes.size()=1 < numWriteEndpoints=3.
     boolean usedWeighted = false;
     for (int i = 0; i < 20; i++) {
       List<Endpoint> picks = client.getEndpointsToTry();
@@ -368,10 +405,9 @@ public class TestWeightedEndpointSelection {
   public void testV4ActiveDisablesNumWriteEndpointsCapInMaybeRegister() throws Exception {
     // numWriteEndpoints=3, but with v4Active flipped on, maybeRegisterWriteEndpoint
     // should NOT keep growing writeEndpoints — eviction logic owns the set now.
-    // Bootstrap: 1 write endpoint, then v4 flip.
     setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 1)));
     InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    client.handleWriteResponse(new WriteResponsePacket(null, 0, 5), sourceAddr);
+    client.handleWriteResponse(v4Response(null, 0, 5), sourceAddr);
     assertTrue(client.isV4Active());
 
     int sizeBefore = client.currentWriteEndpoints().size();
