@@ -355,8 +355,13 @@ public class Batch {
           for (String topic : sm.getProducerTopics(producerId)) {
             sm.releaseProducerSlots(producerId, topic, eviction.getNumSlotsToEvict());
           }
+          int remaining = sm.getTotalProducerSlots(producerId);
+          logger.info("Eviction delivered to producer=" + producerId
+              + " target=" + eviction.getTargetBrokerIp()
+              + " slotsToEvict=" + eviction.getNumSlotsToEvict()
+              + " remainingSlotsForProducer=" + remaining);
           return new WriteResponsePacket(eviction.getTargetBrokerIp(),
-              eviction.getNumSlotsToEvict(), sm.getTotalProducerSlots(producerId));
+              eviction.getNumSlotsToEvict(), remaining);
         }
       }
 

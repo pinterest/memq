@@ -594,6 +594,13 @@ public class MemqCommonClient implements Closeable {
     // field, so v4Active stays false and the legacy round-robin path keeps
     // running for them.
     if (writeResp.hasEviction() || remaining > 0) {
+      if (!v4Active) {
+        logger.info("v4 broker protocol detected; weighted endpoint selection now active."
+            + " firstSignalSource=" + sourceAddress
+            + " firstSlotsOwned=" + remaining
+            + " firstHasEviction=" + writeResp.hasEviction()
+            + " currentWriteEndpoints=" + writeEndpoints);
+      }
       v4Active = true;
     }
 

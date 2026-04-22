@@ -67,7 +67,12 @@ public class EvictionManager {
     long initialDelayMs = ThreadLocalRandom.current().nextLong(intervalMs);
     executor.scheduleAtFixedRate(this::runEviction, initialDelayMs, intervalMs,
         TimeUnit.MILLISECONDS);
-    logger.info("EvictionManager started (interval=" + intervalMs + "ms)");
+    logger.info("EvictionManager started: intervalMs=" + intervalMs
+        + " initialDelayMs=" + initialDelayMs
+        + " evictionPercentageThreshold=" + config.getEvictionPercentageThreshold() + "%"
+        + " pendingEvictionCooldownSeconds=" + config.getPendingEvictionCooldownSeconds()
+        + " topNTargets=" + config.getTopNTargets()
+        + " strategy=" + strategy.getClass().getSimpleName());
   }
 
   public void stop() {
@@ -78,13 +83,29 @@ public class EvictionManager {
   }
 
   void runEviction() {
+    long startMs = System.currentTimeMillis();
     try {
       Map<String, GossipState> peerStates = peerStatesSupplier.get();
       Map<String, Set<String>> producerConnections = slotManager.getProducerConnections();
+      logger.info("Eviction tick: peers=" + peerStates.size()
+          + " v4Producers=" + producerConnections.size()
+          + " localFreeSlots=" + slotManager.getFreeSlots()
+          + "/" + slotManager.getTotalSlots()
+          + " pendingEvictions=" + pendingEvictions.size());
       EvictionResult result = strategy.evaluate(slotManager, peerStates, producerConnections);
       if (result != null) {
-        pendingEvictions.put(result.getPid(), result);
-        logger.info("Eviction scheduled: " + result);
+        EvictionResult prev = pendingEvictions.put(result.getPid(), result);
+        if (prev != null) {
+          logger.info("Eviction scheduled (overwrote prior pending): " + result
+              + " replaced=" + prev + " (took " + (System.currentTimeMillis() - startMs) + "ms)");
+        } else {
+          logger.info("Eviction scheduled: " + result
+              + " (took " + (System.currentTimeMillis() - startMs) + "ms)");
+        }
+      } else {
+        logger.info("Eviction tick produced no decision (took "
+            + (System.currentTimeMillis() - startMs) + "ms) -- see prior 'eviction skipped'"
+            + " message for the reason");
       }
     } catch (Exception e) {
       logger.log(Level.WARNING, "Error in eviction run", e);

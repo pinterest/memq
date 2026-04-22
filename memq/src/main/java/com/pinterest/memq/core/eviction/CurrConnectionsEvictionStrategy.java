@@ -61,6 +61,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
                                  Map<String, GossipState> peerStates,
                                  Map<String, Set<String>> producerConnections) {
     if (peerStates.isEmpty()) {
+      logger.info("[" + brokerId + "] eviction skipped: no peers known via gossip yet");
       return null;
     }
 
@@ -75,6 +76,9 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
         .collect(Collectors.toList());
 
     if (candidates.isEmpty()) {
+      logger.info("[" + brokerId + "] eviction skipped: no eligible target peers"
+          + " (peerCount=" + peerStates.size() + ", pendingTargets=" + pendingEvictionTargets.size()
+          + ") -- all peers are frozen or in cooldown");
       return null;
     }
 
@@ -82,6 +86,10 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     int localFreeSlots = slotManager.getFreeSlots();
 
     if (localFreeSlots >= meanFreeSlots) {
+      logger.info("[" + brokerId + "] eviction skipped: local broker is not above mean load"
+          + " (localFreeSlots=" + localFreeSlots
+          + " >= meanFreeSlots=" + String.format("%.1f", meanFreeSlots)
+          + ", candidatePeers=" + candidates.size() + ")");
       return null;
     }
 
@@ -89,22 +97,36 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     Map.Entry<String, Integer> target = selectTargetBroker(candidates);
 
     if (target == null || target.getKey().equals(brokerId)) {
+      logger.info("[" + brokerId + "] eviction skipped: selected target was self or null"
+          + " (target=" + (target == null ? "null" : target.getKey()) + ")");
       return null;
     }
 
     if (target.getValue() <= localFreeSlots) {
+      logger.info("[" + brokerId + "] eviction skipped: target has no more free slots than us"
+          + " (target=" + target.getKey() + " freeSlots=" + target.getValue()
+          + " <= local=" + localFreeSlots + ")");
       return null;
     }
 
     int slotDifference = Math.abs(localFreeSlots - target.getValue());
     double percentageDifference = (double) slotDifference / slotManager.getTotalSlots() * 100;
     if (percentageDifference <= config.getEvictionPercentageThreshold()) {
+      logger.info("[" + brokerId + "] eviction skipped: load gap to target is below threshold"
+          + " (target=" + target.getKey()
+          + " gap=" + String.format("%.2f", percentageDifference) + "%"
+          + " threshold=" + config.getEvictionPercentageThreshold() + "%"
+          + " localFree=" + localFreeSlots + " targetFree=" + target.getValue()
+          + " totalSlots=" + slotManager.getTotalSlots() + ")");
       return null;
     }
 
     // Only v4 producers are eviction candidates. producerConnections is the
     // v4 registry: only producers that have sent a v4 write request appear here.
     if (producerConnections.isEmpty()) {
+      logger.info("[" + brokerId + "] eviction skipped: no v4 producers registered yet"
+          + " (target=" + target.getKey() + ") -- check that producers are using producer2"
+          + " package and sending v4 write requests");
       return null;
     }
 
@@ -131,6 +153,9 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
         }
       }
       if (v4Pids.isEmpty()) {
+        logger.info("[" + brokerId + "] eviction skipped: no v4 producer holds slots"
+            + " (registeredV4Producers=" + producerConnections.size()
+            + ", target=" + target.getKey() + ")");
         return null;
       }
       pidToEvict = v4Pids.get(ThreadLocalRandom.current().nextInt(v4Pids.size()));
@@ -140,7 +165,13 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
 
     pendingEvictionTargets.put(target.getKey(), now);
 
-    return new EvictionResult(pidToEvict, target.getKey(), 1);
+    EvictionResult result = new EvictionResult(pidToEvict, target.getKey(), 1);
+    logger.info("[" + brokerId + "] eviction decision: pid=" + pidToEvict
+        + " target=" + target.getKey() + " slotsToEvict=1"
+        + " (localFree=" + localFreeSlots + " targetFree=" + target.getValue()
+        + " gap=" + String.format("%.2f", percentageDifference) + "%"
+        + " v4Producers=" + producerConnections.size() + ")");
+    return result;
   }
 
   private Map.Entry<String, Integer> selectTargetBroker(
