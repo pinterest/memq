@@ -97,6 +97,11 @@ public class MemqCommonClient implements Closeable {
   // keeps the legacy round-robin behavior fully intact for them.
   private volatile boolean v4Active = false;
 
+  // State-change snapshot logger: only logs when the weight distribution
+  // signature actually changes. No time-based throttling — quiet on steady
+  // state, immediately visible on any change.
+  private volatile String lastLoggedWeightSignature = "";
+
   protected MemqCommonClient(SSLConfig sslConfig, Properties networkProperties) {
     if (networkProperties != null) {
       if (networkProperties.containsKey(NetworkClient.CONFIG_CONNECT_TIMEOUT_MS)) {
@@ -122,6 +127,12 @@ public class MemqCommonClient implements Closeable {
 
   public void initialize(List<Endpoint> endpoints) throws Exception {
     resetEndpoints(endpoints);
+    logger.info("MemqCommonClient bootstrap: producerId=" + producerId
+        + " locality=" + locality
+        + " numWriteEndpoints=" + numWriteEndpoints
+        + " maxConnections=" + (maxConnections > 0 ? String.valueOf(maxConnections) : "unbounded")
+        + " localityEndpoints=" + localityEndpoints.size()
+        + " (v4Active=" + v4Active + " until first v4 broker response)");
   }
 
   public void resetEndpoints(List<Endpoint> endpoints) throws Exception {
@@ -454,6 +465,35 @@ public class MemqCommonClient implements Closeable {
       map.put(cumulative, ep);
     }
     this.weightedEndpointMap = map;
+    maybeLogWeightSnapshot(writes, totalSlots);
+  }
+
+  /**
+   * Log the current write-endpoint weight distribution, but only when the
+   * signature has changed since the last log. Cheap to call on every response;
+   * stays silent on steady state.
+   */
+  private void maybeLogWeightSnapshot(List<Endpoint> writes, int totalSlots) {
+    StringBuilder sig = new StringBuilder();
+    StringBuilder pretty = new StringBuilder();
+    for (Endpoint ep : writes) {
+      String ip = ep.getAddress().getHostString();
+      int slots = Math.max(slotsOwned.getOrDefault(ip, 1), 1);
+      int pct = (int) Math.round(100.0 * slots / totalSlots);
+      sig.append(ip).append('=').append(slots).append(',');
+      if (pretty.length() > 0) pretty.append(", ");
+      pretty.append(ip).append('(').append(slots).append(" slots, ").append(pct).append("%)");
+    }
+    String signature = sig.toString();
+    if (signature.equals(lastLoggedWeightSignature)) {
+      return;
+    }
+    lastLoggedWeightSignature = signature;
+    logger.info("Broker weights changed (writeEndpoints=" + writes.size()
+        + ", totalSlots=" + totalSlots
+        + ", trackedConnections=" + slotsOwned.size()
+        + (maxConnections > 0 ? "/" + maxConnections : "")
+        + "): " + pretty);
   }
 
   /**

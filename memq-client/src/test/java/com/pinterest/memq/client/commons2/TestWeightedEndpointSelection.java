@@ -411,11 +411,12 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
-  public void testMaxConnectionsDefaultsToThree() throws Exception {
+  public void testMaxConnectionsDefaultMatchesConstant() throws Exception {
     MemqCommonClient c = new MemqCommonClient(null, new Properties());
     Field f = MemqCommonClient.class.getDeclaredField("maxConnections");
     f.setAccessible(true);
-    assertEquals("Default maxConnections must be 3", 3, ((Integer) f.get(c)).intValue());
+    assertEquals("Default maxConnections must match DEFAULT_MAX_CONNECTIONS",
+        MemqCommonClient.DEFAULT_MAX_CONNECTIONS, ((Integer) f.get(c)).intValue());
     c.close();
   }
 
@@ -442,9 +443,10 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
-  public void testDefaultMaxConnectionsCapsConnectionGrowth() throws Exception {
+  public void testExplicitMaxConnectionsCapsConnectionGrowth() throws Exception {
     Properties props = new Properties();
     props.setProperty("numWriteEndpoints", "3");
+    props.setProperty(MemqCommonClient.CONFIG_MAX_CONNECTIONS, "3");
     MemqCommonClient c = new MemqCommonClient(null, props);
     List<Endpoint> eps = new ArrayList<>();
     eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.0", 9092)));
@@ -462,8 +464,7 @@ public class TestWeightedEndpointSelection {
     c.handleWriteResponse(eviction, sourceAddr);
 
     Map<String, Integer> result = c.getSlotsOwned();
-    assertEquals("Default cap of 3 must trigger swap when adding 4th broker",
-        3, result.size());
+    assertEquals("Cap of 3 must trigger swap when adding 4th broker", 3, result.size());
     assertFalse("Evicting source must be dropped on cap-violating eviction",
         result.containsKey("10.0.0.2"));
     assertTrue("New target must be present after swap",
