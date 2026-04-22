@@ -230,6 +230,8 @@ public class TestWeightedEndpointSelection {
       throws Exception {
     Properties props = new Properties();
     props.setProperty("numWriteEndpoints", "3");
+    // Explicitly opt out of the cap (default is 3); we want unbounded growth here.
+    props.setProperty(MemqCommonClient.CONFIG_MAX_CONNECTIONS, "0");
     MemqCommonClient c = new MemqCommonClient(null, props);
     List<Endpoint> eps = new ArrayList<>();
     eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.0", 9092)));
@@ -406,5 +408,66 @@ public class TestWeightedEndpointSelection {
     assertEquals(3, result2.size());
     // should rotate (round-robin), not weighted
     assertFalse(result1.get(0).equals(result2.get(0)) && result1.get(1).equals(result2.get(1)));
+  }
+
+  @Test
+  public void testMaxConnectionsDefaultsToThree() throws Exception {
+    MemqCommonClient c = new MemqCommonClient(null, new Properties());
+    Field f = MemqCommonClient.class.getDeclaredField("maxConnections");
+    f.setAccessible(true);
+    assertEquals("Default maxConnections must be 3", 3, ((Integer) f.get(c)).intValue());
+    c.close();
+  }
+
+  @Test
+  public void testMaxConnectionsConfigurableViaProperties() throws Exception {
+    Properties props = new Properties();
+    props.setProperty(MemqCommonClient.CONFIG_MAX_CONNECTIONS, "7");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    Field f = MemqCommonClient.class.getDeclaredField("maxConnections");
+    f.setAccessible(true);
+    assertEquals(7, ((Integer) f.get(c)).intValue());
+    c.close();
+  }
+
+  @Test
+  public void testMaxConnectionsZeroDisablesCap() throws Exception {
+    Properties props = new Properties();
+    props.setProperty(MemqCommonClient.CONFIG_MAX_CONNECTIONS, "0");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    Field f = MemqCommonClient.class.getDeclaredField("maxConnections");
+    f.setAccessible(true);
+    assertEquals("0 must be honored verbatim (means unbounded)", 0, ((Integer) f.get(c)).intValue());
+    c.close();
+  }
+
+  @Test
+  public void testDefaultMaxConnectionsCapsConnectionGrowth() throws Exception {
+    Properties props = new Properties();
+    props.setProperty("numWriteEndpoints", "3");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    List<Endpoint> eps = new ArrayList<>();
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.0", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
+    c.initialize(eps);
+    setWriteEndpoints(c, new ArrayList<>(eps));
+
+    c.getSlotsOwned().put("10.0.0.0", 10);
+    c.getSlotsOwned().put("10.0.0.1", 10);
+    c.getSlotsOwned().put("10.0.0.2", 10);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.2", 9092);
+    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.4", 1, 9);
+    c.handleWriteResponse(eviction, sourceAddr);
+
+    Map<String, Integer> result = c.getSlotsOwned();
+    assertEquals("Default cap of 3 must trigger swap when adding 4th broker",
+        3, result.size());
+    assertFalse("Evicting source must be dropped on cap-violating eviction",
+        result.containsKey("10.0.0.2"));
+    assertTrue("New target must be present after swap",
+        result.containsKey("10.0.0.4"));
+    c.close();
   }
 }

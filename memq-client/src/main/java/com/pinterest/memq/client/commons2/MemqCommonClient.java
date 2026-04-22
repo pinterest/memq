@@ -66,6 +66,15 @@ public class MemqCommonClient implements Closeable {
   private static final int MAX_SEND_RETRIES = 3;
 
   public static final String CONFIG_NUM_WRITE_ENDPOINTS = "numWriteEndpoints"; // number of endpoints for writes
+  /**
+   * Hard cap on the number of distinct broker connections this client maintains
+   * once v4 weighted routing is active. When an eviction would push the
+   * connection set above this cap, the evicting source is dropped and its
+   * slots are redistributed across the survivors (see {@link #swapEvictingBroker}).
+   * A value {@code <= 0} disables the cap (unbounded).
+   */
+  public static final String CONFIG_MAX_CONNECTIONS = "maxConnections";
+  public static final int DEFAULT_MAX_CONNECTIONS = 0;
 
   private final NetworkClient networkClient;
   private long connectTimeout = 500;
@@ -80,7 +89,7 @@ public class MemqCommonClient implements Closeable {
   private volatile TreeMap<Double, Endpoint> weightedEndpointMap;
   private final String producerId = java.util.UUID.randomUUID().toString();
   private final ConcurrentHashMap<String, Integer> slotsOwned = new ConcurrentHashMap<>();
-  private int maxConnections = 0;
+  private int maxConnections = DEFAULT_MAX_CONNECTIONS;
   // Sticky: flips to true the first time we observe a v4-only signal from any
   // broker (eviction directive or non-zero slot ownership). Once true, the
   // legacy numWriteEndpoints gates become no-ops and weighted selection
@@ -96,6 +105,9 @@ public class MemqCommonClient implements Closeable {
       }
       if (networkProperties.containsKey(CONFIG_NUM_WRITE_ENDPOINTS)) {
         this.numWriteEndpoints = Math.max(1, Integer.parseInt(networkProperties.getProperty(CONFIG_NUM_WRITE_ENDPOINTS)));
+      }
+      if (networkProperties.containsKey(CONFIG_MAX_CONNECTIONS)) {
+        this.maxConnections = Integer.parseInt(networkProperties.getProperty(CONFIG_MAX_CONNECTIONS));
       }
     }
     writeEndpoints = Collections.emptyList();

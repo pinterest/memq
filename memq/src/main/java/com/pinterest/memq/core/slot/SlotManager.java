@@ -245,7 +245,11 @@ public class SlotManager {
                                    ConcurrentHashMap<String, ProducerSlotState> topicMap) {
     topicMap.remove(topic);
     if (topicMap.isEmpty()) {
-      producers.remove(pid, topicMap);
+      // If the producer has no more topics, drop it from the v4 connection
+      // registry too so that registry doesn't leak across producer churn.
+      if (producers.remove(pid, topicMap)) {
+        producerConnections.remove(pid);
+      }
     }
   }
 
@@ -436,9 +440,15 @@ public class SlotManager {
    * This map doubles as the <b>v4 producer registry</b>: only producers
    * present here are eligible for eviction. v3 producers never call this
    * method, so they are naturally excluded from eviction decisions.
+   * <p>
+   * The {@code connections} set may be empty during bootstrap (the producer
+   * has not yet learned about its slot ownership from any broker). An empty
+   * set still registers the producer as v4-capable; the eviction strategy
+   * gracefully falls back to "any v4 producer" when no producer has a known
+   * connection to the eviction target.
    *
    * @param pid the producer identifier
-   * @param connections the set of broker IPs this producer is connected to
+   * @param connections the set of broker IPs this producer is connected to (may be empty)
    */
   public void recordProducerConnections(String pid, Set<String> connections) {
     producerConnections.put(pid, connections);

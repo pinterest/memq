@@ -44,8 +44,9 @@ import com.pinterest.memq.core.security.Authorizer;
 import com.pinterest.memq.core.slot.SlotManager;
 
 import java.net.InetSocketAddress;
+import java.util.Collections;
 import java.util.HashSet;
-import java.util.List;
+import java.util.Set;
 
 import io.netty.channel.ChannelHandlerContext;
 
@@ -176,11 +177,18 @@ public class PacketSwitchingHandler {
       SlotManager sm = mgr.getSlotManager();
       if (sm != null) {
         sm.recordWrite(producerId, writePacket.getTopicName(), writePacket.getDataLength());
-        if (requestPacket.getProtocolVersion() >= 4) {
+        if (requestPacket.getProtocolVersion() >= 4
+            && writePacket.getProducerId() != null
+            && !writePacket.getProducerId().isEmpty()) {
+          // The presence of a v4 producerId is itself the signal that this is
+          // a v4 producer. Always register so EvictionManager can target it,
+          // even if currentConnections is empty (bootstrap: producer hasn't
+          // received any slot ownership info from any broker yet).
           List<String> connections = writePacket.getCurrentConnections();
-          if (connections != null && !connections.isEmpty()) {
-            sm.recordProducerConnections(producerId, new HashSet<>(connections));
-          }
+          Set<String> connectionSet = (connections == null || connections.isEmpty())
+              ? Collections.emptySet()
+              : new HashSet<>(connections);
+          sm.recordProducerConnections(producerId, connectionSet);
         }
       }
       topicProcessor.registerChannel(ctx.channel());
