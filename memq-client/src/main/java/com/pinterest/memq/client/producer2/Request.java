@@ -77,6 +77,9 @@ import java.util.zip.CRC32;
  */
 public class Request {
   private static final Logger logger = LoggerFactory.getLogger(Request.class);
+  // One-shot diagnostic flag (process-wide) for unexpected response packet
+  // shapes that prevent v4 routing from activating on the client.
+  private static volatile boolean nonWriteResponseLogged = false;
 
   private final ExecutorService dispatcher;
   private final ScheduledExecutorService scheduler;
@@ -535,6 +538,25 @@ public class Request {
           if (responsePacket.getPacket() instanceof WriteResponsePacket) {
             WriteResponsePacket writeResp = (WriteResponsePacket) responsePacket.getPacket();
             client.handleWriteResponse(writeResp, responsePacket.getSourceAddress());
+          } else if (responsePacket.getPacket() == null && !nonWriteResponseLogged) {
+            // One-shot diagnostic: an OK response with no inner packet means
+            // v4 fields (slot ownership, eviction directives) cannot be
+            // delivered. v4Active will never flip on the client. This usually
+            // means the broker took a code path that returned `null` instead
+            // of a WriteResponsePacket.
+            nonWriteResponseLogged = true;
+            logger.warn("OK response with null inner packet — v4 fields cannot"
+                + " be delivered. clientRequestId=" + clientRequestId
+                + " source=" + responsePacket.getSourceAddress());
+          } else if (responsePacket.getPacket() != null
+              && !(responsePacket.getPacket() instanceof WriteResponsePacket)
+              && !nonWriteResponseLogged) {
+            nonWriteResponseLogged = true;
+            logger.warn("OK response with unexpected packet type "
+                + responsePacket.getPacket().getClass().getSimpleName()
+                + " — handleWriteResponse will be skipped, v4Active cannot flip."
+                + " clientRequestId=" + clientRequestId
+                + " source=" + responsePacket.getSourceAddress());
           }
           resolve(new MemqWriteResult(clientRequestId, writeLatency, ackLatency, payloadSizeBytes));
           break;

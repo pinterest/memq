@@ -36,6 +36,7 @@ import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.ScheduledReporter;
 import com.codahale.metrics.SlidingTimeWindowArrayReservoir;
 import com.codahale.metrics.Timer;
+import com.google.common.annotations.VisibleForTesting;
 import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons2.DataNotFoundException;
 import com.pinterest.memq.commons.protocol.BatchData;
@@ -79,6 +80,7 @@ public class BucketingTopicProcessor extends TopicProcessor {
   private Counter invalidHeaderNegativeCounter;
   private Counter invalidHeaderExceptionCounter;
   private Counter emptyDataCounter;
+
 
   public BucketingTopicProcessor(MetricRegistry registry,
                                  TopicConfig topicConfig,
@@ -301,5 +303,10 @@ public class BucketingTopicProcessor extends TopicProcessor {
   @Override
   public void registerChannel(Channel channel) {
     channelGroup.add(channel);
+  }
+
+  @VisibleForTesting
+  BatchManager getBatchManager() {
+    return batchManager;
   }
 }

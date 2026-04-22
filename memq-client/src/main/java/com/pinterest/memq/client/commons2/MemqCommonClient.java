@@ -41,6 +41,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -101,6 +102,14 @@ public class MemqCommonClient implements Closeable {
   // signature actually changes. No time-based throttling — quiet on steady
   // state, immediately visible on any change.
   private volatile String lastLoggedWeightSignature = "";
+
+  // Diagnostics: counts every WriteResponsePacket processed. Used to log the
+  // first few responses verbatim (so it's obvious whether the broker is
+  // sending v4 fields), and to fire a one-shot warning if responses are
+  // flowing but v4Active never flipped (legacy v3 routing stuck on).
+  private final AtomicLong writeResponseCount = new AtomicLong();
+  private static final int LOG_FIRST_N_RESPONSES = 3;
+  private volatile boolean stuckOnV3Warned = false;
 
   protected MemqCommonClient(SSLConfig sslConfig, Properties networkProperties) {
     if (networkProperties != null) {
@@ -640,6 +649,20 @@ public class MemqCommonClient implements Closeable {
     String sourceIp = sourceAddress != null ? sourceAddress.getHostString() : null;
     int remaining = writeResp.getNumSlotsOwned();
 
+    // Diagnostics: log the first few responses verbatim so it's immediately
+    // visible whether the broker is actually setting v4 fields or sending
+    // empty packets. This is the canonical answer to "why isn't v4 active?"
+    long n = writeResponseCount.incrementAndGet();
+    if (n <= LOG_FIRST_N_RESPONSES) {
+      logger.info("WriteResponse #" + n + " received: source=" + sourceAddress
+          + " hasEviction=" + writeResp.hasEviction()
+          + " targetBrokerIp=" + writeResp.getTargetBrokerIp()
+          + " numSlotsToEvict=" + writeResp.getNumSlotsToEvict()
+          + " numSlotsOwned=" + remaining
+          + " producerId=" + producerId
+          + " v4Active(before)=" + v4Active);
+    }
+
     // Detect that we are talking to a v4-aware broker. Any of: an eviction
     // directive, or a non-zero slot ownership reading. Once flipped, this
     // is sticky for the lifetime of the client; v3 brokers never set either
@@ -654,6 +677,22 @@ public class MemqCommonClient implements Closeable {
             + " currentWriteEndpoints=" + writeEndpoints);
       }
       v4Active = true;
+    } else if (!v4Active && !stuckOnV3Warned && n >= LOG_FIRST_N_RESPONSES) {
+      // We've seen N responses, none had v4 fields. Either we're talking to
+      // a v3 broker fleet, or a v4 broker is returning empty WriteResponses
+      // (e.g., disableAcks bug, missing producerId in WriteRequest, or
+      // SlotManager not wired up on the broker). One-shot warning to avoid
+      // log noise.
+      stuckOnV3Warned = true;
+      logger.warn("Producer is on legacy v3 routing path after " + n
+          + " write responses (no v4 signal seen). If you expect v4 weighted"
+          + " routing, verify: (a) brokers are running the v4 build with"
+          + " SlotManager/EvictionManager wired up, (b) WriteRequests carry"
+          + " a non-empty producerId (this client's producerId=" + producerId
+          + "), (c) no proxy is stripping v4 response fields. Last response:"
+          + " source=" + sourceAddress
+          + " hasEviction=" + writeResp.hasEviction()
+          + " numSlotsOwned=" + remaining);
     }
 
     if (writeResp.hasEviction()) {
