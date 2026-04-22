@@ -51,7 +51,6 @@ public class GossipMessageDecoder extends SimpleChannelInboundHandler<DatagramPa
       peerStates.put(msg.getBrokerId(), state);
       receivedCounter.inc();
       latencyHistogram.update(now - msg.getSendTimestampMs());
-      logger.info("Received gossip message: " + msg);
     } catch (Exception e) {
       logger.log(Level.WARNING, "Failed to decode gossip datagram", e);
     }
