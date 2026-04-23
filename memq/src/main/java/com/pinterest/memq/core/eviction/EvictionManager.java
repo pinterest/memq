@@ -19,6 +19,7 @@ import com.pinterest.memq.core.config.EvictionConfig;
 import com.pinterest.memq.core.gossip.GossipState;
 import com.pinterest.memq.core.slot.SlotManager;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -42,19 +43,37 @@ public class EvictionManager {
   private final EvictionStrategy strategy;
   private final SlotManager slotManager;
   private final Supplier<Map<String, GossipState>> peerStatesSupplier;
+  private final Supplier<Map<String, Set<String>>> topicToBrokerIpsSupplier;
   private final EvictionConfig config;
   private final ConcurrentHashMap<String, EvictionResult> pendingEvictions = new ConcurrentHashMap<>();
 
   private ScheduledExecutorService executor;
 
+  /**
+   * @param topicToBrokerIpsSupplier supplies a map of topic to broker IPs
+   *        that serve writes for that topic. Used by the strategy to
+   *        constrain eviction targets to brokers that actually serve the
+   *        evicted producer's topics. Pass {@link Collections#emptyMap}
+   *        to disable topic-aware filtering (e.g. in tests).
+   */
   public EvictionManager(EvictionStrategy strategy,
                          SlotManager slotManager,
                          Supplier<Map<String, GossipState>> peerStatesSupplier,
+                         Supplier<Map<String, Set<String>>> topicToBrokerIpsSupplier,
                          EvictionConfig config) {
     this.strategy = strategy;
     this.slotManager = slotManager;
     this.peerStatesSupplier = peerStatesSupplier;
+    this.topicToBrokerIpsSupplier = topicToBrokerIpsSupplier;
     this.config = config;
+  }
+
+  /** Convenience constructor for tests with no topic affinity. */
+  public EvictionManager(EvictionStrategy strategy,
+                         SlotManager slotManager,
+                         Supplier<Map<String, GossipState>> peerStatesSupplier,
+                         EvictionConfig config) {
+    this(strategy, slotManager, peerStatesSupplier, Collections::emptyMap, config);
   }
 
   public void start() {
@@ -87,12 +106,15 @@ public class EvictionManager {
     try {
       Map<String, GossipState> peerStates = peerStatesSupplier.get();
       Map<String, Set<String>> producerConnections = slotManager.getProducerConnections();
+      Map<String, Set<String>> topicToBrokerIps = topicToBrokerIpsSupplier.get();
       logger.info("Eviction tick: peers=" + peerStates.size()
           + " v4Producers=" + producerConnections.size()
+          + " topics=" + topicToBrokerIps.size()
           + " localFreeSlots=" + slotManager.getFreeSlots()
           + "/" + slotManager.getTotalSlots()
           + " pendingEvictions=" + pendingEvictions.size());
-      EvictionResult result = strategy.evaluate(slotManager, peerStates, producerConnections);
+      EvictionResult result = strategy.evaluate(slotManager, peerStates,
+          producerConnections, topicToBrokerIps);
       if (result != null) {
         EvictionResult prev = pendingEvictions.put(result.getPid(), result);
         if (prev != null) {

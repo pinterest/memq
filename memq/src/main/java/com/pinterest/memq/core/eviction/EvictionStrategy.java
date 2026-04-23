@@ -24,12 +24,19 @@ import java.util.Set;
 /**
  * Pluggable strategy for deciding when and where to evict producer slots.
  * Implementations receive the current broker's slot state, gossip-reported
- * peer states, and per-producer connection information.
+ * peer states, per-producer connection information, and the cluster's
+ * topic-to-broker assignment so eviction targets can be restricted to
+ * brokers that actually serve the producer's topics.
  * <p>
  * <b>Protocol version contract:</b> Implementations MUST only target v4
  * producers for eviction, because v3 producers cannot interpret eviction
  * responses. The {@code producerConnections} map serves as the v4 registry:
  * only producers that have sent a v4 write request will appear in it.
+ * <p>
+ * <b>Topic affinity contract:</b> Implementations MUST only evict a
+ * producer to a broker that serves at least one of the producer's topics.
+ * Sending a producer to a non-serving broker would just yield REDIRECT and
+ * trigger an expensive client-side metadata refresh + reconnect.
  */
 public interface EvictionStrategy {
 
@@ -39,9 +46,11 @@ public interface EvictionStrategy {
    * @param slotManager this broker's slot manager
    * @param peerStates gossip state from peer brokers (brokerId to GossipState)
    * @param producerConnections per-producer connection sets (producerId to set of broker IPs)
+   * @param topicToBrokerIps topic to set of broker IPs that serve writes for it
    * @return an EvictionResult if eviction is warranted, or null if no eviction
    */
   EvictionResult evaluate(SlotManager slotManager,
                           Map<String, GossipState> peerStates,
-                          Map<String, Set<String>> producerConnections);
+                          Map<String, Set<String>> producerConnections,
+                          Map<String, Set<String>> topicToBrokerIps);
 }

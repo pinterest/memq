@@ -21,6 +21,9 @@ import com.pinterest.memq.core.slot.SlotManager;
 
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -30,18 +33,32 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /**
- * Eviction strategy that prefers producers already connected to the target broker.
+ * Default eviction strategy. Picks the target broker first via a sequence
+ * of guards, then chooses a producer to evict to it.
  * <p>
- * Only evicts if this broker's free slots are below the mean of non-frozen peers.
- * Uses probabilistic target selection from top-N brokers to prevent herding.
- * Maintains a cooldown per target to avoid over-evicting to the same broker.
+ * <b>Target broker filter (must pass all):</b>
+ * <ol>
+ *   <li>Not frozen.</li>
+ *   <li>Not already a pending eviction target (per-target cooldown).</li>
+ *   <li>Serves at least one topic that this broker also serves -- a producer
+ *       sent to a non-serving target would just receive REDIRECT and trigger
+ *       a client-side metadata refresh + reconnect.</li>
+ * </ol>
+ * <b>Congestion check:</b> the local broker's free slots must be strictly
+ * less than the mean free slots across the surviving target candidates.
  * <p>
- * <b>v3 backward compatibility:</b> Only v4 producers are eviction candidates.
- * A producer is considered v4 if it appears in {@code producerConnections},
- * which is populated exclusively from v4 write requests (via
- * {@link com.pinterest.memq.core.slot.SlotManager#recordProducerConnections}).
- * v3 producers still participate in slot accounting but are never targeted
- * for eviction because they cannot interpret eviction responses.
+ * <b>Target selection:</b> sort surviving targets by free slots (desc),
+ * pick probabilistically from the top-N weighted by free slots. Then
+ * verify the chosen target is strictly less loaded than us by more than
+ * {@code evictionPercentageThreshold}.
+ * <p>
+ * <b>Producer selection:</b> among v4 producers that hold slots and write
+ * to a topic the target broker serves, prefer one already connected to
+ * the target (no new connection needed); otherwise pick at random.
+ * <p>
+ * <b>v3 backward compatibility:</b> Only v4 producers are eviction
+ * candidates -- {@code producerConnections} is populated exclusively from
+ * v4 write requests, so v3 producers are naturally excluded.
  */
 public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
 
@@ -59,7 +76,8 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
   @Override
   public EvictionResult evaluate(SlotManager slotManager,
                                  Map<String, GossipState> peerStates,
-                                 Map<String, Set<String>> producerConnections) {
+                                 Map<String, Set<String>> producerConnections,
+                                 Map<String, Set<String>> topicToBrokerIps) {
     if (peerStates.isEmpty()) {
       logger.info("[" + brokerId + "] eviction skipped: no peers known via gossip yet");
       return null;
@@ -69,19 +87,33 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     long cooldownMs = (long) (config.getPendingEvictionCooldownSeconds() * 1000);
     pendingEvictionTargets.entrySet().removeIf(e -> now - e.getValue() > cooldownMs);
 
+    // Build broker -> topics it serves, and the set of topics this broker
+    // serves locally. Both views derive from the same governor snapshot so
+    // they are consistent within this tick.
+    Map<String, Set<String>> brokerToTopics = invert(topicToBrokerIps);
+    Set<String> localTopics = brokerToTopics.getOrDefault(brokerId, java.util.Collections.emptySet());
+
+    // Step 1: filter candidate target brokers. Each filter is a reason to
+    // not evict; all must pass.
     List<Map.Entry<String, Integer>> candidates = peerStates.entrySet().stream()
+        .filter(e -> !brokerId.equals(e.getKey()))
         .filter(e -> !e.getValue().getMessage().isFreeze())
         .filter(e -> !pendingEvictionTargets.containsKey(e.getKey()))
-        .map(e -> new AbstractMap.SimpleEntry<>(e.getKey(), e.getValue().getMessage().getFreeSlots()))
+        .filter(e -> sharesTopic(e.getKey(), brokerToTopics, localTopics))
+        .map(e -> new AbstractMap.SimpleEntry<>(e.getKey(),
+            e.getValue().getMessage().getFreeSlots()))
         .collect(Collectors.toList());
 
     if (candidates.isEmpty()) {
       logger.info("[" + brokerId + "] eviction skipped: no eligible target peers"
-          + " (peerCount=" + peerStates.size() + ", pendingTargets=" + pendingEvictionTargets.size()
-          + ") -- all peers are frozen or in cooldown");
+          + " (peerCount=" + peerStates.size()
+          + ", pendingTargets=" + pendingEvictionTargets.size()
+          + ", localTopics=" + localTopics.size() + ")"
+          + " -- all peers are frozen, in cooldown, or share no topics with this broker");
       return null;
     }
 
+    // Step 2: am I more congested than the surviving candidate set?
     double meanFreeSlots = candidates.stream().mapToInt(Map.Entry::getValue).average().orElse(0);
     int localFreeSlots = slotManager.getFreeSlots();
 
@@ -93,15 +125,16 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       return null;
     }
 
+    // Step 3: probabilistic top-N target selection.
     candidates.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
     Map.Entry<String, Integer> target = selectTargetBroker(candidates);
 
-    if (target == null || target.getKey().equals(brokerId)) {
-      logger.info("[" + brokerId + "] eviction skipped: selected target was self or null"
-          + " (target=" + (target == null ? "null" : target.getKey()) + ")");
+    if (target == null) {
+      logger.info("[" + brokerId + "] eviction skipped: target selection returned null");
       return null;
     }
 
+    // Step 4: verify the target is meaningfully less loaded.
     if (target.getValue() <= localFreeSlots) {
       logger.info("[" + brokerId + "] eviction skipped: target has no more free slots than us"
           + " (target=" + target.getKey() + " freeSlots=" + target.getValue()
@@ -121,8 +154,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       return null;
     }
 
-    // Only v4 producers are eviction candidates. producerConnections is the
-    // v4 registry: only producers that have sent a v4 write request appear here.
+    // Only v4 producers are eviction candidates.
     if (producerConnections.isEmpty()) {
       logger.info("[" + brokerId + "] eviction skipped: no v4 producers registered yet"
           + " (target=" + target.getKey() + ") -- check that producers are using producer2"
@@ -130,37 +162,21 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       return null;
     }
 
-    // Prefer v4 producers already connected to the target broker
-    List<String> candidatePids = new ArrayList<>();
-    for (Map.Entry<String, Set<String>> entry : producerConnections.entrySet()) {
-      String pid = entry.getKey();
-      if (entry.getValue().contains(target.getKey()) && slotManager.producerHasSlots(pid)) {
-        candidatePids.add(pid);
-      }
-    }
+    // Step 5: pick a producer. Constrain to producers writing to a topic the
+    // target broker serves -- otherwise the producer would be sent to a
+    // broker that doesn't own its topic processor and would just REDIRECT.
+    Set<String> targetServedTopics = brokerToTopics.getOrDefault(target.getKey(),
+        java.util.Collections.emptySet());
 
-    String pidToEvict;
-    if (!candidatePids.isEmpty()) {
-      pidToEvict = candidatePids.get(ThreadLocalRandom.current().nextInt(candidatePids.size()));
-      logger.info("[" + brokerId + "] evicting pid=" + pidToEvict
-          + " (has connection to target=" + target.getKey() + ")");
-    } else {
-      // Fall back to any v4 producer that has slots
-      List<String> v4Pids = new ArrayList<>();
-      for (String pid : producerConnections.keySet()) {
-        if (slotManager.producerHasSlots(pid)) {
-          v4Pids.add(pid);
-        }
-      }
-      if (v4Pids.isEmpty()) {
-        logger.info("[" + brokerId + "] eviction skipped: no v4 producer holds slots"
-            + " (registeredV4Producers=" + producerConnections.size()
-            + ", target=" + target.getKey() + ")");
-        return null;
-      }
-      pidToEvict = v4Pids.get(ThreadLocalRandom.current().nextInt(v4Pids.size()));
-      logger.info("[" + brokerId + "] evicting pid=" + pidToEvict
-          + " (random v4, no candidate connected to target=" + target.getKey() + ")");
+    String pidToEvict = pickProducer(slotManager, producerConnections, target.getKey(),
+        targetServedTopics);
+
+    if (pidToEvict == null) {
+      logger.info("[" + brokerId + "] eviction skipped: no v4 producer holds slots on a topic"
+          + " served by target=" + target.getKey()
+          + " (registeredV4Producers=" + producerConnections.size()
+          + ", targetServedTopics=" + targetServedTopics + ")");
+      return null;
     }
 
     pendingEvictionTargets.put(target.getKey(), now);
@@ -170,8 +186,99 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
         + " target=" + target.getKey() + " slotsToEvict=1"
         + " (localFree=" + localFreeSlots + " targetFree=" + target.getValue()
         + " gap=" + String.format("%.2f", percentageDifference) + "%"
-        + " v4Producers=" + producerConnections.size() + ")");
+        + " v4Producers=" + producerConnections.size()
+        + " targetTopics=" + targetServedTopics.size() + ")");
     return result;
+  }
+
+  /**
+   * Pick a producer to evict to {@code targetIp}. Constrained to v4 producers
+   * that hold slots on at least one topic the target broker serves. Among
+   * those, prefer producers that already have an active connection to the
+   * target (skips a new-connection setup on the producer side).
+   */
+  private String pickProducer(SlotManager slotManager,
+                              Map<String, Set<String>> producerConnections,
+                              String targetIp,
+                              Set<String> targetServedTopics) {
+    if (targetServedTopics.isEmpty()) {
+      return null;
+    }
+    List<String> connected = new ArrayList<>();
+    List<String> fallback = new ArrayList<>();
+    for (Map.Entry<String, Set<String>> entry : producerConnections.entrySet()) {
+      String pid = entry.getKey();
+      if (!slotManager.producerHasSlots(pid)) {
+        continue;
+      }
+      if (!writesToServedTopic(slotManager.getProducerTopics(pid), targetServedTopics)) {
+        continue;
+      }
+      Set<String> conns = entry.getValue();
+      if (conns != null && conns.contains(targetIp)) {
+        connected.add(pid);
+      } else {
+        fallback.add(pid);
+      }
+    }
+    if (!connected.isEmpty()) {
+      String pid = connected.get(ThreadLocalRandom.current().nextInt(connected.size()));
+      logger.info("[" + brokerId + "] evicting pid=" + pid
+          + " (has connection to target=" + targetIp + ")");
+      return pid;
+    }
+    if (!fallback.isEmpty()) {
+      String pid = fallback.get(ThreadLocalRandom.current().nextInt(fallback.size()));
+      logger.info("[" + brokerId + "] evicting pid=" + pid
+          + " (random v4, no candidate connected to target=" + targetIp + ")");
+      return pid;
+    }
+    return null;
+  }
+
+  private static boolean writesToServedTopic(Collection<String> producerTopics,
+                                             Set<String> targetServedTopics) {
+    for (String t : producerTopics) {
+      if (targetServedTopics.contains(t)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean sharesTopic(String peerIp,
+                                     Map<String, Set<String>> brokerToTopics,
+                                     Set<String> localTopics) {
+    if (localTopics.isEmpty()) {
+      return false;
+    }
+    Set<String> peerTopics = brokerToTopics.get(peerIp);
+    if (peerTopics == null || peerTopics.isEmpty()) {
+      return false;
+    }
+    for (String t : peerTopics) {
+      if (localTopics.contains(t)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Invert {@code topic -> {brokerIp}} into {@code brokerIp -> {topic}} for
+   * O(1) lookup of "what topics does this broker serve?".
+   */
+  private static Map<String, Set<String>> invert(Map<String, Set<String>> topicToBrokerIps) {
+    Map<String, Set<String>> out = new HashMap<>();
+    for (Map.Entry<String, Set<String>> e : topicToBrokerIps.entrySet()) {
+      String topic = e.getKey();
+      Set<String> ips = e.getValue();
+      if (ips == null) continue;
+      for (String ip : ips) {
+        out.computeIfAbsent(ip, k -> new HashSet<>()).add(topic);
+      }
+    }
+    return out;
   }
 
   private Map.Entry<String, Integer> selectTargetBroker(

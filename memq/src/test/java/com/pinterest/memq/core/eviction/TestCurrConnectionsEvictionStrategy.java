@@ -82,6 +82,44 @@ public class TestCurrConnectionsEvictionStrategy {
     return Collections.singletonMap(peerId, state);
   }
 
+  /**
+   * Topic-to-broker map that says every peer broker (and the local broker)
+   * serves the single test {@link #TOPIC}. Use this as the 4th argument to
+   * {@link CurrConnectionsEvictionStrategy#evaluate} in tests that don't
+   * specifically exercise topic-affinity filtering.
+   */
+  private Map<String, Set<String>> allPeersServeTopic(Map<String, GossipState> peers) {
+    return allPeersServeTopic(TOPIC, peers);
+  }
+
+  private Map<String, Set<String>> allPeersServeTopic(String topic,
+                                                      Map<String, GossipState> peers) {
+    Set<String> ips = new HashSet<>(peers.keySet());
+    ips.add(BROKER_LOCAL);
+    return Collections.singletonMap(topic, ips);
+  }
+
+  /** Topic-to-broker map declaring multiple topics, all served by every peer + local. */
+  private Map<String, Set<String>> allPeersServeTopics(Map<String, GossipState> peers,
+                                                       String... topics) {
+    Set<String> ips = new HashSet<>(peers.keySet());
+    ips.add(BROKER_LOCAL);
+    Map<String, Set<String>> map = new HashMap<>();
+    for (String t : topics) {
+      map.put(t, ips);
+    }
+    return map;
+  }
+
+  /** EvictionManager constructor for tests, defaulting to "all peers serve TOPIC". */
+  private EvictionManager managerWith(EvictionStrategy strategy,
+                                      SlotManager sm,
+                                      Map<String, GossipState> peers,
+                                      EvictionConfig config) {
+    Map<String, Set<String>> topicMap = allPeersServeTopic(peers);
+    return new EvictionManager(strategy, sm, () -> peers, () -> topicMap, config);
+  }
+
   // -----------------------------------------------------------------------
   // Basic eviction (v4 producer) — sanity check
   // -----------------------------------------------------------------------
@@ -99,7 +137,7 @@ public class TestCurrConnectionsEvictionStrategy {
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
 
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
-    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
 
     assertNotNull("should evict a v4 producer", result);
     assertEquals("producer-1", result.getPid());
@@ -123,7 +161,7 @@ public class TestCurrConnectionsEvictionStrategy {
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
 
     // producerConnections is empty — no v4 producers registered
-    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
 
     assertNull("must NOT evict v3 producers", result);
   }
@@ -149,7 +187,7 @@ public class TestCurrConnectionsEvictionStrategy {
 
     // Run multiple evaluations to verify v3 is never selected
     for (int i = 0; i < 50; i++) {
-      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
       if (result != null) {
         assertEquals("only v4 producer should be evicted", "v4-producer", result.getPid());
       }
@@ -169,7 +207,7 @@ public class TestCurrConnectionsEvictionStrategy {
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
 
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
-    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
 
     assertNull("no eviction for v3-only cluster", result);
     assertEquals("v3 slots unchanged", v3Slots, sm.getTotalProducerSlots("v3-producer"));
@@ -196,7 +234,7 @@ public class TestCurrConnectionsEvictionStrategy {
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
 
     for (int i = 0; i < 50; i++) {
-      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
       if (result != null) {
         assertEquals("fallback must only pick v4 producer", "v4-producer", result.getPid());
       }
@@ -219,7 +257,7 @@ public class TestCurrConnectionsEvictionStrategy {
 
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
 
-    EvictionManager manager = new EvictionManager(strategy, sm, () -> peers, config);
+    EvictionManager manager = managerWith(strategy, sm, peers, config);
     manager.runEviction();
 
     assertEquals("no pending eviction should be created for v3 producers",
@@ -255,7 +293,7 @@ public class TestCurrConnectionsEvictionStrategy {
 
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
 
-    EvictionManager manager = new EvictionManager(strategy, sm, () -> peers, config);
+    EvictionManager manager = managerWith(strategy, sm, peers, config);
     manager.runEviction();
 
     assertNull("v3 producer must have no pending eviction",
@@ -341,9 +379,10 @@ public class TestCurrConnectionsEvictionStrategy {
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
 
     // Run many evaluations — evicted pid must always be one of the two UUIDs
+    Map<String, Set<String>> topicMap = allPeersServeTopics(peers, "topicA", "topicB");
     Set<String> evictedPids = new HashSet<>();
     for (int i = 0; i < 50; i++) {
-      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), topicMap);
       if (result != null) {
         evictedPids.add(result.getPid());
         assertTrue("evicted pid must be a UUID, not an IP",
@@ -395,7 +434,7 @@ public class TestCurrConnectionsEvictionStrategy {
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
 
-    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
     assertNull("should not evict when local free slots >= mean", result);
   }
 
@@ -416,7 +455,7 @@ public class TestCurrConnectionsEvictionStrategy {
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
 
-    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
     assertNotNull("should evict when local free slots < mean", result);
   }
 
@@ -445,7 +484,7 @@ public class TestCurrConnectionsEvictionStrategy {
     Map<String, Integer> targetCounts = new HashMap<>();
     int trials = 1000;
     for (int i = 0; i < trials; i++) {
-      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
       if (result != null) {
         targetCounts.merge(result.getTargetBrokerIp(), 1, Integer::sum);
       }
@@ -485,7 +524,7 @@ public class TestCurrConnectionsEvictionStrategy {
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
 
     for (int i = 0; i < 100; i++) {
-      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
       if (result != null) {
         assertEquals("should always prefer the producer connected to target",
             "connected-producer", result.getPid());
@@ -516,7 +555,7 @@ public class TestCurrConnectionsEvictionStrategy {
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
 
-    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
     assertNull("should not evict when percentage difference is below threshold", result);
   }
 
@@ -539,11 +578,11 @@ public class TestCurrConnectionsEvictionStrategy {
 
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
 
-    EvictionResult first = strategy.evaluate(sm, peers, sm.getProducerConnections());
+    EvictionResult first = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
     assertNotNull("first eviction should succeed", first);
     assertEquals("broker-2", first.getTargetBrokerIp());
 
-    EvictionResult second = strategy.evaluate(sm, peers, sm.getProducerConnections());
+    EvictionResult second = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
     assertNull("second eviction to same target should be blocked by cooldown", second);
   }
 
@@ -562,7 +601,7 @@ public class TestCurrConnectionsEvictionStrategy {
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
 
-    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+    EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
     assertNull("should not evict to a frozen broker", result);
   }
 
@@ -590,7 +629,7 @@ public class TestCurrConnectionsEvictionStrategy {
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
 
     for (int i = 0; i < 50; i++) {
-      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections());
+      EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
       if (result != null) {
         assertEquals("should always target the non-frozen broker", "broker-ok", result.getTargetBrokerIp());
       }
@@ -630,8 +669,10 @@ public class TestCurrConnectionsEvictionStrategy {
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
 
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 20);
+    Map<String, Set<String>> topicMap = allPeersServeTopics(peers, "topicA", "topicB");
 
-    EvictionManager manager = new EvictionManager(strategy, sm, () -> peers, config);
+    EvictionManager manager = new EvictionManager(strategy, sm, () -> peers,
+        () -> topicMap, config);
     manager.runEviction();
 
     // At most 1 pending eviction per run, targeting one specific UUID
@@ -643,5 +684,102 @@ public class TestCurrConnectionsEvictionStrategy {
       assertTrue("exactly one UUID should have a pending eviction",
           (r1 != null) ^ (r2 != null));
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Topic-affinity guard: target broker must serve a topic this broker
+  // serves AND the chosen producer's topic must be served by the target.
+  //
+  // Regression for the scenario where producers were sent to brokers that
+  // didn't own their topic processor, triggering REDIRECT responses and
+  // forcing client-side reconnects (NetworkClient.reset() on the producer).
+  // -----------------------------------------------------------------------
+
+  @Test
+  public void testEvictionSkippedWhenNoPeerSharesTopic() throws Exception {
+    SlotManager sm = createSlotManager(20);
+    acquireSlots(sm, "producer-1", TOPIC, 150);
+    sm.recordProducerConnections("producer-1",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
+
+    // broker-2 advertises a different topic. Even though it has free slots
+    // and a connected v4 producer, redirecting "producer-1" (which writes
+    // TOPIC) there would just bounce back as REDIRECT.
+    Map<String, Set<String>> topicMap = new HashMap<>();
+    topicMap.put(TOPIC, Collections.singleton(BROKER_LOCAL));
+    topicMap.put("otherTopic", Collections.singleton("broker-2"));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), topicMap);
+
+    assertNull("must not evict when no peer serves a topic this broker also serves",
+        result);
+  }
+
+  @Test
+  public void testEvictionSkippedWhenProducerTopicNotServedByTarget() throws Exception {
+    // producer-1 writes "topicX" (only local serves topicX). broker-2
+    // shares "shellTopic" with local (passes broker-stage filter) but
+    // serves no topic this producer writes -- so producer selection
+    // returns null and no eviction happens.
+    SlotManager sm = createSlotManager(20);
+    acquireSlots(sm, "producer-1", "topicX", 150);
+    sm.recordProducerConnections("producer-1",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
+
+    Map<String, Set<String>> topicMap = new HashMap<>();
+    topicMap.put("shellTopic",
+        new HashSet<>(java.util.Arrays.asList(BROKER_LOCAL, "broker-2")));
+    topicMap.put("topicX", Collections.singleton(BROKER_LOCAL));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), topicMap);
+
+    assertNull("must not evict producer to a target that doesn't serve its topic",
+        result);
+  }
+
+  @Test
+  public void testEvictionTargetsPeerSharingProducerTopic() throws Exception {
+    SlotManager sm = createSlotManager(20);
+    acquireSlots(sm, "producer-1", TOPIC, 150);
+    sm.recordProducerConnections("producer-1",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    // Two peers: broker-2 only serves "otherTopic" (not TOPIC); broker-3
+    // serves TOPIC. Strategy must select broker-3 -- broker-2 is filtered
+    // even though it has a connected producer.
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 18, false,
+            System.currentTimeMillis()), System.currentTimeMillis()));
+    peers.put("broker-3",
+        new GossipState(new GossipMessage("broker-3", 15, false,
+            System.currentTimeMillis()), System.currentTimeMillis()));
+
+    Map<String, Set<String>> topicMap = new HashMap<>();
+    topicMap.put(TOPIC,
+        new HashSet<>(java.util.Arrays.asList(BROKER_LOCAL, "broker-3")));
+    topicMap.put("otherTopic", Collections.singleton("broker-2"));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), topicMap);
+
+    assertNotNull("must evict to broker-3 (the only peer serving TOPIC)", result);
+    assertEquals("broker-3", result.getTargetBrokerIp());
+    assertEquals("producer-1", result.getPid());
   }
 }

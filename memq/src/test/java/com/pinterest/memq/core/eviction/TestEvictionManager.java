@@ -45,7 +45,7 @@ public class TestEvictionManager {
     EvictionConfig config = new EvictionConfig();
     config.setEnabled(true);
 
-    EvictionStrategy mockStrategy = (sm, peers, conns) ->
+    EvictionStrategy mockStrategy = (sm, peers, conns, topics) ->
         new EvictionResult("uuid-producer-1", "10.0.0.5", 1);
 
     EvictionManager manager = new EvictionManager(mockStrategy, createSlotManager(),
@@ -67,7 +67,7 @@ public class TestEvictionManager {
     EvictionConfig config = new EvictionConfig();
     config.setEnabled(true);
 
-    EvictionStrategy mockStrategy = (sm, peers, conns) -> null;
+    EvictionStrategy mockStrategy = (sm, peers, conns, topics) -> null;
 
     EvictionManager manager = new EvictionManager(mockStrategy, createSlotManager(),
         Collections::emptyMap, config);
@@ -81,7 +81,7 @@ public class TestEvictionManager {
     config.setEnabled(true);
 
     final int[] callCount = {0};
-    EvictionStrategy mockStrategy = (sm, peers, conns) -> {
+    EvictionStrategy mockStrategy = (sm, peers, conns, topics) -> {
       callCount[0]++;
       return new EvictionResult("uuid-producer-1", "target-" + callCount[0], 1);
     };
@@ -105,7 +105,7 @@ public class TestEvictionManager {
     EvictionConfig config = new EvictionConfig();
     config.setEnabled(true);
 
-    EvictionStrategy mockStrategy = (sm, peers, conns) ->
+    EvictionStrategy mockStrategy = (sm, peers, conns, topics) ->
         new EvictionResult("uuid-producer-1", "10.0.0.5", 1);
 
     EvictionManager manager = new EvictionManager(mockStrategy, createSlotManager(),
@@ -127,7 +127,7 @@ public class TestEvictionManager {
     config.setIntervalSeconds(0.1);
 
     final int[] callCount = {0};
-    EvictionStrategy mockStrategy = (sm, peers, conns) -> {
+    EvictionStrategy mockStrategy = (sm, peers, conns, topics) -> {
       callCount[0]++;
       return null;
     };

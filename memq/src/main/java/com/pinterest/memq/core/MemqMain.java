@@ -18,8 +18,10 @@ package com.pinterest.memq.core;
 import java.net.UnknownHostException;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
@@ -92,7 +94,7 @@ public class MemqMain extends Application<MemqConfig> {
         metricsRegistryMap, client, slotManager);
 
     EvictionManager evictionManager = initializeEvictionManager(configuration, memqManager,
-        slotManager, gossipServer);
+        memqGovernor, slotManager, gossipServer);
     logger.info("Memq started");
 
     initializeShutdownHooks(memqManager, memqGovernor, nettyServer, gossipServer, slotManager,
@@ -131,6 +133,7 @@ public class MemqMain extends Application<MemqConfig> {
 
   private EvictionManager initializeEvictionManager(MemqConfig configuration,
                                                       MemqManager memqManager,
+                                                      MemqGovernor memqGovernor,
                                                       SlotManager slotManager,
                                                       GossipServer gossipServer) throws Exception {
     EvictionConfig evictionConfig = configuration.getEvictionConfig();
@@ -150,8 +153,25 @@ public class MemqMain extends Application<MemqConfig> {
         .asSubclass(EvictionStrategy.class)
         .getConstructor(String.class, EvictionConfig.class)
         .newInstance(provider.getIP(), evictionConfig);
+    // Topic-to-broker IPs view rebuilt every tick from the governor's live
+    // metadata. Used by the strategy to reject eviction targets that don't
+    // serve the producer's topic (the broker would just REDIRECT, forcing
+    // an expensive client-side metadata refresh and reconnect).
+    java.util.function.Supplier<Map<String, Set<String>>> topicToBrokerIps = () -> {
+      Map<String, com.pinterest.memq.commons.protocol.TopicMetadata> md =
+          memqGovernor.getTopicMetadataMap();
+      Map<String, Set<String>> out = new HashMap<>(md.size());
+      for (Map.Entry<String, com.pinterest.memq.commons.protocol.TopicMetadata> e : md.entrySet()) {
+        Set<String> ips = new HashSet<>();
+        for (com.pinterest.memq.commons.protocol.Broker b : e.getValue().getWriteBrokers()) {
+          ips.add(b.getBrokerIP());
+        }
+        out.put(e.getKey(), ips);
+      }
+      return out;
+    };
     EvictionManager evictionManager = new EvictionManager(strategy, slotManager,
-        gossipServer::getPeerStates, evictionConfig);
+        gossipServer::getPeerStates, topicToBrokerIps, evictionConfig);
     memqManager.setEvictionManager(evictionManager);
     evictionManager.start();
 

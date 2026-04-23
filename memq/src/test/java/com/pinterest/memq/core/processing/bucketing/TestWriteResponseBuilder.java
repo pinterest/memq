@@ -301,7 +301,8 @@ public class TestWriteResponseBuilder {
       @Override
       public EvictionResult evaluate(SlotManager slotManager,
                                      Map<String, GossipState> peerStates,
-                                     Map<String, Set<String>> producerConnections) {
+                                     Map<String, Set<String>> producerConnections,
+                                     Map<String, Set<String>> topicToBrokerIps) {
         if (fired) return null;
         fired = true;
         return result;
