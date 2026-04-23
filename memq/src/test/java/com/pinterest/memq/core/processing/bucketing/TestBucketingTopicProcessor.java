@@ -478,7 +478,7 @@ public class TestBucketingTopicProcessor {
     slotConfig.setEmaWindowSeconds(0.001);
     slotConfig.setTickIntervalMs(1000);
     com.pinterest.memq.core.slot.SlotManager slotManager =
-        new com.pinterest.memq.core.slot.SlotManager(slotConfig, 100, registry);
+        new com.pinterest.memq.core.slot.SlotManager(slotConfig, 100);
 
     slotManager.recordWrite(v4ProducerId, "test", 50 * 1024 * 1024);
     java.lang.reflect.Method tickMethod =
