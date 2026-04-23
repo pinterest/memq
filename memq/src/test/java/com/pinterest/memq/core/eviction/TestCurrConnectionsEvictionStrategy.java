@@ -21,7 +21,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.core.config.EvictionConfig;
 import com.pinterest.memq.core.config.SlotAccountingConfig;
 import com.pinterest.memq.core.gossip.GossipMessage;
@@ -66,7 +65,7 @@ public class TestCurrConnectionsEvictionStrategy {
   }
 
   private SlotManager createSlotManager(int totalSlots) {
-    return new SlotManager(slotConfig, totalSlots, new MetricRegistry());
+    return new SlotManager(slotConfig, totalSlots);
   }
 
   private void acquireSlots(SlotManager sm, String pid, String topic, int mbToWrite) throws Exception {

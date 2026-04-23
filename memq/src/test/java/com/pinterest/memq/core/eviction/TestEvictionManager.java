@@ -19,7 +19,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 
-import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.core.config.EvictionConfig;
 import com.pinterest.memq.core.config.SlotAccountingConfig;
 import com.pinterest.memq.core.gossip.GossipState;
@@ -37,7 +36,7 @@ public class TestEvictionManager {
     SlotAccountingConfig config = new SlotAccountingConfig();
     config.setEnabled(true);
     config.setSlotSizeMbps(10.0);
-    return new SlotManager(config, 20, new MetricRegistry());
+    return new SlotManager(config, 20);
   }
 
   @Test

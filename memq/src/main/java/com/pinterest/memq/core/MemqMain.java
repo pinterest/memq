@@ -267,7 +267,7 @@ public class MemqMain extends Application<MemqConfig> {
 
     MetricRegistry slotRegistry = new MetricRegistry();
 
-    SlotManager slotManager = new SlotManager(slotConfig, totalSlots, slotRegistry);
+    SlotManager slotManager = new SlotManager(slotConfig, totalSlots);
     memqManager.setSlotManager(slotManager);
     slotManager.start();
     metricsRegistryMap.put("slot", slotRegistry);
@@ -278,14 +278,20 @@ public class MemqMain extends Application<MemqConfig> {
         () -> (Gauge<Integer>) () -> slotManager.isFrozen() ? 1 : 0);
     slotRegistry.gauge("producers", () -> (Gauge<Integer>) slotManager::getProducerCount);
 
+    // Per-broker aggregate slot metrics (no topic / pid dimension). Single
+    // reporter, prefix "slot" -> emits memq.slot.<name> for each gauge in
+    // the registry (total, occupied, free, frozen, producers, plus any
+    // future ones).
+    //
+    // Note: initializeMetricsTransmitter ran before this method, so the
+    // shared metricsRegistryMap-iteration path did not see "slot" and
+    // therefore did not create a reporter for it. We must create one here.
     if (client != null) {
       String localHostname = MiscUtils.getHostname();
-      for (String metricName : slotRegistry.getNames()) {
-        ScheduledReporter reporter = OpenTSDBReporter.createReporter("slot", slotRegistry,
-            metricName, (String name, Metric metric) -> true, TimeUnit.SECONDS, TimeUnit.SECONDS,
-            client, localHostname);
-        reporter.start(configuration.getOpenTsdbConfig().getFrequencyInSeconds(), TimeUnit.SECONDS);
-      }
+      ScheduledReporter reporter = OpenTSDBReporter.createReporter("slot", slotRegistry,
+          "slot", (String name, Metric metric) -> true, TimeUnit.SECONDS, TimeUnit.SECONDS,
+          client, localHostname);
+      reporter.start(configuration.getOpenTsdbConfig().getFrequencyInSeconds(), TimeUnit.SECONDS);
     }
 
     logger.info("Slot accounting started: totalSlots=" + totalSlots

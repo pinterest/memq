@@ -20,7 +20,6 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
-import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.core.config.SlotAccountingConfig;
 
 import org.junit.Before;
@@ -52,7 +51,7 @@ public class TestSlotManagerEviction {
   }
 
   private SlotManager create(int totalSlots) {
-    return new SlotManager(config, totalSlots, new MetricRegistry());
+    return new SlotManager(config, totalSlots);
   }
 
   @Test

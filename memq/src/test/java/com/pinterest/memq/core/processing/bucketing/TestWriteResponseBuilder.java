@@ -20,7 +20,6 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
-import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.commons.protocol.RequestType;
 import com.pinterest.memq.commons.protocol.ResponseCodes;
 import com.pinterest.memq.commons.protocol.WriteResponsePacket;
@@ -81,7 +80,7 @@ public class TestWriteResponseBuilder {
   }
 
   private SlotManager createSlotManager() {
-    return new SlotManager(slotConfig, 100, new MetricRegistry());
+    return new SlotManager(slotConfig, 100);
   }
 
   private void acquireSlots(SlotManager sm, String pid, int mb) throws Exception {

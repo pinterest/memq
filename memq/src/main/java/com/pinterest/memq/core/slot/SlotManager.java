@@ -21,7 +21,6 @@ import com.pinterest.memq.core.config.SlotAccountingConfig;
 
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
@@ -57,18 +56,11 @@ public class SlotManager {
   private final AtomicInteger totalOccupiedSlots = new AtomicInteger(0);
   private volatile long lastSlotChangeTimeMs = 0;
 
-  private final MetricRegistry registry;
-  private final Set<String> registeredProducerMetrics = new HashSet<>();
   private final ConcurrentHashMap<String, Set<String>> producerConnections = new ConcurrentHashMap<>();
 
   private ScheduledExecutorService tickExecutor;
 
   public SlotManager(SlotAccountingConfig config, int totalSlots) {
-    this(config, totalSlots, null);
-  }
-
-  public SlotManager(SlotAccountingConfig config, int totalSlots, MetricRegistry registry) {
-    this.registry = registry;
     this.totalSlots = totalSlots;
     this.slotSizeMbps = config.getSlotSizeMbps();
     this.acquireThresholdMs = config.getAcquireThresholdSeconds() * 1000.0;
@@ -147,8 +139,6 @@ public class SlotManager {
 
           state.emaRateMbps = emaDecay * state.emaRateMbps + (1 - emaDecay) * instantRateMbps;
 
-          registerProducerMetrics(pid, topic);
-
           int expectedSlots = (int) ceil(state.emaRateMbps / slotSizeMbps);
           int currentSlots = state.currentSlots;
 
@@ -187,7 +177,6 @@ public class SlotManager {
             } else {
               removeProducerTopic(pid, topic, topicMap);
             }
-            deregisterProducerMetrics(pid, topic);
           }
         }
       }
@@ -307,49 +296,32 @@ public class SlotManager {
     return state != null ? state.emaRateMbps : 0.0;
   }
 
-  static String sanitize(String value) {
-    return value.replace('.', '_').replace(':', '_');
-  }
-
-  static String metricSuffix(String pid, String topic) {
-    return sanitize(pid) + "." + sanitize(topic);
-  }
-
-  private void registerProducerMetrics(String pid, String topic) {
-    if (registry == null) {
+  /**
+   * Register a single {@code producer.ema} gauge in the supplied per-topic
+   * MetricRegistry. The gauge sums {@link ProducerSlotState#emaRateMbps}
+   * across every producer currently writing to {@code topic} on this broker
+   * (in MBps). The {@code topic} dimension is supplied at emit time by the
+   * per-topic OpenTSDB reporter (see {@code MemqManager.createTopicProcessor}),
+   * so no per-pid metric explosion happens.
+   * <p>
+   * Idempotent: codahale's {@code MetricRegistry.gauge(name, supplier)}
+   * returns the existing gauge when one is already registered under that
+   * name, so duplicate calls are safe (but pointless).
+   */
+  public void registerTopicEmaGauge(MetricRegistry topicRegistry, String topic) {
+    if (topicRegistry == null || topic == null) {
       return;
     }
-    String suffix = metricSuffix(pid, topic);
-    String emaKey = "producer.ema." + suffix;
-    if (registeredProducerMetrics.add(emaKey)) {
-      registry.gauge(emaKey, () -> (Gauge<Double>) () -> {
-        ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
-        if (topicMap == null) return 0.0;
+    topicRegistry.gauge("producer.ema", () -> (Gauge<Double>) () -> {
+      double sum = 0.0;
+      for (ConcurrentHashMap<String, ProducerSlotState> topicMap : producers.values()) {
         ProducerSlotState s = topicMap.get(topic);
-        return s != null ? s.emaRateMbps : 0.0;
-      });
-      String slotsKey = "producer.slots." + suffix;
-      registeredProducerMetrics.add(slotsKey);
-      registry.gauge(slotsKey, () -> (Gauge<Integer>) () -> {
-        ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
-        if (topicMap == null) return 0;
-        ProducerSlotState s = topicMap.get(topic);
-        return s != null ? s.currentSlots : 0;
-      });
-    }
-  }
-
-  private void deregisterProducerMetrics(String pid, String topic) {
-    if (registry == null) {
-      return;
-    }
-    String suffix = metricSuffix(pid, topic);
-    String emaKey = "producer.ema." + suffix;
-    String slotsKey = "producer.slots." + suffix;
-    registry.remove(emaKey);
-    registry.remove(slotsKey);
-    registeredProducerMetrics.remove(emaKey);
-    registeredProducerMetrics.remove(slotsKey);
+        if (s != null) {
+          sum += s.emaRateMbps;
+        }
+      }
+      return sum;
+    });
   }
 
   /**

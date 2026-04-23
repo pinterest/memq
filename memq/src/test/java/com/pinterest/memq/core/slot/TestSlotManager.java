@@ -18,7 +18,6 @@ package com.pinterest.memq.core.slot;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import com.codahale.metrics.Gauge;
@@ -372,68 +371,68 @@ public class TestSlotManager {
   }
 
   @Test
-  public void testProducerEmaGaugesRegistered() {
+  public void testRegisterTopicEmaGaugeSumsAcrossProducers() {
+    // Per-topic producer.ema gauge: sums emaRateMbps across every producer
+    // writing to the topic on this broker. The pid dimension is intentionally
+    // not surfaced -- the per-topic OpenTSDB reporter (see
+    // MemqManager.createTopicProcessor) tags emission with topic=<topic>.
     SlotAccountingConfig config = fastConfig();
     config.setTickIntervalMs(1000);
-    MetricRegistry registry = new MetricRegistry();
-    SlotManager sm = new SlotManager(config, 32, registry);
+    SlotManager sm = new SlotManager(config, 32);
 
-    sm.recordWrite("10.0.0.1", TOPIC, 15 * MB);
-    sm.tick();
+    MetricRegistry topicRegistry = new MetricRegistry();
+    sm.registerTopicEmaGauge(topicRegistry, TOPIC);
 
-    Gauge<?> emaGauge = registry.getGauges().get("producer.ema.10_0_0_1.topicA");
-    Gauge<?> slotsGauge = registry.getGauges().get("producer.slots.10_0_0_1.topicA");
-    assertNotNull("EMA gauge should be registered for producer", emaGauge);
-    assertNotNull("Slots gauge should be registered for producer", slotsGauge);
-
-    double emaValue = ((Number) emaGauge.getValue()).doubleValue();
-    assertTrue("EMA rate should be > 0 after writes", emaValue > 0.0);
-
-    int slotsValue = ((Number) slotsGauge.getValue()).intValue();
-    assertEquals(2, slotsValue);
-  }
-
-  @Test
-  public void testProducerMetricsDeregisteredOnIdleCleanup() throws InterruptedException {
-    SlotAccountingConfig config = fastConfig();
-    config.setTickIntervalMs(1000);
-    config.setIdleProducerTimeoutMs(200);
-    MetricRegistry registry = new MetricRegistry();
-    SlotManager sm = new SlotManager(config, 32, registry);
-
-    sm.recordWrite("10.0.0.2", TOPIC, 15 * MB);
-    sm.tick();
-    assertNotNull(registry.getGauges().get("producer.ema.10_0_0_2.topicA"));
-    assertNotNull(registry.getGauges().get("producer.slots.10_0_0_2.topicA"));
-
-    Thread.sleep(300);
-    sm.tick();
-
-    assertNull("EMA gauge should be removed after idle cleanup",
-        registry.getGauges().get("producer.ema.10_0_0_2.topicA"));
-    assertNull("Slots gauge should be removed after idle cleanup",
-        registry.getGauges().get("producer.slots.10_0_0_2.topicA"));
-    assertEquals(0, sm.getProducerCount());
-  }
-
-  @Test
-  public void testMultipleProducerGauges() {
-    SlotAccountingConfig config = fastConfig();
-    config.setTickIntervalMs(1000);
-    MetricRegistry registry = new MetricRegistry();
-    SlotManager sm = new SlotManager(config, 32, registry);
+    Gauge<?> emaGauge = topicRegistry.getGauges().get("producer.ema");
+    assertNotNull("producer.ema gauge should be registered in topic registry", emaGauge);
+    assertEquals("no producers yet -> 0", 0.0,
+        ((Number) emaGauge.getValue()).doubleValue(), 1e-9);
 
     sm.recordWrite("10.0.0.1", TOPIC, 15 * MB);
     sm.recordWrite("10.0.0.2", TOPIC, 25 * MB);
     sm.tick();
 
-    assertNotNull(registry.getGauges().get("producer.ema.10_0_0_1.topicA"));
-    assertNotNull(registry.getGauges().get("producer.ema.10_0_0_2.topicA"));
-    assertNotNull(registry.getGauges().get("producer.slots.10_0_0_1.topicA"));
-    assertNotNull(registry.getGauges().get("producer.slots.10_0_0_2.topicA"));
+    double aggregate = ((Number) emaGauge.getValue()).doubleValue();
+    double p1 = sm.getProducerEmaRate("10.0.0.1", TOPIC);
+    double p2 = sm.getProducerEmaRate("10.0.0.2", TOPIC);
+    assertTrue("aggregate must be positive after writes", aggregate > 0.0);
+    assertEquals("aggregate must equal sum of per-producer EMA values",
+        p1 + p2, aggregate, 1e-9);
 
-    assertEquals(2, ((Number) registry.getGauges().get("producer.slots.10_0_0_1.topicA").getValue()).intValue());
-    assertEquals(3, ((Number) registry.getGauges().get("producer.slots.10_0_0_2.topicA").getValue()).intValue());
+    // No producer.slots.* metric should be registered anywhere -- the per-pid
+    // explosion was intentionally removed.
+    for (String name : topicRegistry.getNames()) {
+      assertFalse("registry must not carry per-pid producer.slots metrics: " + name,
+          name.startsWith("producer.slots"));
+    }
+  }
+
+  @Test
+  public void testRegisterTopicEmaGaugeIsolatesByTopic() {
+    // Producers on a different topic must not bleed into this topic's
+    // aggregate. Verifies the per-topic gauge filters its inner sum by the
+    // topic key it was registered against.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    SlotManager sm = new SlotManager(config, 32);
+
+    MetricRegistry registryA = new MetricRegistry();
+    MetricRegistry registryB = new MetricRegistry();
+    sm.registerTopicEmaGauge(registryA, "topicA");
+    sm.registerTopicEmaGauge(registryB, "topicB");
+
+    sm.recordWrite("10.0.0.1", "topicA", 15 * MB);
+    sm.recordWrite("10.0.0.2", "topicB", 30 * MB);
+    sm.tick();
+
+    double aggA = ((Number) registryA.getGauges().get("producer.ema").getValue()).doubleValue();
+    double aggB = ((Number) registryB.getGauges().get("producer.ema").getValue()).doubleValue();
+
+    assertEquals("topicA aggregate must equal its sole producer's EMA",
+        sm.getProducerEmaRate("10.0.0.1", "topicA"), aggA, 1e-9);
+    assertEquals("topicB aggregate must equal its sole producer's EMA",
+        sm.getProducerEmaRate("10.0.0.2", "topicB"), aggB, 1e-9);
+    assertTrue("topicB carries the heavier producer -> aggB > aggA", aggB > aggA);
   }
 
   @Test
@@ -460,19 +459,6 @@ public class TestSlotManager {
     sm.tick();
 
     assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
-  }
-
-  @Test
-  public void testSanitize() {
-    assertEquals("10_0_0_1", SlotManager.sanitize("10.0.0.1"));
-    assertEquals("host_8080", SlotManager.sanitize("host:8080"));
-    assertEquals("simple", SlotManager.sanitize("simple"));
-  }
-
-  @Test
-  public void testMetricSuffix() {
-    assertEquals("10_0_0_1.topicA", SlotManager.metricSuffix("10.0.0.1", "topicA"));
-    assertEquals("host.my_topic", SlotManager.metricSuffix("host", "my_topic"));
   }
 
   @Test
