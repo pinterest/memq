@@ -267,7 +267,10 @@ public class MemqMain extends Application<MemqConfig> {
 
     MetricRegistry slotRegistry = new MetricRegistry();
 
-    SlotManager slotManager = new SlotManager(slotConfig, totalSlots);
+    // Pass slotRegistry so SlotManager can register per-(pid, topic)
+    // producer.ema / producer.slots gauges (with pid + topic encoded as
+    // OpenTSDB tags via the OpenTSDBReporter '|' tag-delimiter convention).
+    SlotManager slotManager = new SlotManager(slotConfig, totalSlots, slotRegistry);
     memqManager.setSlotManager(slotManager);
     slotManager.start();
     metricsRegistryMap.put("slot", slotRegistry);

@@ -371,68 +371,89 @@ public class TestSlotManager {
   }
 
   @Test
-  public void testRegisterTopicEmaGaugeSumsAcrossProducers() {
-    // Per-topic producer.ema gauge: sums emaRateMbps across every producer
-    // writing to the topic on this broker. The pid dimension is intentionally
-    // not surfaced -- the per-topic OpenTSDB reporter (see
-    // MemqManager.createTopicProcessor) tags emission with topic=<topic>.
+  public void testProducerEmaAndSlotsGaugesUseEncodedTagNames() {
+    // Verifies the (pid, topic) encoding scheme that OpenTSDBReporter parses:
+    // the registry key is "<metric>|pid=<pid>|topic=<topic>", which the
+    // reporter splits into metric name plus extra OpenTSDB tags. Codahale
+    // itself just sees an arbitrary unique key, so this is purely a name
+    // convention -- the test pins it to catch accidental drift.
     SlotAccountingConfig config = fastConfig();
     config.setTickIntervalMs(1000);
-    SlotManager sm = new SlotManager(config, 32);
-
-    MetricRegistry topicRegistry = new MetricRegistry();
-    sm.registerTopicEmaGauge(topicRegistry, TOPIC);
-
-    Gauge<?> emaGauge = topicRegistry.getGauges().get("producer.ema");
-    assertNotNull("producer.ema gauge should be registered in topic registry", emaGauge);
-    assertEquals("no producers yet -> 0", 0.0,
-        ((Number) emaGauge.getValue()).doubleValue(), 1e-9);
+    MetricRegistry slotRegistry = new MetricRegistry();
+    SlotManager sm = new SlotManager(config, 32, slotRegistry);
 
     sm.recordWrite("10.0.0.1", TOPIC, 15 * MB);
-    sm.recordWrite("10.0.0.2", TOPIC, 25 * MB);
     sm.tick();
 
-    double aggregate = ((Number) emaGauge.getValue()).doubleValue();
-    double p1 = sm.getProducerEmaRate("10.0.0.1", TOPIC);
-    double p2 = sm.getProducerEmaRate("10.0.0.2", TOPIC);
-    assertTrue("aggregate must be positive after writes", aggregate > 0.0);
-    assertEquals("aggregate must equal sum of per-producer EMA values",
-        p1 + p2, aggregate, 1e-9);
+    String emaKey = "producer.ema|pid=10.0.0.1|topic=" + TOPIC;
+    String slotsKey = "producer.slots|pid=10.0.0.1|topic=" + TOPIC;
 
-    // No producer.slots.* metric should be registered anywhere -- the per-pid
-    // explosion was intentionally removed.
-    for (String name : topicRegistry.getNames()) {
-      assertFalse("registry must not carry per-pid producer.slots metrics: " + name,
-          name.startsWith("producer.slots"));
-    }
+    Gauge<?> emaGauge = slotRegistry.getGauges().get(emaKey);
+    Gauge<?> slotsGauge = slotRegistry.getGauges().get(slotsKey);
+    assertNotNull("ema gauge must be registered under encoded key " + emaKey, emaGauge);
+    assertNotNull("slots gauge must be registered under encoded key " + slotsKey, slotsGauge);
+    assertTrue("ema gauge value must reflect the producer's EMA",
+        ((Number) emaGauge.getValue()).doubleValue() > 0.0);
+    assertEquals("slots gauge value must reflect currentSlots",
+        2, ((Number) slotsGauge.getValue()).intValue());
   }
 
   @Test
-  public void testRegisterTopicEmaGaugeIsolatesByTopic() {
-    // Producers on a different topic must not bleed into this topic's
-    // aggregate. Verifies the per-topic gauge filters its inner sum by the
-    // topic key it was registered against.
+  public void testProducerGaugesAreIsolatedPerPidAndTopic() {
+    // Two producers on two topics produces four distinct registry keys --
+    // one ema + one slots gauge per (pid, topic) -- and each gauge tracks
+    // only its own producer's state.
     SlotAccountingConfig config = fastConfig();
     config.setTickIntervalMs(1000);
-    SlotManager sm = new SlotManager(config, 32);
-
-    MetricRegistry registryA = new MetricRegistry();
-    MetricRegistry registryB = new MetricRegistry();
-    sm.registerTopicEmaGauge(registryA, "topicA");
-    sm.registerTopicEmaGauge(registryB, "topicB");
+    MetricRegistry slotRegistry = new MetricRegistry();
+    SlotManager sm = new SlotManager(config, 32, slotRegistry);
 
     sm.recordWrite("10.0.0.1", "topicA", 15 * MB);
-    sm.recordWrite("10.0.0.2", "topicB", 30 * MB);
+    sm.recordWrite("10.0.0.2", "topicB", 25 * MB);
     sm.tick();
 
-    double aggA = ((Number) registryA.getGauges().get("producer.ema").getValue()).doubleValue();
-    double aggB = ((Number) registryB.getGauges().get("producer.ema").getValue()).doubleValue();
+    Gauge<?> a = slotRegistry.getGauges().get("producer.ema|pid=10.0.0.1|topic=topicA");
+    Gauge<?> b = slotRegistry.getGauges().get("producer.ema|pid=10.0.0.2|topic=topicB");
+    assertNotNull(a);
+    assertNotNull(b);
+    assertEquals(sm.getProducerEmaRate("10.0.0.1", "topicA"),
+        ((Number) a.getValue()).doubleValue(), 1e-9);
+    assertEquals(sm.getProducerEmaRate("10.0.0.2", "topicB"),
+        ((Number) b.getValue()).doubleValue(), 1e-9);
 
-    assertEquals("topicA aggregate must equal its sole producer's EMA",
-        sm.getProducerEmaRate("10.0.0.1", "topicA"), aggA, 1e-9);
-    assertEquals("topicB aggregate must equal its sole producer's EMA",
-        sm.getProducerEmaRate("10.0.0.2", "topicB"), aggB, 1e-9);
-    assertTrue("topicB carries the heavier producer -> aggB > aggA", aggB > aggA);
+    // No cross-topic contamination: pid 10.0.0.1 holds nothing on topicB
+    // and vice-versa, so neither key should exist in the registry.
+    assertFalse("must not register a gauge for an unused (pid, topic) pair",
+        slotRegistry.getGauges().containsKey("producer.ema|pid=10.0.0.1|topic=topicB"));
+    assertFalse("must not register a gauge for an unused (pid, topic) pair",
+        slotRegistry.getGauges().containsKey("producer.ema|pid=10.0.0.2|topic=topicA"));
+  }
+
+  @Test
+  public void testIdleProducerDeregistersGauges() throws InterruptedException {
+    // When the idle-cleanup path drops a (pid, topic) entry it must also
+    // unregister both gauges -- otherwise codahale would leak them and
+    // future emission would report stale (frozen) values forever.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    config.setIdleProducerTimeoutMs(200);
+    MetricRegistry slotRegistry = new MetricRegistry();
+    SlotManager sm = new SlotManager(config, 32, slotRegistry);
+
+    sm.recordWrite("10.0.0.1", TOPIC, 15 * MB);
+    sm.tick();
+    String emaKey = "producer.ema|pid=10.0.0.1|topic=" + TOPIC;
+    String slotsKey = "producer.slots|pid=10.0.0.1|topic=" + TOPIC;
+    assertTrue(slotRegistry.getGauges().containsKey(emaKey));
+    assertTrue(slotRegistry.getGauges().containsKey(slotsKey));
+
+    Thread.sleep(300);
+    sm.tick();
+
+    assertFalse("ema gauge must be removed after idle cleanup",
+        slotRegistry.getGauges().containsKey(emaKey));
+    assertFalse("slots gauge must be removed after idle cleanup",
+        slotRegistry.getGauges().containsKey(slotsKey));
   }
 
   @Test

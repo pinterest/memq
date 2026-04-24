@@ -154,7 +154,6 @@ public class MemqManager implements Managed {
     }
     if (slotManager != null) {
       tp.setSlotManager(slotManager);
-      slotManager.registerTopicEmaGauge(registry, topicConfig.getTopic());
     }
 
     processorMap.put(topicConfig.getTopic(), tp);
@@ -243,16 +242,6 @@ public class MemqManager implements Managed {
     for (TopicProcessor tp : processorMap.values()) {
       if (tp instanceof BucketingTopicProcessor) {
         ((BucketingTopicProcessor) tp).setSlotManager(slotManager);
-      }
-    }
-    // Catch up: register the per-topic producer.ema gauge on every existing
-    // topic registry. createTopicProcessor handles the case where slotManager
-    // was already set; this branch handles the inverse (topics created first,
-    // then slotManager wired in -- which is the normal MemqMain init order).
-    for (String topic : processorMap.keySet()) {
-      MetricRegistry topicRegistry = metricsRegistryMap.get(topic);
-      if (topicRegistry != null) {
-        slotManager.registerTopicEmaGauge(topicRegistry, topic);
       }
     }
   }

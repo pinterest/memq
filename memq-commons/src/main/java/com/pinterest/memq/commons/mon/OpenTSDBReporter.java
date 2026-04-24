@@ -38,6 +38,19 @@ import com.pinterest.memq.commons.mon.OpenTSDBClient.MetricsBuffer;
 public class OpenTSDBReporter extends ScheduledReporter {
 
   private static final Logger logger = Logger.getLogger(OpenTSDBClient.class.getName());
+
+  /**
+   * Per-metric tag delimiter. Codahale {@link MetricRegistry} keys are
+   * arbitrary strings, so we let callers encode extra OpenTSDB tags inline:
+   * {@code "<metric.name>|key1=value1|key2=value2"}. When a registry key
+   * contains this delimiter, the segment before the first delimiter is the
+   * emitted metric name and the rest are merged with the reporter's static
+   * tag set on a per-line basis. Names without this character are emitted
+   * unchanged. The character is intentionally one that no current memq
+   * metric uses.
+   */
+  static final char TAG_DELIMITER = '|';
+
   private OpenTSDBClient client;
   private String[] tags;
   private String baseName;
@@ -103,53 +116,64 @@ public class OpenTSDBReporter extends ScheduledReporter {
       int epochSecs = (int) (System.currentTimeMillis() / 1000);
       MetricsBuffer buffer = new MetricsBuffer("memq." + baseName);
       for (Entry<String, Counter> entry : counters.entrySet()) {
-        buffer.addMetric(entry.getKey(), epochSecs, entry.getValue().getCount(), tags);
+        String name = extractName(entry.getKey());
+        String mergedTags = mergeTags(entry.getKey());
+        buffer.addMetric(name, epochSecs, (float) entry.getValue().getCount(), mergedTags);
       }
 
       for (Entry<String, Meter> entry : meters.entrySet()) {
-        buffer.addMetric(entry.getKey(), epochSecs, entry.getValue().getCount(), tags);
+        String name = extractName(entry.getKey());
+        String mergedTags = mergeTags(entry.getKey());
+        buffer.addMetric(name, epochSecs, (float) entry.getValue().getCount(), mergedTags);
       }
 
       for (Entry<String, Histogram> entry : histograms.entrySet()) {
+        String name = extractName(entry.getKey());
+        String mergedTags = mergeTags(entry.getKey());
         Snapshot snapshot = entry.getValue().getSnapshot();
-        buffer.addMetric(entry.getKey() + ".avg", epochSecs, snapshot.getMean(), tags);
-        buffer.addMetric(entry.getKey() + ".min", epochSecs, snapshot.getMin(), tags);
-        buffer.addMetric(entry.getKey() + ".median", epochSecs, snapshot.getMedian(), tags);
-        buffer.addMetric(entry.getKey() + ".p50", epochSecs, snapshot.getMedian(), tags);
-        buffer.addMetric(entry.getKey() + ".p75", epochSecs, snapshot.get75thPercentile(), tags);
-        buffer.addMetric(entry.getKey() + ".p95", epochSecs, snapshot.get95thPercentile(), tags);
-        buffer.addMetric(entry.getKey() + ".p98", epochSecs, snapshot.get98thPercentile(), tags);
-        buffer.addMetric(entry.getKey() + ".p99", epochSecs, snapshot.get99thPercentile(), tags);
-        buffer.addMetric(entry.getKey() + ".p999", epochSecs, snapshot.get999thPercentile(), tags);
-        buffer.addMetric(entry.getKey() + ".max", epochSecs, snapshot.getMax(), tags);
-        buffer.addMetric(entry.getKey() + ".stddev", epochSecs, snapshot.getStdDev(), tags);
+        buffer.addMetric(name + ".avg", epochSecs, (float) snapshot.getMean(), mergedTags);
+        buffer.addMetric(name + ".min", epochSecs, (float) snapshot.getMin(), mergedTags);
+        buffer.addMetric(name + ".median", epochSecs, (float) snapshot.getMedian(), mergedTags);
+        buffer.addMetric(name + ".p50", epochSecs, (float) snapshot.getMedian(), mergedTags);
+        buffer.addMetric(name + ".p75", epochSecs, (float) snapshot.get75thPercentile(), mergedTags);
+        buffer.addMetric(name + ".p95", epochSecs, (float) snapshot.get95thPercentile(), mergedTags);
+        buffer.addMetric(name + ".p98", epochSecs, (float) snapshot.get98thPercentile(), mergedTags);
+        buffer.addMetric(name + ".p99", epochSecs, (float) snapshot.get99thPercentile(), mergedTags);
+        buffer.addMetric(name + ".p999", epochSecs, (float) snapshot.get999thPercentile(), mergedTags);
+        buffer.addMetric(name + ".max", epochSecs, (float) snapshot.getMax(), mergedTags);
+        buffer.addMetric(name + ".stddev", epochSecs, (float) snapshot.getStdDev(), mergedTags);
       }
 
       for (Entry<String, Timer> entry : timers.entrySet()) {
+        String name = extractName(entry.getKey());
+        String mergedTags = mergeTags(entry.getKey());
         Snapshot snapshot = entry.getValue().getSnapshot();
-        buffer.addMetric(entry.getKey() + ".avg", epochSecs, snapshot.getMean(), tags);
-        buffer.addMetric(entry.getKey() + ".min", epochSecs, snapshot.getMin(), tags);
-        buffer.addMetric(entry.getKey() + ".median", epochSecs, snapshot.getMedian(), tags);
-        buffer.addMetric(entry.getKey() + ".p50", epochSecs, snapshot.getMedian(), tags);
-        buffer.addMetric(entry.getKey() + ".p75", epochSecs, snapshot.get75thPercentile(), tags);
-        buffer.addMetric(entry.getKey() + ".p95", epochSecs, snapshot.get95thPercentile(), tags);
-        buffer.addMetric(entry.getKey() + ".p98", epochSecs, snapshot.get98thPercentile(), tags);
-        buffer.addMetric(entry.getKey() + ".p99", epochSecs, snapshot.get99thPercentile(), tags);
-        buffer.addMetric(entry.getKey() + ".p999", epochSecs, snapshot.get999thPercentile(), tags);
-        buffer.addMetric(entry.getKey() + ".max", epochSecs, snapshot.getMax(), tags);
-        buffer.addMetric(entry.getKey() + ".stddev", epochSecs, snapshot.getStdDev(), tags);
+        buffer.addMetric(name + ".avg", epochSecs, (float) snapshot.getMean(), mergedTags);
+        buffer.addMetric(name + ".min", epochSecs, (float) snapshot.getMin(), mergedTags);
+        buffer.addMetric(name + ".median", epochSecs, (float) snapshot.getMedian(), mergedTags);
+        buffer.addMetric(name + ".p50", epochSecs, (float) snapshot.getMedian(), mergedTags);
+        buffer.addMetric(name + ".p75", epochSecs, (float) snapshot.get75thPercentile(), mergedTags);
+        buffer.addMetric(name + ".p95", epochSecs, (float) snapshot.get95thPercentile(), mergedTags);
+        buffer.addMetric(name + ".p98", epochSecs, (float) snapshot.get98thPercentile(), mergedTags);
+        buffer.addMetric(name + ".p99", epochSecs, (float) snapshot.get99thPercentile(), mergedTags);
+        buffer.addMetric(name + ".p999", epochSecs, (float) snapshot.get999thPercentile(), mergedTags);
+        buffer.addMetric(name + ".max", epochSecs, (float) snapshot.getMax(), mergedTags);
+        buffer.addMetric(name + ".stddev", epochSecs, (float) snapshot.getStdDev(), mergedTags);
       }
 
       for (@SuppressWarnings("rawtypes")
       Entry<String, Gauge> entry : gauges.entrySet()) {
-        if (entry.getValue().getValue() instanceof Long) {
-          buffer.addMetric(entry.getKey(), epochSecs, (Long) entry.getValue().getValue(), tags);
-        } else if (entry.getValue().getValue() instanceof Double) {
-          buffer.addMetric(entry.getKey(), epochSecs, (Double) entry.getValue().getValue(), tags);
+        String name = extractName(entry.getKey());
+        String mergedTags = mergeTags(entry.getKey());
+        Object v = entry.getValue().getValue();
+        if (v instanceof Long) {
+          buffer.addMetric(name, epochSecs, (float) ((Long) v).longValue(), mergedTags);
+        } else if (v instanceof Double) {
+          buffer.addMetric(name, epochSecs, ((Double) v).floatValue(), mergedTags);
         } else {
-          String val = entry.getValue().getValue().toString();
+          String val = v.toString();
           if (!val.contains("[")) {
-            buffer.addMetric(entry.getKey(), epochSecs, Double.parseDouble(val), tags);
+            buffer.addMetric(name, epochSecs, (float) Double.parseDouble(val), mergedTags);
           }
         }
       }
@@ -171,6 +195,46 @@ public class OpenTSDBReporter extends ScheduledReporter {
     } catch (Exception e) {
       logger.log(Level.SEVERE, "Failed to write metrics to opentsdb", e);
     }
+  }
+
+  /**
+   * Strip any inline {@link #TAG_DELIMITER}-encoded tag suffix from a
+   * codahale registry key, returning just the metric name to emit. Names
+   * without the delimiter pass through unchanged.
+   * <p>
+   * Visible for test.
+   */
+  static String extractName(String registryKey) {
+    int idx = registryKey.indexOf(TAG_DELIMITER);
+    return idx < 0 ? registryKey : registryKey.substring(0, idx);
+  }
+
+  /**
+   * Build the per-line tag string for a registry key by merging any inline
+   * tags encoded after {@link #TAG_DELIMITER} with this reporter's static
+   * tag set (host plus any constructor-supplied tags). Inline tags come
+   * first so that callers can shadow reporter-wide tags by re-declaring
+   * them, but in practice the two are disjoint.
+   * <p>
+   * Wire format produced is OpenTSDB-style space-separated {@code key=value}
+   * tokens, ready to drop into the line protocol.
+   */
+  String mergeTags(String registryKey) {
+    int idx = registryKey.indexOf(TAG_DELIMITER);
+    StringBuilder sb = new StringBuilder();
+    if (idx >= 0 && idx < registryKey.length() - 1) {
+      // Replace remaining delimiters with spaces -- each segment is already
+      // a key=value token, so this gives us a valid OpenTSDB tag list.
+      String inline = registryKey.substring(idx + 1).replace(TAG_DELIMITER, ' ');
+      sb.append(inline);
+    }
+    for (String t : tags) {
+      if (sb.length() > 0) {
+        sb.append(' ');
+      }
+      sb.append(t);
+    }
+    return sb.toString();
   }
 
 }

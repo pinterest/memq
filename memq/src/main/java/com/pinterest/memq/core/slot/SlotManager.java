@@ -41,6 +41,16 @@ public class SlotManager {
   private static final Logger logger = Logger.getLogger(SlotManager.class.getName());
   private static final double BYTES_PER_MB = 1024.0 * 1024.0;
 
+  /**
+   * Codahale registry-key prefix for the per-producer EMA gauge.
+   * The full key uses {@link #encodeMetricKey(String, String, String)} to
+   * inline {@code pid} and {@code topic} as OpenTSDB tags via the
+   * {@code |key=value} convention parsed by
+   * {@link com.pinterest.memq.commons.mon.OpenTSDBReporter}.
+   */
+  static final String EMA_METRIC_NAME = "producer.ema";
+  static final String SLOTS_METRIC_NAME = "producer.slots";
+
   private final int totalSlots;
   private final double slotSizeMbps;
   private final double acquireThresholdMs;
@@ -58,9 +68,38 @@ public class SlotManager {
 
   private final ConcurrentHashMap<String, Set<String>> producerConnections = new ConcurrentHashMap<>();
 
+  /**
+   * Optional MetricRegistry into which we register tag-encoded
+   * {@code producer.ema} and {@code producer.slots} gauges per (pid, topic).
+   * May be {@code null} -- tests that don't care about metrics use the
+   * 2-arg constructor.
+   */
+  private final MetricRegistry registry;
+
+  /**
+   * Tracks (pid, topic) pairs we've already registered metrics for, so that
+   * {@link #tick()} only registers each pair once. Key is the encoded
+   * metric registry key (so deregistration can remove by exact name).
+   */
+  private final Set<String> registeredEmaKeys = ConcurrentHashMap.newKeySet();
+  private final Set<String> registeredSlotsKeys = ConcurrentHashMap.newKeySet();
+
   private ScheduledExecutorService tickExecutor;
 
   public SlotManager(SlotAccountingConfig config, int totalSlots) {
+    this(config, totalSlots, null);
+  }
+
+  /**
+   * @param registry optional registry for per-(pid, topic) producer.ema /
+   *                 producer.slots gauges. When non-null, gauges are
+   *                 registered with names of the form
+   *                 {@code "producer.ema|pid=<pid>|topic=<topic>"} that
+   *                 {@link com.pinterest.memq.commons.mon.OpenTSDBReporter}
+   *                 emits as {@code memq.<base>.producer.ema} with
+   *                 {@code pid=<pid> topic=<topic>} tags.
+   */
+  public SlotManager(SlotAccountingConfig config, int totalSlots, MetricRegistry registry) {
     this.totalSlots = totalSlots;
     this.slotSizeMbps = config.getSlotSizeMbps();
     this.acquireThresholdMs = config.getAcquireThresholdSeconds() * 1000.0;
@@ -69,6 +108,7 @@ public class SlotManager {
     this.tickIntervalMs = config.getTickIntervalMs();
     this.tickIntervalSec = tickIntervalMs / 1000.0;
     this.idleProducerTimeoutMs = config.getIdleProducerTimeoutMs();
+    this.registry = registry;
 
     double emaWindowSec = config.getEmaWindowSeconds();
     this.emaDecay = exp(-tickIntervalSec / emaWindowSec);
@@ -138,6 +178,11 @@ public class SlotManager {
           double instantRateMbps = bytes / (tickIntervalSec * BYTES_PER_MB);
 
           state.emaRateMbps = emaDecay * state.emaRateMbps + (1 - emaDecay) * instantRateMbps;
+
+          // Register gauges lazily on first tick we see this (pid, topic).
+          // Re-registering each tick would be a no-op for codahale but adds
+          // unnecessary CHM contention.
+          registerProducerMetrics(pid, topic, state);
 
           int expectedSlots = (int) ceil(state.emaRateMbps / slotSizeMbps);
           int currentSlots = state.currentSlots;
@@ -233,6 +278,7 @@ public class SlotManager {
   private void removeProducerTopic(String pid, String topic,
                                    ConcurrentHashMap<String, ProducerSlotState> topicMap) {
     topicMap.remove(topic);
+    deregisterProducerMetrics(pid, topic);
     if (topicMap.isEmpty()) {
       // If the producer has no more topics, drop it from the v4 connection
       // registry too so that registry doesn't leak across producer churn.
@@ -297,31 +343,60 @@ public class SlotManager {
   }
 
   /**
-   * Register a single {@code producer.ema} gauge in the supplied per-topic
-   * MetricRegistry. The gauge sums {@link ProducerSlotState#emaRateMbps}
-   * across every producer currently writing to {@code topic} on this broker
-   * (in MBps). The {@code topic} dimension is supplied at emit time by the
-   * per-topic OpenTSDB reporter (see {@code MemqManager.createTopicProcessor}),
-   * so no per-pid metric explosion happens.
+   * Build the codahale registry key for a (pid, topic) gauge using the
+   * inline-tag convention recognised by
+   * {@link com.pinterest.memq.commons.mon.OpenTSDBReporter}: the segment
+   * before the first {@code |} is the emitted metric name; everything
+   * after is appended verbatim as space-separated OpenTSDB tag tokens.
    * <p>
-   * Idempotent: codahale's {@code MetricRegistry.gauge(name, supplier)}
-   * returns the existing gauge when one is already registered under that
-   * name, so duplicate calls are safe (but pointless).
+   * pid (UUID or IPv4 dotted-quad) and topic strings as used in this
+   * codebase only contain characters allowed in OpenTSDB tag values
+   * ({@code [a-zA-Z0-9-_./]}), so no escaping is needed.
+   * <p>
+   * Visible for test.
    */
-  public void registerTopicEmaGauge(MetricRegistry topicRegistry, String topic) {
-    if (topicRegistry == null || topic == null) {
+  static String encodeMetricKey(String metricName, String pid, String topic) {
+    return metricName + "|pid=" + pid + "|topic=" + topic;
+  }
+
+  /**
+   * Register {@code producer.ema} and {@code producer.slots} gauges for
+   * the (pid, topic) pair, once. No-op when no registry was supplied at
+   * construction time (test-only path) or when the gauge is already
+   * registered.
+   */
+  private void registerProducerMetrics(String pid, String topic, ProducerSlotState state) {
+    if (registry == null) {
       return;
     }
-    topicRegistry.gauge("producer.ema", () -> (Gauge<Double>) () -> {
-      double sum = 0.0;
-      for (ConcurrentHashMap<String, ProducerSlotState> topicMap : producers.values()) {
-        ProducerSlotState s = topicMap.get(topic);
-        if (s != null) {
-          sum += s.emaRateMbps;
-        }
-      }
-      return sum;
-    });
+    String emaKey = encodeMetricKey(EMA_METRIC_NAME, pid, topic);
+    if (registeredEmaKeys.add(emaKey)) {
+      registry.gauge(emaKey, () -> (Gauge<Double>) () -> state.emaRateMbps);
+    }
+    String slotsKey = encodeMetricKey(SLOTS_METRIC_NAME, pid, topic);
+    if (registeredSlotsKeys.add(slotsKey)) {
+      registry.gauge(slotsKey, () -> (Gauge<Integer>) () -> state.currentSlots);
+    }
+  }
+
+  /**
+   * Mirror of {@link #registerProducerMetrics(String, String, ProducerSlotState)}:
+   * removes both gauges from the registry and clears the bookkeeping sets
+   * so a future re-registration (if the producer reappears) is a clean
+   * insert. Tolerates {@code null} registry.
+   */
+  private void deregisterProducerMetrics(String pid, String topic) {
+    if (registry == null) {
+      return;
+    }
+    String emaKey = encodeMetricKey(EMA_METRIC_NAME, pid, topic);
+    if (registeredEmaKeys.remove(emaKey)) {
+      registry.remove(emaKey);
+    }
+    String slotsKey = encodeMetricKey(SLOTS_METRIC_NAME, pid, topic);
+    if (registeredSlotsKeys.remove(slotsKey)) {
+      registry.remove(slotsKey);
+    }
   }
 
   /**
