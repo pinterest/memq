@@ -26,6 +26,33 @@ public class SlotAccountingConfig {
   private double emaWindowSeconds = 60.0;
   private long tickIntervalMs = 1000;
   private long idleProducerTimeoutMs = 300_000;
+  /**
+   * After the broker forcibly releases slots from a producer (the eviction
+   * code path), block any further slot acquisition for the same
+   * (producer, topic) for this many seconds. Voluntary EMA-driven release
+   * does not arm the cooldown -- only forced eviction does.
+   * <p>
+   * The default of {@code 60.0} is large enough that:
+   * <ol>
+   *   <li>after the eviction, the producer's traffic to this broker has
+   *       time to actually decrease as the redirected slot's load shifts
+   *       to the eviction target, and</li>
+   *   <li>the EMA (default {@code emaWindowSeconds = 60}) has time to
+   *       decay toward the new lower rate, so the next post-cooldown
+   *       acquisition decision is based on fresh data instead of stale
+   *       pre-eviction throughput.</li>
+   * </ol>
+   * Without this gate the broker re-acquires the just-evicted slot the
+   * moment its global {@code cooldownSeconds} (10s) plus
+   * {@code acquireThresholdSeconds} (30s) elapses, because the EMA still
+   * reflects the pre-eviction load -- producing the eviction "flap" we
+   * see in production.
+   * <p>
+   * Set to {@code 0.0} to disable this feature and restore legacy
+   * behavior (re-acquisition gated only by global cooldown +
+   * acquireThresholdSeconds).
+   */
+  private double postEvictionCooldownSeconds = 60.0;
 
   public boolean isEnabled() {
     return enabled;
@@ -97,5 +124,13 @@ public class SlotAccountingConfig {
 
   public void setIdleProducerTimeoutMs(long idleProducerTimeoutMs) {
     this.idleProducerTimeoutMs = idleProducerTimeoutMs;
+  }
+
+  public double getPostEvictionCooldownSeconds() {
+    return postEvictionCooldownSeconds;
+  }
+
+  public void setPostEvictionCooldownSeconds(double postEvictionCooldownSeconds) {
+    this.postEvictionCooldownSeconds = postEvictionCooldownSeconds;
   }
 }

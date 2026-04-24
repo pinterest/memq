@@ -60,6 +60,7 @@ public class SlotManager {
   private final double tickIntervalSec;
   private final long tickIntervalMs;
   private final long idleProducerTimeoutMs;
+  private final long postEvictionCooldownMs;
 
   private final ConcurrentHashMap<String, ConcurrentHashMap<String, ProducerSlotState>> producers =
       new ConcurrentHashMap<>();
@@ -108,6 +109,8 @@ public class SlotManager {
     this.tickIntervalMs = config.getTickIntervalMs();
     this.tickIntervalSec = tickIntervalMs / 1000.0;
     this.idleProducerTimeoutMs = config.getIdleProducerTimeoutMs();
+    this.postEvictionCooldownMs =
+        (long) (config.getPostEvictionCooldownSeconds() * 1000.0);
     this.registry = registry;
 
     double emaWindowSec = config.getEmaWindowSeconds();
@@ -116,7 +119,8 @@ public class SlotManager {
     logger.info("SlotManager initialized: totalSlots=" + totalSlots
         + " slotSizeMbps=" + slotSizeMbps
         + " tickIntervalMs=" + tickIntervalMs
-        + " emaWindowSec=" + emaWindowSec);
+        + " emaWindowSec=" + emaWindowSec
+        + " postEvictionCooldownMs=" + postEvictionCooldownMs);
   }
 
   /**
@@ -233,6 +237,14 @@ public class SlotManager {
   private boolean tryAcquireSlots(String pid, String topic, ProducerSlotState state,
                                   int count, long now) {
     if (now - lastSlotChangeTimeMs < cooldownMs) {
+      return false;
+    }
+    if (now < state.evictionCooldownUntilMs) {
+      // Recently evicted; let the producer's EMA settle to its post-eviction
+      // steady state before we consider re-acquiring. Without this gate the
+      // broker reacquires the same slot the moment the global cooldown +
+      // acquireThreshold elapse, because the EMA still reflects pre-eviction
+      // throughput -- the source of the production eviction "flap".
       return false;
     }
     int available = totalSlots - totalOccupiedSlots.get();
@@ -416,11 +428,18 @@ public class SlotManager {
     if (state == null) {
       return 0;
     }
+    // Arm the per-(pid, topic) acquisition cooldown BEFORE decrementSlots
+    // because decrementSlots may remove the state from the map if slots
+    // drop to 0. We still write into the live object first; if the entry is
+    // subsequently evicted, that's the corner case where the producer would
+    // have to ramp EMA from zero anyway, so losing the cooldown is moot.
+    state.evictionCooldownUntilMs = System.currentTimeMillis() + postEvictionCooldownMs;
     int actual = decrementSlots(pid, topic, topicMap, state, count);
     if (actual > 0) {
       logger.info("Eviction: -" + actual + " slot(s) for pid=" + pid + "/" + topic
           + " | remaining=" + state.currentSlots
-          + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots);
+          + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots
+          + " | cooldownUntilMs=" + state.evictionCooldownUntilMs);
     }
     return actual;
   }
@@ -524,5 +543,12 @@ public class SlotManager {
     int currentSlots;
     long exceedsSinceMs;
     long belowSinceMs;
+    /**
+     * Wall-clock millis until which {@link SlotManager#tryAcquireSlots} must
+     * refuse to grant additional slots for this (pid, topic). Set by the
+     * eviction code path ({@link SlotManager#releaseProducerSlots}); never
+     * armed by voluntary EMA-driven release.
+     */
+    long evictionCooldownUntilMs;
   }
 }

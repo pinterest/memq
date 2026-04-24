@@ -48,6 +48,8 @@ public class TestSlotManagerEviction {
     config.setCooldownSeconds(0.0);
     config.setEmaWindowSeconds(0.001);
     config.setTickIntervalMs(1000);
+    // Default off; cooldown-specific tests opt in by overriding this.
+    config.setPostEvictionCooldownSeconds(0.0);
   }
 
   private SlotManager create(int totalSlots) {
@@ -164,6 +166,140 @@ public class TestSlotManagerEviction {
     assertEquals(2, allConnections.get("producer-1").size());
     assertTrue(allConnections.get("producer-1").contains("broker-1"));
     assertTrue(allConnections.get("producer-1").contains("broker-2"));
+  }
+
+  @Test
+  public void testPostEvictionCooldownBlocksReacquire() {
+    // 60s cooldown. Use long enough that the in-test tick() can't possibly
+    // outrun it.
+    config.setPostEvictionCooldownSeconds(60.0);
+    SlotManager sm = create(32);
+
+    // Drive producer to 2 slots.
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
+
+    // Forcibly evict 1 slot.
+    int released = sm.releaseProducerSlots("producer-1", TOPIC, 1);
+    assertEquals(1, released);
+    assertEquals(1, sm.getProducerSlots("producer-1", TOPIC));
+
+    // EMA still demands 2 slots, but the cooldown should block reacquisition.
+    // We tick repeatedly to be sure the global per-tick gate is not what's
+    // holding it back.
+    for (int i = 0; i < 5; i++) {
+      sm.recordWrite("producer-1", TOPIC, 15 * MB);
+      sm.tick();
+    }
+    assertEquals("post-eviction cooldown should block reacquire",
+        1, sm.getProducerSlots("producer-1", TOPIC));
+  }
+
+  @Test
+  public void testPostEvictionCooldownExpires() throws InterruptedException {
+    // Short cooldown so the test stays fast.
+    config.setPostEvictionCooldownSeconds(0.1);
+    SlotManager sm = create(32);
+
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
+
+    sm.releaseProducerSlots("producer-1", TOPIC, 1);
+    assertEquals(1, sm.getProducerSlots("producer-1", TOPIC));
+
+    // Inside the cooldown window: blocked.
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals(1, sm.getProducerSlots("producer-1", TOPIC));
+
+    // After the cooldown elapses, EMA-driven acquisition resumes.
+    Thread.sleep(150);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals("cooldown should have expired",
+        2, sm.getProducerSlots("producer-1", TOPIC));
+  }
+
+  @Test
+  public void testPostEvictionCooldownDisabledByDefaultZero() {
+    // Cooldown=0 (the legacy behavior) lets the producer reacquire on the
+    // very next tick after eviction.
+    config.setPostEvictionCooldownSeconds(0.0);
+    SlotManager sm = create(32);
+
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
+
+    sm.releaseProducerSlots("producer-1", TOPIC, 1);
+    assertEquals(1, sm.getProducerSlots("producer-1", TOPIC));
+
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals("with cooldown disabled, reacquire is immediate",
+        2, sm.getProducerSlots("producer-1", TOPIC));
+  }
+
+  @Test
+  public void testVoluntaryReleaseDoesNotArmCooldown() {
+    // Voluntary EMA-driven release (the tick path) must not arm the
+    // post-eviction cooldown -- it's only intended to dampen reactions to
+    // forced eviction. Otherwise EMA-driven shrink/grow oscillations would
+    // be needlessly delayed.
+    config.setPostEvictionCooldownSeconds(60.0);
+    SlotManager sm = create(32);
+
+    // Drive producer to 2 slots.
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
+
+    // Drop traffic so the EMA-driven path voluntarily releases a slot.
+    sm.recordWrite("producer-1", TOPIC, 5 * MB);
+    sm.tick();
+    assertEquals(1, sm.getProducerSlots("producer-1", TOPIC));
+
+    // Ramp back up. Cooldown was never armed, so reacquire is allowed.
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals("voluntary release should not arm post-eviction cooldown",
+        2, sm.getProducerSlots("producer-1", TOPIC));
+  }
+
+  @Test
+  public void testCooldownIsScopedToPidAndTopic() {
+    // Eviction on (producer-1, TOPIC) must not block other (pid, topic)
+    // pairs from acquiring -- the cooldown is per-state, not global.
+    config.setPostEvictionCooldownSeconds(60.0);
+    SlotManager sm = create(32);
+
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.recordWrite("producer-1", "topicB", 15 * MB);
+    sm.recordWrite("producer-2", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
+    assertEquals(2, sm.getProducerSlots("producer-1", "topicB"));
+    assertEquals(2, sm.getProducerSlots("producer-2", TOPIC));
+
+    // Evict only (producer-1, TOPIC).
+    sm.releaseProducerSlots("producer-1", TOPIC, 1);
+
+    // Drop the evicted entry to 0 reacquire (blocked) but allow the others
+    // to grow if their EMA demands it. Use a higher-rate write for the
+    // others to force expectedSlots > current.
+    sm.recordWrite("producer-1", TOPIC, 35 * MB);    // wants 4 slots, blocked at 1
+    sm.recordWrite("producer-1", "topicB", 35 * MB); // wants 4 slots, allowed
+    sm.recordWrite("producer-2", TOPIC, 35 * MB);    // wants 4 slots, allowed
+    sm.tick();
+
+    assertEquals("evicted (pid, topic) is gated by cooldown",
+        1, sm.getProducerSlots("producer-1", TOPIC));
+    assertEquals("same pid, different topic is unaffected",
+        4, sm.getProducerSlots("producer-1", "topicB"));
+    assertEquals("different pid, same topic is unaffected",
+        4, sm.getProducerSlots("producer-2", TOPIC));
   }
 
   @Test

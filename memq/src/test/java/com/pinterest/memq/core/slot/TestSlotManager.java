@@ -42,6 +42,9 @@ public class TestSlotManager {
     config.setEmaWindowSeconds(0.001);
     config.setTickIntervalMs(100);
     config.setIdleProducerTimeoutMs(500);
+    // Keep legacy tests insensitive to the post-eviction cooldown; tests
+    // exercising that feature live in TestSlotManagerEviction.
+    config.setPostEvictionCooldownSeconds(0.0);
     return config;
   }
 
@@ -304,6 +307,7 @@ public class TestSlotManager {
     assertEquals(60.0, config.getEmaWindowSeconds(), 0.001);
     assertEquals(1000, config.getTickIntervalMs());
     assertEquals(300_000, config.getIdleProducerTimeoutMs());
+    assertEquals(60.0, config.getPostEvictionCooldownSeconds(), 0.001);
   }
 
   @Test
