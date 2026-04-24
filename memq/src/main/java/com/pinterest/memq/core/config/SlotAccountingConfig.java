@@ -26,6 +26,27 @@ public class SlotAccountingConfig {
   private double emaWindowSeconds = 60.0;
   private long tickIntervalMs = 1000;
   private long idleProducerTimeoutMs = 300_000;
+  /**
+   * Hysteresis band (in fractions of a slot) applied when deciding whether
+   * a producer's slot count should change. While the producer's EMA stays
+   * within
+   * {@code [(currentSlots - hysteresis) * slotSizeMbps,
+   *         (currentSlots + hysteresis) * slotSizeMbps]},
+   * the slot count is held at {@code currentSlots} regardless of where
+   * {@code ceil(EMA / slotSize)} would land.
+   * <p>
+   * The default of {@code 0.5} is the smallest value at which adjacent
+   * slot bands meet exactly (upper bound at {@code N} == lower bound at
+   * {@code N+1}), which makes single-slot eviction flaps mathematically
+   * impossible: a producer forced from {@code N} slots to {@code N-1} no
+   * longer immediately re-acquires the slot whenever its EMA happens to
+   * sit just above {@code (N-1) * slotSize}. Values {@literal >} 1.0
+   * cause producers to hoard slots they are not using; values {@literal <}
+   * 0.5 leave a flap window between adjacent slot bands. {@code 0.0}
+   * disables the band and restores the original
+   * {@code expectedSlots = ceil(EMA / slotSize)} behavior.
+   */
+  private double hysteresis = 0.5;
 
   public boolean isEnabled() {
     return enabled;
@@ -97,5 +118,13 @@ public class SlotAccountingConfig {
 
   public void setIdleProducerTimeoutMs(long idleProducerTimeoutMs) {
     this.idleProducerTimeoutMs = idleProducerTimeoutMs;
+  }
+
+  public double getHysteresis() {
+    return hysteresis;
+  }
+
+  public void setHysteresis(double hysteresis) {
+    this.hysteresis = hysteresis;
   }
 }

@@ -60,6 +60,7 @@ public class SlotManager {
   private final double tickIntervalSec;
   private final long tickIntervalMs;
   private final long idleProducerTimeoutMs;
+  private final double hysteresis;
 
   private final ConcurrentHashMap<String, ConcurrentHashMap<String, ProducerSlotState>> producers =
       new ConcurrentHashMap<>();
@@ -108,6 +109,7 @@ public class SlotManager {
     this.tickIntervalMs = config.getTickIntervalMs();
     this.tickIntervalSec = tickIntervalMs / 1000.0;
     this.idleProducerTimeoutMs = config.getIdleProducerTimeoutMs();
+    this.hysteresis = config.getHysteresis();
     this.registry = registry;
 
     double emaWindowSec = config.getEmaWindowSeconds();
@@ -116,7 +118,8 @@ public class SlotManager {
     logger.info("SlotManager initialized: totalSlots=" + totalSlots
         + " slotSizeMbps=" + slotSizeMbps
         + " tickIntervalMs=" + tickIntervalMs
-        + " emaWindowSec=" + emaWindowSec);
+        + " emaWindowSec=" + emaWindowSec
+        + " hysteresis=" + hysteresis);
   }
 
   /**
@@ -184,8 +187,8 @@ public class SlotManager {
           // unnecessary CHM contention.
           registerProducerMetrics(pid, topic, state);
 
-          int expectedSlots = (int) ceil(state.emaRateMbps / slotSizeMbps);
           int currentSlots = state.currentSlots;
+          int expectedSlots = computeExpectedSlots(state.emaRateMbps, currentSlots);
 
           if (expectedSlots > currentSlots) {
             state.belowSinceMs = 0;
@@ -228,6 +231,39 @@ public class SlotManager {
     } catch (Exception e) {
       logger.log(Level.WARNING, "Error in slot accounting tick", e);
     }
+  }
+
+  /**
+   * Resolve the slot count the producer should hold for its current EMA,
+   * applying a hysteresis band around the producer's current capacity.
+   * <p>
+   * While {@code emaRateMbps} stays inside
+   * {@code [(currentSlots - hysteresis) * slotSizeMbps,
+   *         (currentSlots + hysteresis) * slotSizeMbps]}
+   * we return {@code currentSlots} -- i.e. no transition. Outside the
+   * band we fall back to the ceiling-based mapping
+   * {@code ceil(EMA / slotSize)}.
+   * <p>
+   * The band breaks the "evict, immediately re-acquire" flap that
+   * otherwise occurs whenever a producer's true demand sits just above an
+   * integer slot boundary (e.g. EMA=71 Mbps with 10 Mbps slots): a forced
+   * eviction from {@code N} to {@code N-1} would otherwise satisfy
+   * {@code ceil(EMA/slotSize) > currentSlots} and trigger a re-acquire
+   * once {@code acquireThresholdSeconds} elapsed. With the default
+   * {@code hysteresis = 0.5} the EMA must cross the midpoint between
+   * adjacent slot bands (75 Mbps for the {@code 7 -> 8} transition) to
+   * acquire, and stay there to hold.
+   * <p>
+   * Visible for test.
+   */
+  int computeExpectedSlots(double emaRateMbps, int currentSlots) {
+    double bandMbps = hysteresis * slotSizeMbps;
+    double currentCapacityMbps = currentSlots * slotSizeMbps;
+    if (emaRateMbps > currentCapacityMbps + bandMbps
+        || emaRateMbps < currentCapacityMbps - bandMbps) {
+      return (int) ceil(emaRateMbps / slotSizeMbps);
+    }
+    return currentSlots;
   }
 
   private boolean tryAcquireSlots(String pid, String topic, ProducerSlotState state,

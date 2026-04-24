@@ -497,4 +497,165 @@ public class TestSlotManager {
     assertEquals(5, sm.getOccupiedSlots());
     assertEquals(2, sm.getProducerCount());
   }
+
+  // ---------------------------------------------------------------------
+  // Hysteresis
+  // ---------------------------------------------------------------------
+
+  @Test
+  public void testComputeExpectedSlotsHysteresisStayBand() {
+    // With the default hysteresis=0.5 and slot=10, the stay band at
+    // currentSlots=7 is [65, 75]. EMA inside the band must return 7.
+    SlotAccountingConfig config = fastConfig();
+    SlotManager sm = new SlotManager(config, 32);
+
+    // Inside the band -> stay at currentSlots.
+    assertEquals(7, sm.computeExpectedSlots(65.0, 7));
+    assertEquals(7, sm.computeExpectedSlots(70.0, 7));
+    assertEquals(7, sm.computeExpectedSlots(71.0, 7));
+    assertEquals(7, sm.computeExpectedSlots(75.0, 7));
+
+    // Above upper band edge -> acquire via ceil(EMA / slotSize).
+    assertEquals(8, sm.computeExpectedSlots(75.001, 7));
+    assertEquals(8, sm.computeExpectedSlots(80.0, 7));
+    assertEquals(9, sm.computeExpectedSlots(85.001, 7));
+
+    // Below lower band edge -> still ceil-based. Note that ceil() pins
+    // the result back to currentSlots until EMA crosses the next integer
+    // slot boundary down -- this preserves the original release semantics
+    // (a slot is only relinquished when capacity is no longer needed).
+    assertEquals(7, sm.computeExpectedSlots(64.999, 7));  // ceil(6.4999) = 7
+    assertEquals(7, sm.computeExpectedSlots(61.0, 7));    // ceil(6.1)    = 7
+    assertEquals(6, sm.computeExpectedSlots(60.0, 7));    // ceil(6.0)    = 6
+    assertEquals(5, sm.computeExpectedSlots(50.0, 7));    // ceil(5.0)    = 5
+
+    // Symmetric checks around the current=8 band [75, 85].
+    assertEquals(8, sm.computeExpectedSlots(75.0, 8));
+    assertEquals(8, sm.computeExpectedSlots(85.0, 8));
+    assertEquals(8, sm.computeExpectedSlots(74.999, 8)); // ceil(7.4999) = 8
+    assertEquals(7, sm.computeExpectedSlots(70.0, 8));   // ceil(7.0)    = 7
+    assertEquals(9, sm.computeExpectedSlots(85.001, 8));
+  }
+
+  @Test
+  public void testComputeExpectedSlotsHysteresisZeroIsBoundaryEager() {
+    // hysteresis=0 collapses the band to a single point at
+    // currentSlots*slotSize, so any EMA above current capacity triggers
+    // an immediate ceil()-based re-evaluation -- the legacy behavior.
+    SlotAccountingConfig config = fastConfig();
+    config.setHysteresis(0.0);
+    SlotManager sm = new SlotManager(config, 32);
+
+    assertEquals(7, sm.computeExpectedSlots(70.0, 7));    // exactly at boundary
+    assertEquals(8, sm.computeExpectedSlots(70.001, 7));  // any above -> acquire
+    assertEquals(7, sm.computeExpectedSlots(69.999, 7));  // ceil(6.9999) = 7
+    assertEquals(6, sm.computeExpectedSlots(60.0, 7));    // ceil(6.0)    = 6
+  }
+
+  @Test
+  public void testEvictionDoesNotImmediatelyReacquireWithinBand() {
+    // The flap scenario from the production log: producer's EMA settles
+    // around 71 Mbps with 8 slots already held (because earlier sustained
+    // load drove acquisition past the upper band edge of 75 Mbps). A
+    // cluster eviction strips one slot to 7. With the default
+    // hysteresis=0.5 the (7, ~71 Mbps) state sits inside the band
+    // [65, 75], so the producer must hold at 7 even though
+    // acquireThresholdSeconds=0 makes the temporal gate a no-op.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    config.setEmaWindowSeconds(1.0);
+    SlotManager sm = new SlotManager(config, 32);
+
+    // Phase 1: drive sustained load above the 8-slot band's upper edge
+    // (85 Mbps) so the producer naturally acquires 8 slots.
+    for (int i = 0; i < 20; i++) {
+      sm.recordWrite("producer-1", TOPIC, (int) (90.0 * MB));
+      sm.tick();
+    }
+    assertEquals("producer should converge to 9 slots at EMA=90 Mbps",
+        9, sm.getProducerSlots("producer-1", TOPIC));
+
+    // Phase 2: relax to 71 Mbps. EMA decays toward 71; ceil(71/10)=8 so
+    // we voluntarily release down to 8 (still inside the new band [75, 85]
+    // when at current=8 -- wait, EMA=71 < 75 so we eventually drop further).
+    // We tick enough times for EMA to converge.
+    for (int i = 0; i < 30; i++) {
+      sm.recordWrite("producer-1", TOPIC, (int) (71.0 * MB));
+      sm.tick();
+    }
+    int beforeEviction = sm.getProducerSlots("producer-1", TOPIC);
+    assertTrue("producer should hold at least 8 slots at EMA~71 Mbps before eviction"
+            + " (was " + beforeEviction + ")",
+        beforeEviction >= 8);
+
+    // Phase 3: cluster forcibly evicts one slot.
+    sm.releaseProducerSlots("producer-1", TOPIC, 1);
+    int afterEviction = sm.getProducerSlots("producer-1", TOPIC);
+    assertEquals(beforeEviction - 1, afterEviction);
+
+    // Phase 4: continue the same load. Hysteresis must hold the producer
+    // at the post-eviction count -- EMA~71 sits inside the band at
+    // currentSlots=7 ([65, 75]) and EMA never crosses above 75.
+    for (int i = 0; i < 30; i++) {
+      sm.recordWrite("producer-1", TOPIC, (int) (71.0 * MB));
+      sm.tick();
+    }
+    assertEquals("hysteresis must prevent re-acquisition after eviction"
+            + " while EMA stays inside the band",
+        afterEviction, sm.getProducerSlots("producer-1", TOPIC));
+  }
+
+  @Test
+  public void testGrowthPastUpperBandStillAcquires() {
+    // Hysteresis must not block legitimate growth: once EMA pushes past
+    // the upper edge of the band the producer should pick up the next
+    // slot promptly.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    config.setEmaWindowSeconds(1.0);
+    SlotManager sm = new SlotManager(config, 32);
+
+    // Settle at currentSlots=7 by driving EMA into the [65, 75] band.
+    for (int i = 0; i < 20; i++) {
+      sm.recordWrite("producer-1", TOPIC, (int) (71.0 * MB));
+      sm.tick();
+    }
+    assertEquals("EMA=71 in band [65, 75] must converge to 7 slots",
+        7, sm.getProducerSlots("producer-1", TOPIC));
+
+    // Push EMA past the upper edge (75 Mbps).
+    for (int i = 0; i < 20; i++) {
+      sm.recordWrite("producer-1", TOPIC, (int) (90.0 * MB));
+      sm.tick();
+    }
+    assertEquals("EMA above the upper band edge must trigger acquisition",
+        9, sm.getProducerSlots("producer-1", TOPIC));
+  }
+
+  @Test
+  public void testEvictionDoesReacquireWhenHysteresisDisabled() {
+    // Counter-test: with hysteresis=0.0 the legacy boundary-eager behavior
+    // is restored -- the producer re-acquires on the next tick after
+    // eviction whenever EMA is even slightly above the current capacity.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    config.setEmaWindowSeconds(1.0);
+    config.setHysteresis(0.0);
+    SlotManager sm = new SlotManager(config, 32);
+
+    // With hysteresis=0 the natural convergence is 8 (ceil(71/10) = 8).
+    for (int i = 0; i < 10; i++) {
+      sm.recordWrite("producer-1", TOPIC, (int) (71.0 * MB));
+      sm.tick();
+    }
+    assertEquals(8, sm.getProducerSlots("producer-1", TOPIC));
+
+    sm.releaseProducerSlots("producer-1", TOPIC, 1);
+    assertEquals(7, sm.getProducerSlots("producer-1", TOPIC));
+
+    sm.recordWrite("producer-1", TOPIC, (int) (71.0 * MB));
+    sm.tick();
+    assertEquals("with hysteresis=0 the producer re-acquires immediately",
+        8, sm.getProducerSlots("producer-1", TOPIC));
+  }
 }
