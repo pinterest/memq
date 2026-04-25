@@ -479,6 +479,134 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
+  public void testRoutingBoostActiveAfterEvictionToTarget() throws Exception {
+    // After the producer receives an eviction directive routing one slot to
+    // a new target, the target must get a +1 routing weight on top of its
+    // (now optimistically incremented) slotsOwned count, so the producer
+    // over-routes there long enough for the target broker to actually
+    // acquire the slot.
+    setWriteEndpoints(client, new ArrayList<>(endpoints));
+    client.getSlotsOwned().put("10.0.0.1", 11);
+    client.getSlotsOwned().put("10.0.0.2", 1);
+    client.getSlotsOwned().put("10.0.0.3", 1);
+
+    long before = System.currentTimeMillis();
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    client.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 10), sourceAddr);
+
+    // Target's effective routing weight must include the +1 boost.
+    assertEquals("target gets slotsOwned (2 after merge) + 1 boost",
+        3, client.effectiveWeight("10.0.0.2", before + 1));
+    // Other brokers must not be affected.
+    assertEquals(10, client.effectiveWeight("10.0.0.1", before + 1));
+    assertEquals(1, client.effectiveWeight("10.0.0.3", before + 1));
+  }
+
+  @Test
+  public void testRoutingBoostExpiresAfterTtl() throws Exception {
+    // Re-create the client with a tiny TTL so the boost can expire in test time.
+    Properties props = new Properties();
+    props.setProperty("numWriteEndpoints", "3");
+    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_ROUTING_BOOST_MS, "50");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    List<Endpoint> eps = new ArrayList<>();
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
+    c.initialize(eps);
+    setWriteEndpoints(c, new ArrayList<>(eps));
+    c.getSlotsOwned().put("10.0.0.1", 5);
+    c.getSlotsOwned().put("10.0.0.2", 1);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    c.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 4), sourceAddr);
+
+    long withinTtl = System.currentTimeMillis();
+    assertEquals("inside TTL: boost active", 3, c.effectiveWeight("10.0.0.2", withinTtl));
+
+    Thread.sleep(80);
+    long pastTtl = System.currentTimeMillis();
+    assertEquals("after TTL: boost gone, only slotsOwned counts",
+        2, c.effectiveWeight("10.0.0.2", pastTtl));
+
+    c.close();
+  }
+
+  @Test
+  public void testRoutingBoostClearedWhenBrokerBecomesEvictionSource() throws Exception {
+    // Sequence:
+    //   1) Eviction A -> B: B is boosted.
+    //   2) Eviction B -> C: B just gave a slot away, its boost must be
+    //      cleared, otherwise we'd over-route to a broker we just got
+    //      told to drain. C gets the new boost.
+    setWriteEndpoints(client, new ArrayList<>(endpoints));
+    client.getSlotsOwned().put("10.0.0.1", 5);
+    client.getSlotsOwned().put("10.0.0.2", 1);
+    client.getSlotsOwned().put("10.0.0.3", 1);
+
+    InetSocketAddress fromA = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    client.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 4), fromA);
+    long now1 = System.currentTimeMillis();
+    assertEquals("B is boosted after first eviction",
+        3, client.effectiveWeight("10.0.0.2", now1));
+
+    InetSocketAddress fromB = InetSocketAddress.createUnresolved("10.0.0.2", 9092);
+    client.handleWriteResponse(new WriteResponsePacket("10.0.0.3", 1, 1), fromB);
+    long now2 = System.currentTimeMillis();
+    assertEquals("B's boost must be cleared once it acts as eviction source",
+        1, client.effectiveWeight("10.0.0.2", now2));
+    assertEquals("C gets the new boost (slotsOwned 2 + 1)",
+        3, client.effectiveWeight("10.0.0.3", now2));
+  }
+
+  @Test
+  public void testRoutingBoostNotAppliedWithoutEviction() throws Exception {
+    // Plain non-eviction responses must not arm the boost on anyone.
+    setWriteEndpoints(client, new ArrayList<>(endpoints));
+    client.getSlotsOwned().put("10.0.0.1", 5);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    client.handleWriteResponse(new WriteResponsePacket(null, 0, 7), sourceAddr);
+
+    long now = System.currentTimeMillis();
+    assertEquals("no eviction -> no boost",
+        7, client.effectiveWeight("10.0.0.1", now));
+  }
+
+  @Test
+  public void testRoutingBoostDisabledWhenTtlIsZero() throws Exception {
+    Properties props = new Properties();
+    props.setProperty("numWriteEndpoints", "3");
+    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_ROUTING_BOOST_MS, "0");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    List<Endpoint> eps = new ArrayList<>();
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
+    c.initialize(eps);
+    setWriteEndpoints(c, new ArrayList<>(eps));
+    c.getSlotsOwned().put("10.0.0.1", 5);
+    c.getSlotsOwned().put("10.0.0.2", 1);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    c.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 4), sourceAddr);
+
+    long now = System.currentTimeMillis();
+    assertEquals("ttl=0 disables boost; weight is plain slotsOwned",
+        2, c.effectiveWeight("10.0.0.2", now));
+    c.close();
+  }
+
+  @Test
+  public void testRoutingBoostMsConfigurableViaProperties() throws Exception {
+    Properties props = new Properties();
+    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_ROUTING_BOOST_MS, "12345");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    Field f = MemqCommonClient.class.getDeclaredField("postEvictionRoutingBoostMs");
+    f.setAccessible(true);
+    assertEquals(12345L, ((Long) f.get(c)).longValue());
+    c.close();
+  }
+
+  @Test
   public void testExplicitMaxConnectionsCapsConnectionGrowth() throws Exception {
     Properties props = new Properties();
     props.setProperty("numWriteEndpoints", "3");

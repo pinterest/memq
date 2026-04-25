@@ -77,6 +77,33 @@ public class MemqCommonClient implements Closeable {
   public static final String CONFIG_MAX_CONNECTIONS = "maxConnections";
   public static final int DEFAULT_MAX_CONNECTIONS = 0;
 
+  /**
+   * Producer-side post-eviction routing boost: for this many milliseconds
+   * after an eviction directive named broker {@code T} as the target, the
+   * weighted endpoint map gives {@code T} an extra {@code +1} slot of
+   * routing weight on top of its acknowledged {@code slotsOwned} count.
+   * <p>
+   * The purpose is to push {@code T}'s broker-side EMA decisively past the
+   * next {@code ceil(EMA / slotSize)} boundary so its {@code SlotManager}
+   * actually <i>acquires</i> the slot the eviction transferred. Without
+   * the boost, the broker's EMA hovers exactly at the boundary and the
+   * acquisition is metastable -- the broker may never cross threshold and
+   * the producer's optimistic increment is then overwritten by the
+   * broker's stale {@code numSlotsOwned} on the next response, producing
+   * the eviction "flap" we see in production.
+   * <p>
+   * Symmetric in design with the broker-side post-eviction acquisition
+   * cooldown ({@code SlotAccountingConfig.postEvictionCooldownSeconds}):
+   * the broker holds the released slot empty for ~60s while the producer
+   * over-routes to the eviction target for ~60s. Within that window
+   * traffic genuinely shifts and the target broker acquires.
+   * <p>
+   * Set to {@code 0} to disable.
+   */
+  public static final String CONFIG_POST_EVICTION_ROUTING_BOOST_MS =
+      "postEvictionRoutingBoostMs";
+  public static final long DEFAULT_POST_EVICTION_ROUTING_BOOST_MS = 60_000L;
+
   private final NetworkClient networkClient;
   private long connectTimeout = 500;
   private int numWriteEndpoints = 1;
@@ -91,6 +118,18 @@ public class MemqCommonClient implements Closeable {
   private final String producerId = java.util.UUID.randomUUID().toString();
   private final ConcurrentHashMap<String, Integer> slotsOwned = new ConcurrentHashMap<>();
   private int maxConnections = DEFAULT_MAX_CONNECTIONS;
+  /**
+   * Per-broker wall-clock millis until which {@link #rebuildWeightedMap}
+   * adds {@code +1} to the broker's routing weight. Armed when the broker
+   * is the target of an eviction directive; cleared when the broker
+   * becomes the source of one (it just gave a slot away -- don't keep
+   * over-routing to it). Lazily evaluated against {@code System
+   * .currentTimeMillis()} -- entries past their TTL behave like zero.
+   * See {@link #CONFIG_POST_EVICTION_ROUTING_BOOST_MS}.
+   */
+  private final ConcurrentHashMap<String, Long> routingBoostUntilMs =
+      new ConcurrentHashMap<>();
+  private long postEvictionRoutingBoostMs = DEFAULT_POST_EVICTION_ROUTING_BOOST_MS;
   // Sticky: flips to true the first time we observe a v4-only signal from any
   // broker (eviction directive or non-zero slot ownership). Once true, the
   // legacy numWriteEndpoints gates become no-ops and weighted selection
@@ -122,6 +161,10 @@ public class MemqCommonClient implements Closeable {
       }
       if (networkProperties.containsKey(CONFIG_MAX_CONNECTIONS)) {
         this.maxConnections = Integer.parseInt(networkProperties.getProperty(CONFIG_MAX_CONNECTIONS));
+      }
+      if (networkProperties.containsKey(CONFIG_POST_EVICTION_ROUTING_BOOST_MS)) {
+        this.postEvictionRoutingBoostMs = Math.max(0L, Long.parseLong(
+            networkProperties.getProperty(CONFIG_POST_EVICTION_ROUTING_BOOST_MS)));
       }
     }
     writeEndpoints = Collections.emptyList();
@@ -461,20 +504,36 @@ public class MemqCommonClient implements Closeable {
       this.weightedEndpointMap = null;
       return;
     }
+    long now = System.currentTimeMillis();
     int totalSlots = 0;
     for (Endpoint ep : writes) {
-      String ip = ep.getAddress().getHostString();
-      totalSlots += Math.max(slotsOwned.getOrDefault(ip, 1), 1);
+      totalSlots += effectiveWeight(ep.getAddress().getHostString(), now);
     }
     TreeMap<Double, Endpoint> map = new TreeMap<>();
     double cumulative = 0;
     for (Endpoint ep : writes) {
-      String ip = ep.getAddress().getHostString();
-      cumulative += (double) Math.max(slotsOwned.getOrDefault(ip, 1), 1) / totalSlots;
+      cumulative += (double) effectiveWeight(ep.getAddress().getHostString(), now) / totalSlots;
       map.put(cumulative, ep);
     }
     this.weightedEndpointMap = map;
-    maybeLogWeightSnapshot(writes, totalSlots);
+    maybeLogWeightSnapshot(writes, totalSlots, now);
+  }
+
+  /**
+   * Per-broker routing weight: the broker's acknowledged slot count
+   * (with the legacy floor of 1) plus a {@code +1} boost when the broker
+   * is within its post-eviction routing-boost TTL.
+   * <p>
+   * Visible for test.
+   */
+  int effectiveWeight(String ip, long now) {
+    int base = Math.max(slotsOwned.getOrDefault(ip, 1), 1);
+    return isRoutingBoostActive(ip, now) ? base + 1 : base;
+  }
+
+  private boolean isRoutingBoostActive(String ip, long now) {
+    Long until = routingBoostUntilMs.get(ip);
+    return until != null && until > now;
   }
 
   /**
@@ -482,16 +541,20 @@ public class MemqCommonClient implements Closeable {
    * signature has changed since the last log. Cheap to call on every response;
    * stays silent on steady state.
    */
-  private void maybeLogWeightSnapshot(List<Endpoint> writes, int totalSlots) {
+  private void maybeLogWeightSnapshot(List<Endpoint> writes, int totalSlots, long now) {
     StringBuilder sig = new StringBuilder();
     StringBuilder pretty = new StringBuilder();
     for (Endpoint ep : writes) {
       String ip = ep.getAddress().getHostString();
       int slots = Math.max(slotsOwned.getOrDefault(ip, 1), 1);
-      int pct = (int) Math.round(100.0 * slots / totalSlots);
-      sig.append(ip).append('=').append(slots).append(',');
+      boolean boosted = isRoutingBoostActive(ip, now);
+      int weight = boosted ? slots + 1 : slots;
+      int pct = (int) Math.round(100.0 * weight / totalSlots);
+      sig.append(ip).append('=').append(weight).append(',');
       if (pretty.length() > 0) pretty.append(", ");
-      pretty.append(ip).append('(').append(slots).append(" slots, ").append(pct).append("%)");
+      pretty.append(ip).append('(').append(slots).append(" slots");
+      if (boosted) pretty.append("+boost");
+      pretty.append(", ").append(pct).append("%)");
     }
     String signature = sig.toString();
     if (signature.equals(lastLoggedWeightSignature)) {
@@ -710,6 +773,24 @@ public class MemqCommonClient implements Closeable {
         } else {
           slotsOwned.remove(sourceIp);
         }
+      }
+
+      // Step 1b: post-eviction routing boost.
+      // Arm the +1 routing-weight boost on the target so the producer
+      // over-routes there long enough for the target's broker-side EMA
+      // to decisively cross the next ceil(EMA/slotSize) boundary and
+      // acquire the slot for real (instead of the producer's optimistic
+      // increment getting silently overwritten by the target broker's
+      // stale numSlotsOwned on the next non-eviction response).
+      // Symmetric with the broker-side post-eviction acquisition cooldown.
+      // Clear any boost on the source -- it just gave a slot away, so we
+      // must not keep over-routing to it.
+      if (postEvictionRoutingBoostMs > 0 && targetIp != null) {
+        routingBoostUntilMs.put(targetIp,
+            System.currentTimeMillis() + postEvictionRoutingBoostMs);
+      }
+      if (sourceIp != null) {
+        routingBoostUntilMs.remove(sourceIp);
       }
 
       // Step 2: enforce maxConnections via connection swap (drop source, redistribute)
