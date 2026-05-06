@@ -32,6 +32,8 @@ import io.netty.channel.socket.nio.NioDatagramChannel;
 
 import java.net.InetSocketAddress;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -51,6 +53,7 @@ public class GossipServer {
   private final MemqGovernor governor;
   private final MetricRegistry registry;
   private final Counter sentCounter;
+  private final Counter expiredCounter;
   private final SlotManager slotManager;
   private final ConcurrentHashMap<String, GossipState> peerStates = new ConcurrentHashMap<>();
 
@@ -75,6 +78,7 @@ public class GossipServer {
     this.governor = governor;
     this.registry = registry;
     this.sentCounter = registry.counter("message.sent");
+    this.expiredCounter = registry.counter("message.expired");
     this.slotManager = slotManager;
   }
 
@@ -145,8 +149,32 @@ public class GossipServer {
     return config.getPort();
   }
 
+  /**
+   * Snapshot of currently-fresh peer states. Entries whose last receive
+   * time is older than {@code config.getPeerTtlMs()} are removed from the
+   * backing map (CAS-style via {@code ConcurrentHashMap.remove(k, v)} so
+   * a concurrent write from the decoder is not clobbered) and omitted
+   * from the returned snapshot.
+   * <p>
+   * Called by {@code EvictionManager} on its tick, not on any hot path.
+   */
   public Map<String, GossipState> getPeerStates() {
-    return Collections.unmodifiableMap(peerStates);
+    long now = System.currentTimeMillis();
+    long ttlMs = config.getPeerTtlMs();
+    Map<String, GossipState> snapshot = new HashMap<>(peerStates.size());
+    Iterator<Map.Entry<String, GossipState>> it = peerStates.entrySet().iterator();
+    while (it.hasNext()) {
+      Map.Entry<String, GossipState> e = it.next();
+      GossipState state = e.getValue();
+      if (now - state.getReceiveTimestampMs() > ttlMs) {
+        if (peerStates.remove(e.getKey(), state)) {
+          expiredCounter.inc();
+        }
+      } else {
+        snapshot.put(e.getKey(), state);
+      }
+    }
+    return Collections.unmodifiableMap(snapshot);
   }
 
   ConcurrentHashMap<String, GossipState> getPeerStatesInternal() {

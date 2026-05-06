@@ -191,6 +191,78 @@ public class TestGossipServer {
   }
 
   @Test
+  public void testGetPeerStatesExpiresStaleEntries() {
+    GossipConfig config = new GossipConfig();
+    config.setEnabled(true);
+    config.setPort(19098);
+    config.setPeerTtlMs(1_000);
+
+    GossipServer server = new GossipServer("me", "us-east-1a", config,
+        new StubGovernor(Collections.emptySet()));
+
+    long now = System.currentTimeMillis();
+    GossipMessage staleMsg = new GossipMessage("dead-broker", 7, false, now - 10_000);
+    server.getPeerStatesInternal().put("dead-broker",
+        new GossipState(staleMsg, now - 10_000));
+    GossipMessage freshMsg = new GossipMessage("live-broker", 3, false, now);
+    server.getPeerStatesInternal().put("live-broker",
+        new GossipState(freshMsg, now));
+
+    Map<String, GossipState> snapshot = server.getPeerStates();
+    assertFalse("stale entry must be filtered out",
+        snapshot.containsKey("dead-broker"));
+    assertTrue("fresh entry must remain",
+        snapshot.containsKey("live-broker"));
+    assertFalse("stale entry must be removed from the backing map",
+        server.getPeerStatesInternal().containsKey("dead-broker"));
+    assertTrue("fresh entry must remain in backing map",
+        server.getPeerStatesInternal().containsKey("live-broker"));
+  }
+
+  @Test
+  public void testGetPeerStatesKeepsFreshEntries() {
+    GossipConfig config = new GossipConfig();
+    config.setEnabled(true);
+    config.setPort(19099);
+    config.setPeerTtlMs(60_000);
+
+    GossipServer server = new GossipServer("me", "us-east-1a", config,
+        new StubGovernor(Collections.emptySet()));
+
+    long now = System.currentTimeMillis();
+    for (int i = 0; i < 3; i++) {
+      String id = "peer-" + i;
+      GossipMessage msg = new GossipMessage(id, i, false, now);
+      server.getPeerStatesInternal().put(id, new GossipState(msg, now));
+    }
+
+    Map<String, GossipState> snapshot = server.getPeerStates();
+    assertEquals(3, snapshot.size());
+    assertEquals(3, server.getPeerStatesInternal().size());
+  }
+
+  @Test
+  public void testTtlConfigurable() {
+    GossipConfig config = new GossipConfig();
+    config.setEnabled(true);
+    config.setPort(19100);
+    // Aggressive TTL: anything older than 1ms is stale.
+    config.setPeerTtlMs(1);
+
+    GossipServer server = new GossipServer("me", "us-east-1a", config,
+        new StubGovernor(Collections.emptySet()));
+
+    long wayBack = System.currentTimeMillis() - 1_000;
+    GossipMessage msg = new GossipMessage("old-peer", 0, false, wayBack);
+    server.getPeerStatesInternal().put("old-peer", new GossipState(msg, wayBack));
+
+    Map<String, GossipState> snapshot = server.getPeerStates();
+    assertTrue("aggressive TTL must evict anything not just-written",
+        snapshot.isEmpty());
+    assertTrue(server.getPeerStatesInternal().isEmpty());
+  }
+
+  @Test
   public void testGetAllBrokersInRackFiltersOutOtherRacks() {
     Set<Broker> allBrokers = new HashSet<>();
     allBrokers.add(new Broker("10.0.0.1", (short) 9090, "test", "us-east-1a",

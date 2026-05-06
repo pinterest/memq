@@ -20,6 +20,14 @@ public class GossipConfig {
   private boolean enabled = false;
   private int port = 9094;
   private long intervalMs = 1000;
+  /**
+   * How old (wall-clock ms) a peer's last-received gossip message can be
+   * before {@code GossipServer.getPeerStates()} treats it as stale and
+   * drops it from the map. Default is 10x the default intervalMs: tolerates
+   * ~10 consecutive dropped UDP packets before a peer disappears from
+   * eviction-target consideration.
+   */
+  private long peerTtlMs = 10_000L;
 
   public boolean isEnabled() {
     return enabled;
@@ -43,5 +51,13 @@ public class GossipConfig {
 
   public void setIntervalMs(long intervalMs) {
     this.intervalMs = intervalMs;
+  }
+
+  public long getPeerTtlMs() {
+    return peerTtlMs;
+  }
+
+  public void setPeerTtlMs(long peerTtlMs) {
+    this.peerTtlMs = peerTtlMs;
   }
 }
