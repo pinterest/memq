@@ -19,6 +19,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 
@@ -634,5 +635,189 @@ public class TestWeightedEndpointSelection {
     assertTrue("New target must be present after swap",
         result.containsKey("10.0.0.4"));
     c.close();
+  }
+
+  // ---- removeBroker (surgical REDIRECT path) ----
+
+  @SuppressWarnings("unchecked")
+  private static java.util.Map<String, Long> getRoutingBoostUntilMs(MemqCommonClient c)
+      throws Exception {
+    Field f = MemqCommonClient.class.getDeclaredField("routingBoostUntilMs");
+    f.setAccessible(true);
+    return (java.util.Map<String, Long>) f.get(c);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static java.util.Map<Endpoint, Integer> getFailureCounts(MemqCommonClient c)
+      throws Exception {
+    Field f = MemqCommonClient.class.getDeclaredField("failureCounts");
+    f.setAccessible(true);
+    return (java.util.Map<Endpoint, Integer>) f.get(c);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<Endpoint> getLocalityEndpoints(MemqCommonClient c) throws Exception {
+    Field f = MemqCommonClient.class.getDeclaredField("localityEndpoints");
+    f.setAccessible(true);
+    return (List<Endpoint>) f.get(c);
+  }
+
+  private static java.util.TreeMap<Double, Endpoint> getWeightedEndpointMap(MemqCommonClient c)
+      throws Exception {
+    Field f = MemqCommonClient.class.getDeclaredField("weightedEndpointMap");
+    f.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.TreeMap<Double, Endpoint> m = (java.util.TreeMap<Double, Endpoint>) f.get(c);
+    return m;
+  }
+
+  @Test
+  public void testRemoveBrokerPurgesAllPerBrokerState() throws Exception {
+    // Pre-populate every per-broker structure for X, then surgically remove
+    // X and assert nothing about X is left behind. Survivors B and C must be
+    // untouched (state, weights, endpoint memberships all preserved).
+    setWriteEndpoints(client, new ArrayList<>(endpoints));
+
+    client.getSlotsOwned().put("10.0.0.1", 5);
+    client.getSlotsOwned().put("10.0.0.2", 3);
+    client.getSlotsOwned().put("10.0.0.3", 2);
+
+    // Arm a routing boost on X (10.0.0.1) to confirm it gets cleared.
+    getRoutingBoostUntilMs(client).put("10.0.0.1",
+        System.currentTimeMillis() + 60_000L);
+    // Plant a failure-count entry for X to confirm it is also dropped.
+    Endpoint xEp = new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092));
+    getFailureCounts(client).put(xEp, 1);
+
+    client.rebuildWeightedMap();
+    assertNotNull("weighted map should be active before removal",
+        getWeightedEndpointMap(client));
+
+    InetSocketAddress xAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    client.removeBroker(xAddr);
+
+    // Per-broker maps cleared for X.
+    assertFalse("slotsOwned must drop X",
+        client.getSlotsOwned().containsKey("10.0.0.1"));
+    assertFalse("routingBoostUntilMs must drop X",
+        getRoutingBoostUntilMs(client).containsKey("10.0.0.1"));
+    assertTrue("failureCounts must drop every entry for X",
+        getFailureCounts(client).keySet().stream()
+            .noneMatch(e -> e.getAddress().getHostString().equals("10.0.0.1")));
+
+    // Endpoint lists no longer contain X.
+    assertTrue("writeEndpoints must drop X",
+        client.currentWriteEndpoints().stream()
+            .noneMatch(e -> e.getAddress().getHostString().equals("10.0.0.1")));
+    assertTrue("localityEndpoints must drop X",
+        getLocalityEndpoints(client).stream()
+            .noneMatch(e -> e.getAddress().getHostString().equals("10.0.0.1")));
+
+    // Survivors retained, weights preserved.
+    assertEquals("B's slot count must be untouched",
+        3, (int) client.getSlotsOwned().get("10.0.0.2"));
+    assertEquals("C's slot count must be untouched",
+        2, (int) client.getSlotsOwned().get("10.0.0.3"));
+
+    // Weighted map renormalized over the survivors only.
+    java.util.TreeMap<Double, Endpoint> wm = getWeightedEndpointMap(client);
+    assertNotNull("weighted map must be rebuilt over survivors", wm);
+    assertEquals("weighted map must contain only the two survivors",
+        2, wm.size());
+    assertTrue("weighted map keys should sum to 1.0 (last entry == 1.0)",
+        wm.lastKey() > 0.999 && wm.lastKey() < 1.001);
+    assertTrue("weighted map must not reference X",
+        wm.values().stream()
+            .noneMatch(e -> e.getAddress().getHostString().equals("10.0.0.1")));
+  }
+
+  @Test
+  public void testRemoveBrokerThrowsWhenLocalityEmptied() throws Exception {
+    // The producer's last surviving endpoint goes away — removeBroker must
+    // throw WITHOUT mutating any state, so the caller (Request.java) can
+    // still reach the dying broker for the fallback reconnect's metadata
+    // call. If we mutated then threw, reconnect would short-circuit with
+    // "Client not initialized yet" because localityEndpoints would be empty.
+    Properties props = new Properties();
+    MemqCommonClient solo = new MemqCommonClient(null, props);
+    List<Endpoint> single = new ArrayList<>();
+    single.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    solo.initialize(single);
+    setWriteEndpoints(solo, new ArrayList<>(single));
+    solo.getSlotsOwned().put("10.0.0.1", 5);
+
+    InetSocketAddress only = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    try {
+      solo.removeBroker(only);
+      fail("expected removeBroker to throw when removal would empty locality");
+    } catch (Exception e) {
+      assertTrue("expected message about no endpoints; got: " + e.getMessage(),
+          e.getMessage().contains("No endpoints available"));
+    }
+
+    // State must be intact so the fallback reconnect can still use it.
+    assertEquals("writeEndpoints must NOT be mutated when removal would empty locality",
+        1, solo.currentWriteEndpoints().size());
+    assertEquals("locality endpoints must NOT be mutated",
+        1, getLocalityEndpoints(solo).size());
+    assertTrue("slotsOwned must NOT be mutated",
+        solo.getSlotsOwned().containsKey("10.0.0.1"));
+    solo.close();
+  }
+
+  @Test
+  public void testRemoveBrokerNullAddressIsNoop() throws Exception {
+    setWriteEndpoints(client, new ArrayList<>(endpoints));
+    client.getSlotsOwned().put("10.0.0.1", 5);
+    int writesBefore = client.currentWriteEndpoints().size();
+    int slotsBefore = client.getSlotsOwned().size();
+
+    client.removeBroker(null);
+
+    assertEquals(writesBefore, client.currentWriteEndpoints().size());
+    assertEquals(slotsBefore, client.getSlotsOwned().size());
+  }
+
+  @Test
+  public void testRemoveBrokerIdempotent() throws Exception {
+    // Calling removeBroker twice for the same address (e.g. multiple
+    // in-flight REDIRECTs from the same broker) must be safe.
+    setWriteEndpoints(client, new ArrayList<>(endpoints));
+    client.getSlotsOwned().put("10.0.0.1", 5);
+    client.getSlotsOwned().put("10.0.0.2", 3);
+    client.getSlotsOwned().put("10.0.0.3", 2);
+
+    InetSocketAddress xAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    client.removeBroker(xAddr);
+    int writesAfterFirst = client.currentWriteEndpoints().size();
+    int slotsAfterFirst = client.getSlotsOwned().size();
+
+    client.removeBroker(xAddr);
+    assertEquals("second removal must not further mutate writeEndpoints",
+        writesAfterFirst, client.currentWriteEndpoints().size());
+    assertEquals("second removal must not further mutate slotsOwned",
+        slotsAfterFirst, client.getSlotsOwned().size());
+  }
+
+  @Test
+  public void testRemoveBrokerDoesNotAffectOtherBrokerWeights() throws Exception {
+    // Survivor weights must continue to drive routing in the same proportions
+    // they had before X was removed (modulo the larger denominator).
+    setWriteEndpoints(client, new ArrayList<>(endpoints));
+    client.getSlotsOwned().put("10.0.0.1", 6);
+    client.getSlotsOwned().put("10.0.0.2", 3);
+    client.getSlotsOwned().put("10.0.0.3", 1);
+    client.rebuildWeightedMap();
+
+    InetSocketAddress xAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    client.removeBroker(xAddr);
+
+    java.util.TreeMap<Double, Endpoint> wm = getWeightedEndpointMap(client);
+    assertNotNull(wm);
+    assertEquals(2, wm.size());
+
+    long now = System.currentTimeMillis();
+    assertEquals("B retains its raw weight of 3", 3, client.effectiveWeight("10.0.0.2", now));
+    assertEquals("C retains its raw weight of 1", 1, client.effectiveWeight("10.0.0.3", now));
   }
 }

@@ -258,6 +258,34 @@ public class NetworkClient implements Closeable {
     lastConnectFuture = null;
   }
 
+  /**
+   * Drop a single pooled connection by remote address. Removes the entry
+   * from {@link #channelPool} synchronously (so no future request can be
+   * routed to it) and asynchronously closes the underlying Netty channel.
+   * <p>
+   * Used by the producer's surgical broker-removal path
+   * ({@code MemqCommonClient.removeBroker}) when a broker has issued a
+   * {@code REDIRECT} for a topic it no longer serves: the broker is gone
+   * from the endpoint sets, and this releases the dead pool entry without
+   * the all-channel-await semantics of {@link #reset()}.
+   * <p>
+   * No-op if {@code addr} is {@code null} or has no pooled channel.
+   */
+  public void closeChannel(InetSocketAddress addr) {
+    if (addr == null) {
+      return;
+    }
+    ChannelFuture cf = channelPool.remove(addr);
+    if (cf == null || cf.channel() == null) {
+      return;
+    }
+    cf.channel().close().addListener((ChannelFutureListener) f -> {
+      if (!f.isSuccess()) {
+        logger.warn("Failed to close channel to {}", addr, f.cause());
+      }
+    });
+  }
+
   @VisibleForTesting
   protected Map<InetSocketAddress, ChannelFuture> getChannelPool() {
     return channelPool;

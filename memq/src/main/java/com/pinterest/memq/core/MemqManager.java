@@ -191,6 +191,16 @@ public class MemqManager implements Managed {
         logger.severe("Topic processor not stopped for topic:" + topic);
       }
       processorMap.remove(topic);
+      // Drop SlotManager accounting AFTER the processor is removed from the
+      // map. Once processorMap.remove returns, PacketSwitchingHandler routes
+      // new writes for `topic` into the RedirectionException branch and never
+      // reaches sm.recordWrite, so this cleanup cannot race with a
+      // freshly-arrived write. Without this call, (pid, topic) entries linger
+      // until idleProducerTimeoutMs, holding stale slot accounting that
+      // depresses our gossiped freeSlots and biases peer eviction decisions.
+      if (slotManager != null) {
+        slotManager.dropTopic(topic);
+      }
       topicMap.remove(topic);
     });
   }

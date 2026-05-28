@@ -45,6 +45,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.util.List;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
@@ -566,7 +567,31 @@ public class Request {
             return;
           }
           try {
-            client.reconnect(topic, false);
+            // Surgical path: drop just the redirecting broker from all
+            // client-side routing state and retry against the survivors.
+            // This preserves the v4 weighted-routing state for the rest of
+            // the broker set instead of nuking it via a full metadata
+            // refetch + endpoint reset, which is what the legacy reconnect
+            // path does.
+            //
+            // Falls back to the heavy reconnect when:
+            //   - the response source address is unknown (defensive), or
+            //   - surgical removal would empty localityEndpoints
+            //     (validateEndpoints throws), in which case we need a fresh
+            //     metadata fetch to discover any new brokers.
+            InetSocketAddress src = responsePacket.getSourceAddress();
+            if (src != null) {
+              try {
+                client.removeBroker(src);
+              } catch (Exception removeErr) {
+                logger.warn("Surgical broker removal failed for source="
+                    + src + " topic=" + topic
+                    + "; falling back to full reconnect", removeErr);
+                client.reconnect(topic, false);
+              }
+            } else {
+              client.reconnect(topic, false);
+            }
           } catch (Exception e) {
             resolve(e);
             return;

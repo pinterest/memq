@@ -393,6 +393,93 @@ public class MemqCommonClient implements Closeable {
     validateEndpoints();
   }
 
+  /**
+   * Surgically drop a single broker from every per-broker structure on this
+   * client and renormalize routing over the survivors. Intended for the
+   * {@code REDIRECT} path: a broker that no longer serves the producer's
+   * topic is identified by the source address of its response packet, and
+   * the client snips it out without the metadata refetch /
+   * {@link com.pinterest.memq.client.commons2.network.NetworkClient#reset()}
+   * heaviness of {@link #reconnect(String, boolean)}.
+   * <p>
+   * State affected (all keyed by IP / host string of {@code addr}):
+   * <ul>
+   *   <li>{@link #slotsOwned} — drops the entry; survivor weights are
+   *       preserved untouched.</li>
+   *   <li>{@link #routingBoostUntilMs} — drops the post-eviction boost;
+   *       irrelevant once the broker is gone.</li>
+   *   <li>{@link #failureCounts} — drops any deprioritization record.</li>
+   *   <li>{@link #writeEndpoints} — filtered.</li>
+   *   <li>{@link #localityEndpoints} — filtered.</li>
+   *   <li>{@link com.pinterest.memq.client.commons2.network.NetworkClient}
+   *       channel pool — {@code closeChannel(addr)} releases the connection
+   *       asynchronously.</li>
+   *   <li>{@link #weightedEndpointMap} — rebuilt from the post-removal
+   *       {@code writeEndpoints} and {@code slotsOwned}.</li>
+   * </ul>
+   * <p>
+   * Throws <i>without mutating any state</i> if the removal would leave
+   * {@link #localityEndpoints} empty. This pre-check is essential: the
+   * caller's fallback path is to invoke {@link #reconnect(String, boolean)},
+   * which itself needs at least one live endpoint in {@code localityEndpoints}
+   * to send the metadata request. If we mutated first then threw, the
+   * fallback would fail with "Client not initialized yet" because
+   * {@link #sendRequestPacketAndReturnResponseFuture} short-circuits on an
+   * empty {@code localityEndpoints}. By keeping state intact on the throw,
+   * the fallback reconnect can still reach the dying broker for metadata
+   * (which may yield a fresh broker set the dying broker still knows about).
+   * <p>
+   * {@code synchronized} matches {@link #reconnect(String, boolean)} so
+   * mutations to the endpoint lists and the weighted map are atomic with
+   * respect to other top-level routing-state mutations.
+   */
+  public synchronized void removeBroker(InetSocketAddress addr) throws Exception {
+    if (addr == null) {
+      return;
+    }
+    String ip = addr.getHostString();
+
+    // Pre-check: refuse to empty localityEndpoints. State stays untouched so
+    // the caller can fall back to reconnect() which still has the dying
+    // broker available for the metadata round-trip.
+    long localitySurvivors = localityEndpoints.stream()
+        .filter(e -> !e.getAddress().getHostString().equals(ip))
+        .count();
+    if (localitySurvivors == 0) {
+      throw new Exception("No endpoints available after removing " + ip);
+    }
+
+    slotsOwned.remove(ip);
+    routingBoostUntilMs.remove(ip);
+    failureCounts.keySet().removeIf(
+        e -> e.getAddress().getHostString().equals(ip));
+
+    List<Endpoint> currentWrites = this.writeEndpoints;
+    List<Endpoint> newWrites = new ArrayList<>(currentWrites.size());
+    for (Endpoint e : currentWrites) {
+      if (!e.getAddress().getHostString().equals(ip)) {
+        newWrites.add(e);
+      }
+    }
+    this.writeEndpoints = Collections.unmodifiableList(newWrites);
+
+    List<Endpoint> currentLocals = this.localityEndpoints;
+    List<Endpoint> newLocals = new ArrayList<>(currentLocals.size());
+    for (Endpoint e : currentLocals) {
+      if (!e.getAddress().getHostString().equals(ip)) {
+        newLocals.add(e);
+      }
+    }
+    this.localityEndpoints = Collections.unmodifiableList(newLocals);
+
+    networkClient.closeChannel(addr);
+    rebuildWeightedMap();
+    logger.info("Surgically removed broker " + ip
+        + " from routing state (writeEndpoints=" + writeEndpoints.size()
+        + ", localityEndpoints=" + localityEndpoints.size()
+        + ", slotsOwned=" + slotsOwned.size() + ")");
+  }
+
   protected List<Endpoint> randomizedEndpoints(List<Endpoint> servers) {
     List<Endpoint> shuffle = new ArrayList<>(servers);
     Collections.shuffle(shuffle);

@@ -412,6 +412,55 @@ public class SlotManager {
   }
 
   /**
+   * Force-release all slots and remove all per-producer accounting entries for
+   * the given {@code topic}, across every producer that holds state for it.
+   * <p>
+   * Called when the local {@link com.pinterest.memq.core.processing.TopicProcessor}
+   * is decommissioned: without this, {@code (pid, topic)} entries would linger
+   * in {@link #producers} until the {@code idleProducerTimeoutMs} branch of
+   * {@link #tick()} reclaimed them via EMA decay, during which the broker
+   * would gossip an artificially low {@code freeSlots} and could spuriously
+   * evict producers on the topics it still serves.
+   * <p>
+   * The caller MUST invoke this <i>after</i> removing the topic processor
+   * from {@code MemqManager.processorMap} so that {@code PacketSwitchingHandler}
+   * routes new writes for {@code topic} into the {@code REDIRECT} branch
+   * before this method runs. A request that already passed the
+   * {@code processorMap.get} check before the removal may still call
+   * {@link #recordWrite} after this method returns; the recreated entry
+   * starts at zero slots and zero EMA, occupies no capacity, and is
+   * reclaimed by the next idle-timeout pass.
+   * <p>
+   * Concurrency follows the same contract as
+   * {@link #releaseProducerSlots(String, String, int)}: callable from any
+   * thread, uses the existing {@link #decrementSlots} for atomic
+   * {@code totalOccupiedSlots} and {@code lastSlotChangeTimeMs} updates.
+   */
+  public void dropTopic(String topic) {
+    int affected = 0;
+    int slotsReleased = 0;
+    for (Map.Entry<String, ConcurrentHashMap<String, ProducerSlotState>> outer
+        : producers.entrySet()) {
+      String pid = outer.getKey();
+      ConcurrentHashMap<String, ProducerSlotState> topicMap = outer.getValue();
+      ProducerSlotState state = topicMap.get(topic);
+      if (state == null) {
+        continue;
+      }
+      if (state.currentSlots > 0) {
+        slotsReleased += decrementSlots(pid, topic, topicMap, state, state.currentSlots);
+      } else {
+        removeProducerTopic(pid, topic, topicMap);
+      }
+      affected++;
+    }
+    logger.info("dropTopic: cleared accounting for topic=" + topic
+        + " affectedProducers=" + affected
+        + " slotsReleased=" + slotsReleased
+        + " freeSlots=" + getFreeSlots() + "/" + totalSlots);
+  }
+
+  /**
    * Force-release slots for a specific producer. Used by the eviction path.
    *
    * @param pid the producer identifier

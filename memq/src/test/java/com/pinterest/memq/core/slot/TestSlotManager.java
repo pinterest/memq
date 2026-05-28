@@ -501,4 +501,113 @@ public class TestSlotManager {
     assertEquals(5, sm.getOccupiedSlots());
     assertEquals(2, sm.getProducerCount());
   }
+
+  @Test
+  public void testDropTopicReleasesSlotsAndRemovesEntries() {
+    // When MemqManager.deleteTopicProcessor calls dropTopic, every (pid, T)
+    // entry across all producers must be released and its slots returned to
+    // the free pool. Survivor topics on the same producer must be untouched.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    SlotManager sm = new SlotManager(config, 32);
+
+    sm.recordWrite("producer-1", "topicA", 15 * MB);
+    sm.recordWrite("producer-1", "topicB", 25 * MB);
+    sm.recordWrite("producer-2", "topicA", 35 * MB);
+    sm.tick();
+
+    int beforeOccupied = sm.getOccupiedSlots();
+    int producer1ASlots = sm.getProducerSlots("producer-1", "topicA");
+    int producer2ASlots = sm.getProducerSlots("producer-2", "topicA");
+    assertTrue("expected non-zero slots for producer-1/topicA", producer1ASlots > 0);
+    assertTrue("expected non-zero slots for producer-2/topicA", producer2ASlots > 0);
+    int producer1BSlots = sm.getProducerSlots("producer-1", "topicB");
+    assertTrue("expected non-zero slots for producer-1/topicB", producer1BSlots > 0);
+
+    sm.dropTopic("topicA");
+
+    assertEquals("topicA must be cleared for producer-1",
+        0, sm.getProducerSlots("producer-1", "topicA"));
+    assertEquals("topicA must be cleared for producer-2",
+        0, sm.getProducerSlots("producer-2", "topicA"));
+    assertEquals("topicB on producer-1 must be untouched",
+        producer1BSlots, sm.getProducerSlots("producer-1", "topicB"));
+    assertEquals("totalOccupiedSlots must reflect topicA release",
+        beforeOccupied - producer1ASlots - producer2ASlots, sm.getOccupiedSlots());
+    assertEquals("freeSlots must reflect topicA release",
+        32 - sm.getOccupiedSlots(), sm.getFreeSlots());
+  }
+
+  @Test
+  public void testDropTopicDeregistersGauges() {
+    // Mirror of testIdleProducerDeregistersGauges but driven via dropTopic:
+    // the cleanup path used by topic decommission must also unregister
+    // codahale gauges to avoid leaking them as the broker churns through
+    // topic assignments over its lifetime.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    MetricRegistry slotRegistry = new MetricRegistry();
+    SlotManager sm = new SlotManager(config, 32, slotRegistry);
+
+    sm.recordWrite("producer-1", "topicA", 15 * MB);
+    sm.recordWrite("producer-1", "topicB", 25 * MB);
+    sm.tick();
+
+    String emaA = "producer.ema|pid=producer-1|topic=topicA";
+    String slotsA = "producer.slots|pid=producer-1|topic=topicA";
+    String emaB = "producer.ema|pid=producer-1|topic=topicB";
+    String slotsB = "producer.slots|pid=producer-1|topic=topicB";
+    assertTrue(slotRegistry.getGauges().containsKey(emaA));
+    assertTrue(slotRegistry.getGauges().containsKey(slotsA));
+    assertTrue(slotRegistry.getGauges().containsKey(emaB));
+    assertTrue(slotRegistry.getGauges().containsKey(slotsB));
+
+    sm.dropTopic("topicA");
+
+    assertFalse("topicA ema gauge must be removed", slotRegistry.getGauges().containsKey(emaA));
+    assertFalse("topicA slots gauge must be removed", slotRegistry.getGauges().containsKey(slotsA));
+    assertTrue("topicB ema gauge must persist", slotRegistry.getGauges().containsKey(emaB));
+    assertTrue("topicB slots gauge must persist", slotRegistry.getGauges().containsKey(slotsB));
+  }
+
+  @Test
+  public void testDropTopicOnUnknownTopicIsNoop() {
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    SlotManager sm = new SlotManager(config, 32);
+
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+
+    int occupiedBefore = sm.getOccupiedSlots();
+    int producerSlotsBefore = sm.getProducerSlots("producer-1", TOPIC);
+
+    sm.dropTopic("never-existed");
+
+    assertEquals(occupiedBefore, sm.getOccupiedSlots());
+    assertEquals(producerSlotsBefore, sm.getProducerSlots("producer-1", TOPIC));
+  }
+
+  @Test
+  public void testDropTopicRemovesEmptyTopicEntries() {
+    // dropTopic must also remove (pid, topic) entries whose currentSlots is
+    // zero -- recordWrite created the entry but no slots have been acquired
+    // yet (e.g. EMA still ramping). Otherwise the entry would linger until
+    // idleProducerTimeoutMs.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    config.setAcquireThresholdSeconds(60.0); // prevent acquisition
+    SlotManager sm = new SlotManager(config, 32);
+
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals("producer-1 has the topic entry but no slots yet",
+        0, sm.getProducerSlots("producer-1", TOPIC));
+    assertEquals(1, sm.getProducerCount());
+
+    sm.dropTopic(TOPIC);
+
+    assertEquals("dropTopic must purge the zero-slot entry too",
+        0, sm.getProducerCount());
+  }
 }
