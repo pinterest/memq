@@ -20,7 +20,6 @@ import com.pinterest.memq.core.gossip.GossipState;
 import com.pinterest.memq.core.slot.SlotManager;
 
 import java.util.AbstractMap;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -53,8 +52,11 @@ import java.util.stream.Collectors;
  * {@code evictionPercentageThreshold}.
  * <p>
  * <b>Producer selection:</b> among v4 producers that hold slots and write
- * to a topic the target broker serves, prefer one already connected to
- * the target (no new connection needed); otherwise pick at random.
+ * to a topic the target broker serves, pick the one holding the most slots
+ * (its share of the broker's throughput), since moving the heaviest producer
+ * is what actually drains a saturated broker. A producer already connected to
+ * the target is preferred (no new connection needed) unless an unconnected
+ * producer is heavier by more than {@code heavyProducerSlotMargin} slots.
  * <p>
  * <b>v3 backward compatibility:</b> Only v4 producers are eviction
  * candidates -- {@code producerConnections} is populated exclusively from
@@ -204,8 +206,14 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     if (targetServedTopics.isEmpty()) {
       return null;
     }
-    List<String> connected = new ArrayList<>();
-    List<String> fallback = new ArrayList<>();
+    // Track the heaviest eligible producer overall, and the heaviest one
+    // already connected to the target. Slots held are a proxy for the
+    // producer's share of the broker's (shaper-capped) throughput, so moving
+    // the heaviest producer is what actually drains a saturated broker.
+    String heaviestPid = null;
+    int heaviestSlots = 0;
+    String heaviestConnectedPid = null;
+    int heaviestConnectedSlots = 0;
     for (Map.Entry<String, Set<String>> entry : producerConnections.entrySet()) {
       String pid = entry.getKey();
       // Require real slot ownership, not just map presence. recordWrite
@@ -214,32 +222,42 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       // satisfies producerHasSlots() (which is containsKey). Selecting it would
       // burn this tick's single eviction on a no-op release that frees nothing,
       // while the producer actually holding the slots is never evicted.
-      if (slotManager.getTotalProducerSlots(pid) <= 0) {
+      int slots = slotManager.getTotalProducerSlots(pid);
+      if (slots <= 0) {
         continue;
       }
       if (!writesToServedTopic(slotManager.getProducerTopics(pid), targetServedTopics)) {
         continue;
       }
+      if (slots > heaviestSlots) {
+        heaviestSlots = slots;
+        heaviestPid = pid;
+      }
       Set<String> conns = entry.getValue();
-      if (conns != null && conns.contains(targetIp)) {
-        connected.add(pid);
-      } else {
-        fallback.add(pid);
+      if (conns != null && conns.contains(targetIp) && slots > heaviestConnectedSlots) {
+        heaviestConnectedSlots = slots;
+        heaviestConnectedPid = pid;
       }
     }
-    if (!connected.isEmpty()) {
-      String pid = connected.get(ThreadLocalRandom.current().nextInt(connected.size()));
-      logger.info("[" + brokerId + "] evicting pid=" + pid
-          + " (has connection to target=" + targetIp + ")");
-      return pid;
+    if (heaviestPid == null) {
+      return null;
     }
-    if (!fallback.isEmpty()) {
-      String pid = fallback.get(ThreadLocalRandom.current().nextInt(fallback.size()));
-      logger.info("[" + brokerId + "] evicting pid=" + pid
-          + " (random v4, no candidate connected to target=" + targetIp + ")");
-      return pid;
+    // Prefer a producer already connected to the target (avoids a new
+    // producer-side connection) unless an unconnected producer is heavier by
+    // more than the configured margin -- in which case moving that heavier
+    // producer is worth the new connection because a lighter eviction's freed
+    // capacity would just be reabsorbed by the heavier, backpressured one.
+    if (heaviestConnectedPid != null
+        && heaviestConnectedSlots >= heaviestSlots - config.getHeavyProducerSlotMargin()) {
+      logger.info("[" + brokerId + "] evicting pid=" + heaviestConnectedPid
+          + " (connected to target=" + targetIp + ", slots=" + heaviestConnectedSlots
+          + ", heaviestEligibleSlots=" + heaviestSlots + ")");
+      return heaviestConnectedPid;
     }
-    return null;
+    logger.info("[" + brokerId + "] evicting pid=" + heaviestPid
+        + " (heaviest eligible producer, slots=" + heaviestSlots
+        + ", not connected to target=" + targetIp + ")");
+    return heaviestPid;
   }
 
   private static boolean writesToServedTopic(Collection<String> producerTopics,

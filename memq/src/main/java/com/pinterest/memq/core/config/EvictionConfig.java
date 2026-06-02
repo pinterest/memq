@@ -25,6 +25,7 @@ public class EvictionConfig {
   private double evictionPercentageThreshold = 10.0;
   private double pendingEvictionCooldownSeconds = 10.0;
   private int topNTargets = 3;
+  private int heavyProducerSlotMargin = 2;
 
   public boolean isEnabled() {
     return enabled;
@@ -72,6 +73,25 @@ public class EvictionConfig {
 
   public void setTopNTargets(int topNTargets) {
     this.topNTargets = topNTargets;
+  }
+
+  /**
+   * How many more slots an unconnected producer must hold than the heaviest
+   * producer already connected to the eviction target before the strategy
+   * will prefer it (and incur a new producer-side connection). This keeps the
+   * cheap "evict a producer already connected to the target" behavior for
+   * roughly balanced producers, while still letting the strategy target a
+   * materially heavier producer -- moving the heavy producer is what actually
+   * drains a saturated broker, since a backpressured heavy producer otherwise
+   * just reabsorbs whatever slot a lighter eviction frees. A very large value
+   * restores the old "always prefer connected" behavior.
+   */
+  public int getHeavyProducerSlotMargin() {
+    return heavyProducerSlotMargin;
+  }
+
+  public void setHeavyProducerSlotMargin(int heavyProducerSlotMargin) {
+    this.heavyProducerSlotMargin = heavyProducerSlotMargin;
   }
 
 }

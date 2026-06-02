@@ -231,10 +231,11 @@ public class MemqMain extends Application<MemqConfig> {
 
       if (client != null) {
         String localHostname = MiscUtils.getHostname();
+        Map<String, Object> tags = rackTags(provider.getRack());
         for (String metricName : gossipRegistry.getNames()) {
-          ScheduledReporter reporter = OpenTSDBReporter.createReporter("gossip", gossipRegistry,
-              metricName, (String name, Metric metric) -> true, TimeUnit.SECONDS, TimeUnit.SECONDS,
-              client, localHostname);
+          ScheduledReporter reporter = OpenTSDBReporter.createReporterWithTags("gossip",
+              gossipRegistry, metricName, (String name, Metric metric) -> true, TimeUnit.SECONDS,
+              TimeUnit.SECONDS, client, localHostname, tags);
           reporter.start(configuration.getOpenTsdbConfig().getFrequencyInSeconds(),
               TimeUnit.SECONDS);
         }
@@ -293,9 +294,12 @@ public class MemqMain extends Application<MemqConfig> {
     // therefore did not create a reporter for it. We must create one here.
     if (client != null) {
       String localHostname = MiscUtils.getHostname();
-      ScheduledReporter reporter = OpenTSDBReporter.createReporter("slot", slotRegistry,
+      // Tag every slot-registry metric (aggregate total/occupied/free/frozen/
+      // drainLatched/producers gauges and the per-(pid, topic) producer.ema /
+      // producer.slots gauges) with the broker's rack / AZ.
+      ScheduledReporter reporter = OpenTSDBReporter.createReporterWithTags("slot", slotRegistry,
           "slot", (String name, Metric metric) -> true, TimeUnit.SECONDS, TimeUnit.SECONDS,
-          client, localHostname);
+          client, localHostname, rackTags(resolveRack(configuration)));
       reporter.start(configuration.getOpenTsdbConfig().getFrequencyInSeconds(), TimeUnit.SECONDS);
     }
 
@@ -307,6 +311,40 @@ public class MemqMain extends Application<MemqConfig> {
 
   public void initializeAdditionalModules(MemqConfig config, Environment environment, MemqManager memqManager, MemqGovernor memqGovernor) throws Exception {
 
+  }
+
+  /**
+   * Resolve this broker's rack / availability zone from the configured
+   * {@link EnvironmentProvider}, for stamping broker-level metrics with a
+   * {@code rack} tag. Returns {@code null} when no provider is configured or
+   * it cannot be instantiated, in which case callers simply omit the tag.
+   */
+  private String resolveRack(MemqConfig configuration) {
+    String providerClass = configuration.getEnvironmentProvider();
+    if (providerClass == null || providerClass.isEmpty()) {
+      return null;
+    }
+    try {
+      EnvironmentProvider provider = Class.forName(providerClass)
+          .asSubclass(EnvironmentProvider.class).newInstance();
+      return provider.getRack();
+    } catch (Exception e) {
+      logger.warning("Could not resolve broker rack for metric tagging: " + e);
+      return null;
+    }
+  }
+
+  /**
+   * Build the static OpenTSDB tag map used to stamp broker-level metric
+   * reporters with the broker's rack / AZ. Empty when the rack is unknown,
+   * which makes {@code createReporterWithTags} behave exactly like the
+   * untagged reporter.
+   */
+  private static Map<String, Object> rackTags(String rack) {
+    if (rack == null || rack.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    return Collections.singletonMap("rack", rack);
   }
 
   private OpenTSDBClient initializeMetricsTransmitter(MemqConfig configuration,

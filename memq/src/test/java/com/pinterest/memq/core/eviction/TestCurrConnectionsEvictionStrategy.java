@@ -70,6 +70,10 @@ public class TestCurrConnectionsEvictionStrategy {
 
   private void acquireSlots(SlotManager sm, String pid, String topic, int mbToWrite) throws Exception {
     sm.recordWrite(pid, topic, mbToWrite * MB);
+    tickOnce(sm);
+  }
+
+  private void tickOnce(SlotManager sm) throws Exception {
     Method tick = SlotManager.class.getDeclaredMethod("tick");
     tick.setAccessible(true);
     tick.invoke(sm);
@@ -283,6 +287,80 @@ public class TestCurrConnectionsEvictionStrategy {
       }
     }
     assertTrue("eviction should target the real slot holder", evictedHolder);
+  }
+
+  @Test
+  public void testEvictsHeavyUnconnectedProducerOverLightConnected() throws Exception {
+    // The heavy producer drives saturation; a light producer connected to the
+    // target must NOT shield it. When the unconnected producer is heavier than
+    // the connected one by more than the margin, evict the heavy one even
+    // though it costs a new producer-side connection -- otherwise the light
+    // eviction's freed slot is just reabsorbed by the heavy, backpressured one.
+    SlotManager sm = createSlotManager(20);
+
+    // Both producers must record demand within the same tick so they hold
+    // slots simultaneously (the test EMA window is ~instant, so an idle tick
+    // would decay a producer back to zero slots).
+    sm.recordWrite("heavy", TOPIC, 150 * MB);   // ceil(150/10)=15 slots
+    sm.recordWrite("light", TOPIC, 15 * MB);    // ceil(15/10)=2 slots
+    tickOnce(sm);
+    assertTrue(sm.getTotalProducerSlots("heavy") > 10);
+    assertTrue(sm.getTotalProducerSlots("light") > 0);
+
+    // Heavy connected only to a non-target broker; light connected to target.
+    sm.recordProducerConnections("heavy",
+        new HashSet<>(Collections.singletonList("broker-3")));
+    sm.recordProducerConnections("light",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull(result);
+    assertEquals("must evict the heavy producer, not the light connected one",
+        "heavy", result.getPid());
+  }
+
+  @Test
+  public void testPrefersConnectedProducerWithinSlotMargin() throws Exception {
+    // When the connected producer is within the margin of the heaviest, keep
+    // the cheap behavior: evict the already-connected one (no new connection).
+    SlotManager sm = createSlotManager(20);
+
+    // Unconnected slightly heavier (5 slots) than connected (4 slots) -- diff
+    // of 1 is within the default margin of 2, so the connected producer wins.
+    sm.recordWrite("unconnected", TOPIC, 50 * MB); // ceil(50/10)=5
+    sm.recordWrite("connected", TOPIC, 40 * MB);   // ceil(40/10)=4
+    tickOnce(sm);
+    assertEquals(5, sm.getTotalProducerSlots("unconnected"));
+    assertEquals(4, sm.getTotalProducerSlots("connected"));
+
+    sm.recordProducerConnections("unconnected",
+        new HashSet<>(Collections.singletonList("broker-3")));
+    sm.recordProducerConnections("connected",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 18);
+
+    boolean fired = false;
+    for (int i = 0; i < 20; i++) {
+      EvictionResult result = strategy.evaluate(sm, peers,
+          sm.getProducerConnections(), allPeersServeTopic(peers));
+      if (result != null) {
+        fired = true;
+        assertEquals("within margin, prefer the connected producer",
+            "connected", result.getPid());
+      }
+    }
+    assertTrue("eviction should have fired at least once", fired);
   }
 
   @Test
