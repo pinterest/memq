@@ -241,6 +241,51 @@ public class TestCurrConnectionsEvictionStrategy {
   }
 
   @Test
+  public void testSkipsZeroSlotProducerAndEvictsRealHolder() throws Exception {
+    // Regression: producerHasSlots() is containsKey(), and recordWrite()
+    // re-creates a zero-slot ProducerSlotState on every write. A producer that
+    // was evicted to 0 but keeps writing under backpressure therefore still
+    // looks like an eviction candidate. If it is also the one connected to the
+    // target (the preferred pick), eviction burns the tick on a no-op release
+    // that frees nothing, while the producer actually holding the slots is
+    // never evicted -- so localFreeSlots stays pinned at 0.
+    SlotManager sm = createSlotManager(20);
+
+    // Real holder: acquires slots, but is NOT connected to the target broker
+    // (so it can only be chosen via the fallback path).
+    acquireSlots(sm, "holder", TOPIC, 150);
+    assertTrue("holder should own slots", sm.getTotalProducerSlots("holder") > 0);
+    sm.recordProducerConnections("holder",
+        new HashSet<>(Collections.singletonList("broker-3")));
+
+    // Slotless producer: has a (re-created) state entry but zero slots, and IS
+    // connected to the target -- i.e. the producer that the old "prefer
+    // connected" logic would wrongly select.
+    sm.recordWrite("slotless", TOPIC, 15 * MB); // no tick -> never acquires
+    assertTrue("slotless has a state entry", sm.producerHasSlots("slotless"));
+    assertEquals("slotless holds no slots", 0, sm.getTotalProducerSlots("slotless"));
+    sm.recordProducerConnections("slotless",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
+
+    boolean evictedHolder = false;
+    for (int i = 0; i < 50; i++) {
+      EvictionResult result = strategy.evaluate(sm, peers,
+          sm.getProducerConnections(), allPeersServeTopic(peers));
+      if (result != null) {
+        assertEquals("must never evict the zero-slot producer",
+            "holder", result.getPid());
+        evictedHolder = true;
+      }
+    }
+    assertTrue("eviction should target the real slot holder", evictedHolder);
+  }
+
+  @Test
   public void testNoPendingEvictionLeakForV3Producers() throws Exception {
     SlotManager sm = createSlotManager(20);
     acquireSlots(sm, "v3-producer", TOPIC, 150);

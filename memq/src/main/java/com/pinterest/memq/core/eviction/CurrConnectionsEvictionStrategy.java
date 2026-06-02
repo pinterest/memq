@@ -208,7 +208,13 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     List<String> fallback = new ArrayList<>();
     for (Map.Entry<String, Set<String>> entry : producerConnections.entrySet()) {
       String pid = entry.getKey();
-      if (!slotManager.producerHasSlots(pid)) {
+      // Require real slot ownership, not just map presence. recordWrite
+      // re-creates a zero-slot ProducerSlotState on every write, so a producer
+      // that was evicted to 0 but keeps writing under backpressure still
+      // satisfies producerHasSlots() (which is containsKey). Selecting it would
+      // burn this tick's single eviction on a no-op release that frees nothing,
+      // while the producer actually holding the slots is never evicted.
+      if (slotManager.getTotalProducerSlots(pid) <= 0) {
         continue;
       }
       if (!writesToServedTopic(slotManager.getProducerTopics(pid), targetServedTopics)) {
