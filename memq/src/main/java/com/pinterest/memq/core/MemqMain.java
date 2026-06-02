@@ -279,6 +279,8 @@ public class MemqMain extends Application<MemqConfig> {
     slotRegistry.gauge("free", () -> (Gauge<Integer>) slotManager::getFreeSlots);
     slotRegistry.gauge("frozen",
         () -> (Gauge<Integer>) () -> slotManager.isFrozen() ? 1 : 0);
+    slotRegistry.gauge("drainLatched",
+        () -> (Gauge<Integer>) () -> slotManager.isDrainLatched() ? 1 : 0);
     slotRegistry.gauge("producers", () -> (Gauge<Integer>) slotManager::getProducerCount);
 
     // Per-broker aggregate slot metrics (no topic / pid dimension). Single

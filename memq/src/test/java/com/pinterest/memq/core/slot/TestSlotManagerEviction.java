@@ -303,6 +303,64 @@ public class TestSlotManagerEviction {
   }
 
   @Test
+  public void testPostEvictionCooldownSurvivesSlotRemoval() {
+    // Regression: evicting a producer's only slot drops it to 0, which removes
+    // the ProducerSlotState entirely. The cooldown must still block reacquire
+    // even though the state (and the fresh one recreated by recordWrite) no
+    // longer carries it -- this is the production "flap" where the evicted
+    // producer reacquired after acquireThreshold instead of the full cooldown.
+    config.setPostEvictionCooldownSeconds(60.0);
+    config.setDrainLatchEnabled(false); // isolate: cooldown is the only gate
+    SlotManager sm = create(32);
+
+    // Single slot (5 MB -> ceil(5/10) = 1 slot).
+    sm.recordWrite("producer-1", TOPIC, 5 * MB);
+    sm.tick();
+    assertEquals(1, sm.getProducerSlots("producer-1", TOPIC));
+
+    // Evict the only slot -> 0 -> ProducerSlotState removed.
+    int released = sm.releaseProducerSlots("producer-1", TOPIC, 1);
+    assertEquals(1, released);
+    assertFalse("state should be removed when slots reach 0",
+        sm.producerHasSlots("producer-1"));
+
+    // Producer keeps writing at full rate, recreating a fresh state. The
+    // cooldown (now held at the manager level) must still block reacquire.
+    for (int i = 0; i < 5; i++) {
+      sm.recordWrite("producer-1", TOPIC, 15 * MB);
+      sm.tick();
+    }
+    assertEquals("post-eviction cooldown must survive slot-state removal",
+        0, sm.getProducerSlots("producer-1", TOPIC));
+  }
+
+  @Test
+  public void testPostEvictionCooldownSurvivesRemovalThenExpires() throws InterruptedException {
+    config.setPostEvictionCooldownSeconds(0.1);
+    config.setDrainLatchEnabled(false);
+    SlotManager sm = create(32);
+
+    sm.recordWrite("producer-1", TOPIC, 5 * MB);
+    sm.tick();
+    assertEquals(1, sm.getProducerSlots("producer-1", TOPIC));
+
+    sm.releaseProducerSlots("producer-1", TOPIC, 1);
+    assertFalse(sm.producerHasSlots("producer-1"));
+
+    // Within the cooldown window: blocked even though the state was removed.
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals(0, sm.getProducerSlots("producer-1", TOPIC));
+
+    // After the cooldown elapses, EMA-driven acquisition resumes.
+    Thread.sleep(150);
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    assertEquals("cooldown should expire even after slot-state removal",
+        2, sm.getProducerSlots("producer-1", TOPIC));
+  }
+
+  @Test
   public void testRecordProducerConnectionsOverwrites() {
     SlotManager sm = create(20);
 

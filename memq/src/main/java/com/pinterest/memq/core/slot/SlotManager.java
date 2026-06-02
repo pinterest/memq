@@ -62,10 +62,37 @@ public class SlotManager {
   private final long idleProducerTimeoutMs;
   private final long postEvictionCooldownMs;
 
+  private final boolean drainLatchEnabled;
+  private final double drainLatchEmaDecay;
+  private final double drainLatchDisengageFreeSlots;
+
   private final ConcurrentHashMap<String, ConcurrentHashMap<String, ProducerSlotState>> producers =
       new ConcurrentHashMap<>();
   private final AtomicInteger totalOccupiedSlots = new AtomicInteger(0);
   private volatile long lastSlotChangeTimeMs = 0;
+
+  /**
+   * Per-(pid, topic) wall-clock millis until which {@link #tryAcquireSlots}
+   * must refuse to grant additional slots. Armed by the eviction code path
+   * ({@link #releaseProducerSlots}). Stored here, at the manager level, rather
+   * than on {@link ProducerSlotState} so the cooldown survives the state
+   * removal that {@link #decrementSlots} performs when a producer's slot count
+   * for a topic drops to 0 -- otherwise the next {@link #recordWrite} recreates
+   * a fresh state with no cooldown and the just-evicted producer re-acquires
+   * after {@code acquireThreshold} instead of waiting out the full
+   * post-eviction cooldown (the production eviction "flap"). Keyed by
+   * {@link #cooldownKey(String, String)}.
+   */
+  private final ConcurrentHashMap<String, Long> evictionCooldownUntilMs = new ConcurrentHashMap<>();
+
+  /**
+   * Smoothed (EMA) free-slot count and the latched drain state derived from it.
+   * Only mutated by the single background tick thread; read by the hot path
+   * ({@link #tryAcquireSlots}) and by {@link #isFrozen()}. {@code volatile} so
+   * the boolean is visible across threads without locking.
+   */
+  private double freeSlotsEma;
+  private volatile boolean drainLatched;
 
   private final ConcurrentHashMap<String, Set<String>> producerConnections = new ConcurrentHashMap<>();
 
@@ -116,11 +143,22 @@ public class SlotManager {
     double emaWindowSec = config.getEmaWindowSeconds();
     this.emaDecay = exp(-tickIntervalSec / emaWindowSec);
 
+    this.drainLatchEnabled = config.isDrainLatchEnabled();
+    double drainLatchWindowSec = config.getDrainLatchEmaWindowSeconds();
+    this.drainLatchEmaDecay = exp(-tickIntervalSec / drainLatchWindowSec);
+    this.drainLatchDisengageFreeSlots =
+        Math.max(config.getDrainLatchDisengageFreeSlots(), totalSlots / 10.0);
+    // Start un-latched: a freshly started, empty broker has all slots free.
+    this.freeSlotsEma = totalSlots;
+
     logger.info("SlotManager initialized: totalSlots=" + totalSlots
         + " slotSizeMbps=" + slotSizeMbps
         + " tickIntervalMs=" + tickIntervalMs
         + " emaWindowSec=" + emaWindowSec
-        + " postEvictionCooldownMs=" + postEvictionCooldownMs);
+        + " postEvictionCooldownMs=" + postEvictionCooldownMs
+        + " drainLatchEnabled=" + drainLatchEnabled
+        + " drainLatchEmaWindowSec=" + drainLatchWindowSec
+        + " drainLatchDisengageFreeSlots=" + drainLatchDisengageFreeSlots);
   }
 
   /**
@@ -229,8 +267,50 @@ public class SlotManager {
           }
         }
       }
+
+      updateDrainLatch();
+
+      // Drop expired post-eviction cooldowns. Expired entries no longer block
+      // acquisition, so removing them is safe; active (future) entries are
+      // retained even when the producer holds 0 slots, which is the whole
+      // point of keeping the cooldown off ProducerSlotState.
+      evictionCooldownUntilMs.entrySet().removeIf(e -> now > e.getValue());
     } catch (Exception e) {
       logger.log(Level.WARNING, "Error in slot accounting tick", e);
+    }
+  }
+
+  /**
+   * Recompute the smoothed free-slot count and the latched drain state from
+   * end-of-tick occupancy. Running this once per tick (after all slot
+   * adjustments) means {@link #tryAcquireSlots} consumes the value computed
+   * from the previous tick, so the decision is stable within a tick.
+   * <p>
+   * The smoothing window (see {@code drainLatchEmaWindowSeconds}) is longer
+   * than the eviction "flap" period, so the brief {@code free=1} spike that a
+   * single eviction manufactures cannot by itself disengage the latch. The
+   * latch engages once free slots have been near zero and disengages only
+   * after the broker has genuinely drained by {@code drainLatchDisengageFreeSlots}.
+   */
+  private void updateDrainLatch() {
+    if (!drainLatchEnabled) {
+      return;
+    }
+    freeSlotsEma = drainLatchEmaDecay * freeSlotsEma
+        + (1 - drainLatchEmaDecay) * getFreeSlots();
+    if (drainLatched) {
+      if (freeSlotsEma >= drainLatchDisengageFreeSlots) {
+        drainLatched = false;
+        logger.info("Drain latch disengaged: freeSlotsEma="
+            + String.format("%.2f", freeSlotsEma)
+            + " >= disengageFreeSlots=" + drainLatchDisengageFreeSlots);
+      }
+    } else if (freeSlotsEma < 1.0) {
+      drainLatched = true;
+      logger.info("Drain latch engaged: freeSlotsEma="
+          + String.format("%.2f", freeSlotsEma)
+          + " (recent free slots near zero); freezing slot acquisition until"
+          + " drained to freeSlots=" + drainLatchDisengageFreeSlots);
     }
   }
 
@@ -239,12 +319,20 @@ public class SlotManager {
     if (now - lastSlotChangeTimeMs < cooldownMs) {
       return false;
     }
-    if (now < state.evictionCooldownUntilMs) {
+    Long cooldownUntil = evictionCooldownUntilMs.get(cooldownKey(pid, topic));
+    if (cooldownUntil != null && now < cooldownUntil) {
       // Recently evicted; let the producer's EMA settle to its post-eviction
       // steady state before we consider re-acquiring. Without this gate the
       // broker reacquires the same slot the moment the global cooldown +
       // acquireThreshold elapse, because the EMA still reflects pre-eviction
       // throughput -- the source of the production eviction "flap".
+      return false;
+    }
+    if (drainLatched) {
+      // Broker has recently been at near-zero free slots. Under backpressure
+      // the shaper refills any freed capacity, so granting a slot here just
+      // re-occupies the slot eviction freed and the broker flaps. Refuse all
+      // acquisition until the broker has genuinely drained (see updateDrainLatch).
       return false;
     }
     int available = totalSlots - totalOccupiedSlots.get();
@@ -317,7 +405,26 @@ public class SlotManager {
 
   public boolean isFrozen() {
     return System.currentTimeMillis() - lastSlotChangeTimeMs < cooldownMs
-        || totalOccupiedSlots.get() >= totalSlots;
+        || totalOccupiedSlots.get() >= totalSlots
+        || drainLatched;
+  }
+
+  /**
+   * Whether the broker is currently in the drain-latched state: it has
+   * recently been at near-zero free slots, so slot acquisition is frozen until
+   * it has drained. Visible for test and metrics.
+   */
+  public boolean isDrainLatched() {
+    return drainLatched;
+  }
+
+  /**
+   * Registry/lookup key for the per-(pid, topic) post-eviction cooldown map.
+   * pid (UUID or IPv4) and topic strings as used in this codebase do not
+   * contain {@code |}, so simple concatenation is collision-free.
+   */
+  private static String cooldownKey(String pid, String topic) {
+    return pid + "|" + topic;
   }
 
   public int getTotalSlots() {
@@ -452,6 +559,9 @@ public class SlotManager {
       } else {
         removeProducerTopic(pid, topic, topicMap);
       }
+      // The topic is being decommissioned on this broker, so any pending
+      // post-eviction cooldown for it is moot -- drop it to avoid a leak.
+      evictionCooldownUntilMs.remove(cooldownKey(pid, topic));
       affected++;
     }
     logger.info("dropTopic: cleared accounting for topic=" + topic
@@ -477,18 +587,20 @@ public class SlotManager {
     if (state == null) {
       return 0;
     }
-    // Arm the per-(pid, topic) acquisition cooldown BEFORE decrementSlots
-    // because decrementSlots may remove the state from the map if slots
-    // drop to 0. We still write into the live object first; if the entry is
-    // subsequently evicted, that's the corner case where the producer would
-    // have to ramp EMA from zero anyway, so losing the cooldown is moot.
-    state.evictionCooldownUntilMs = System.currentTimeMillis() + postEvictionCooldownMs;
+    // Arm the per-(pid, topic) acquisition cooldown in the manager-level map
+    // rather than on the ProducerSlotState, because decrementSlots removes the
+    // state from the map when slots drop to 0. Storing it here lets the
+    // cooldown survive that removal (and the fresh state a subsequent
+    // recordWrite creates), which is what prevents the just-evicted producer
+    // from re-acquiring after acquireThreshold instead of the full cooldown.
+    long cooldownUntil = System.currentTimeMillis() + postEvictionCooldownMs;
+    evictionCooldownUntilMs.put(cooldownKey(pid, topic), cooldownUntil);
     int actual = decrementSlots(pid, topic, topicMap, state, count);
     if (actual > 0) {
       logger.info("Eviction: -" + actual + " slot(s) for pid=" + pid + "/" + topic
           + " | remaining=" + state.currentSlots
           + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots
-          + " | cooldownUntilMs=" + state.evictionCooldownUntilMs);
+          + " | cooldownUntilMs=" + cooldownUntil);
     }
     return actual;
   }
@@ -592,12 +704,5 @@ public class SlotManager {
     int currentSlots;
     long exceedsSinceMs;
     long belowSinceMs;
-    /**
-     * Wall-clock millis until which {@link SlotManager#tryAcquireSlots} must
-     * refuse to grant additional slots for this (pid, topic). Set by the
-     * eviction code path ({@link SlotManager#releaseProducerSlots}); never
-     * armed by voluntary EMA-driven release.
-     */
-    long evictionCooldownUntilMs;
   }
 }

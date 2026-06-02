@@ -54,6 +54,38 @@ public class SlotAccountingConfig {
    */
   private double postEvictionCooldownSeconds = 60.0;
 
+  /**
+   * When true, the broker freezes slot acquisition while it has recently been
+   * at near-zero free slots (the "drain latch"). Under backpressure the
+   * traffic shaper refills any capacity that eviction frees, so without this
+   * latch a freed slot is re-acquired immediately and {@code freeSlots} flaps
+   * between 0 and 1. The latch holds the freed slot until the broker has
+   * genuinely drained, giving client-side routing time to move load to peers.
+   * <p>
+   * Set to {@code false} to disable and restore acquisition gated only by the
+   * global cooldown and post-eviction cooldown.
+   */
+  private boolean drainLatchEnabled = true;
+
+  /**
+   * EMA smoothing window (seconds) for the broker-wide free-slot count that
+   * drives the drain latch. Must be longer than the eviction "flap" period so
+   * the brief {@code free=1} spike a single eviction manufactures cannot by
+   * itself disengage the latch.
+   */
+  private double drainLatchEmaWindowSeconds = 20.0;
+
+  /**
+   * The drain latch disengages (re-enables acquisition) once the smoothed
+   * free-slot count rises to at least this many slots. This is the drain-depth
+   * / hysteresis knob: how far the broker must drain before acquisition
+   * resumes. The effective value is {@code max(this, totalSlots / 10)} so it
+   * scales with broker capacity; set it above the typical eviction equilibrium
+   * to avoid stranding unfilled slots. Engage is fixed at a smoothed free-slot
+   * count below 1.
+   */
+  private double drainLatchDisengageFreeSlots = 2.0;
+
   public boolean isEnabled() {
     return enabled;
   }
@@ -132,5 +164,29 @@ public class SlotAccountingConfig {
 
   public void setPostEvictionCooldownSeconds(double postEvictionCooldownSeconds) {
     this.postEvictionCooldownSeconds = postEvictionCooldownSeconds;
+  }
+
+  public boolean isDrainLatchEnabled() {
+    return drainLatchEnabled;
+  }
+
+  public void setDrainLatchEnabled(boolean drainLatchEnabled) {
+    this.drainLatchEnabled = drainLatchEnabled;
+  }
+
+  public double getDrainLatchEmaWindowSeconds() {
+    return drainLatchEmaWindowSeconds;
+  }
+
+  public void setDrainLatchEmaWindowSeconds(double drainLatchEmaWindowSeconds) {
+    this.drainLatchEmaWindowSeconds = drainLatchEmaWindowSeconds;
+  }
+
+  public double getDrainLatchDisengageFreeSlots() {
+    return drainLatchDisengageFreeSlots;
+  }
+
+  public void setDrainLatchDisengageFreeSlots(double drainLatchDisengageFreeSlots) {
+    this.drainLatchDisengageFreeSlots = drainLatchDisengageFreeSlots;
   }
 }
