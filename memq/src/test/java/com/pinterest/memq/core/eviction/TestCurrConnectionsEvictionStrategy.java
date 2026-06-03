@@ -904,4 +904,69 @@ public class TestCurrConnectionsEvictionStrategy {
     assertEquals("broker-3", result.getTargetBrokerIp());
     assertEquals("producer-1", result.getPid());
   }
+
+  @Test
+  public void testPrefersSwapFreeTargetWhenHeavyProducerConnected() throws Exception {
+    // Local broker is congested. Two valid targets: broker-1 is colder
+    // (the pure-balance choice) but the producer is NOT connected to it;
+    // broker-2 is warmer but the producer IS connected to it. The strategy
+    // must prefer the swap-free target (broker-2) so the client need not drop
+    // a connection to honor maxConnections.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "heavy", TOPIC, 200); // ~20 slots -> localFree ~12
+    sm.recordProducerConnections("heavy",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 28, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 20, false, now), now));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull(result);
+    assertEquals("must prefer the swap-free target the producer is connected to",
+        "broker-2", result.getTargetBrokerIp());
+    assertEquals("heavy", result.getPid());
+  }
+
+  @Test
+  public void testFallsBackToBalanceTargetWhenNoConnectedTarget() throws Exception {
+    // The producer is connected only to a broker that is not a candidate target,
+    // so no candidate is swap-free. The strategy must still evict, falling back
+    // to the balance-optimal target (accepting the client-side swap).
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "heavy", TOPIC, 200);
+    sm.recordProducerConnections("heavy",
+        new HashSet<>(Collections.singletonList("broker-offsite")));
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1); // deterministic: pick the coldest candidate
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 28, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 20, false, now), now));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull("must still evict when no swap-free target exists", result);
+    assertEquals("falls back to the balance-optimal (coldest) target",
+        "broker-1", result.getTargetBrokerIp());
+    assertEquals("heavy", result.getPid());
+  }
 }

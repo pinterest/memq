@@ -70,8 +70,10 @@ public class MemqCommonClient implements Closeable {
   /**
    * Hard cap on the number of distinct broker connections this client maintains
    * once v4 weighted routing is active. When an eviction would push the
-   * connection set above this cap, the evicting source is dropped and its
-   * slots are redistributed across the survivors (see {@link #swapEvictingBroker}).
+   * connection set above this cap, the lightest-weight connection that is not
+   * the eviction target is dropped (see {@link #enforceConnectionCap}); its
+   * traffic share is absorbed by the survivors through normal weighted routing
+   * and their broker-side EMAs, not by fabricating slot counts.
    * A value {@code <= 0} disables the cap (unbounded).
    */
   public static final String CONFIG_MAX_CONNECTIONS = "maxConnections";
@@ -788,9 +790,9 @@ public class MemqCommonClient implements Closeable {
    *    producer to {@code targetBrokerIp}. We:
    *    <ul>
    *      <li>apply the eviction normally (bump target, update source remaining),</li>
-   *      <li>if the result would exceed {@code maxConnections}, perform a connection
-   *          swap: drop the evicting source entirely and redistribute its remaining
-   *          slots evenly across surviving brokers (including the new target),</li>
+   *      <li>if the result would exceed {@code maxConnections}, drop the lightest
+   *          non-target connection ({@link #enforceConnectionCap}) without
+   *          fabricating any slot redistribution,</li>
    *      <li>register the target as an active write endpoint <b>immediately</b> so
    *          the next dispatch can route to it (no waiting for an existing endpoint
    *          to die or a reconnect to surface the new broker), and</li>
@@ -802,7 +804,7 @@ public class MemqCommonClient implements Closeable {
    *    wrote to, so we track it in {@code slotsOwned} (seeding at a floor of 1
    *    when it reports 0) and {@link #reconcileWriteEndpoints() reconcile}.
    *    A brand-new broker is only admitted while under {@code maxConnections};
-   *    at the cap, membership changes only via the eviction swap above. Before
+   *    at the cap, membership changes only via the eviction path above. Before
    *    {@code v4Active} flips, only already-known brokers are refreshed so the
    *    weighted set is not derived from an empty slot map.
    * <p>
@@ -901,10 +903,12 @@ public class MemqCommonClient implements Closeable {
       }
 
       // Enforce the maxConnections cap: if adding the target pushed us over the
-      // cap, drop the evicting source entirely and redistribute its remaining
-      // slots across the survivors (including the target).
-      if (sourceIp != null && maxConnections > 0 && slotsOwned.size() > maxConnections) {
-        swapEvictingBroker(sourceIp);
+      // cap, drop the lightest-weight non-target connection. We do NOT fabricate
+      // a redistribution of its slots -- weights are relative and renormalize on
+      // rebuild, and the survivors' real broker-side EMAs will true up their
+      // counts within a few ticks.
+      if (maxConnections > 0 && slotsOwned.size() > maxConnections) {
+        enforceConnectionCap(targetIp);
       }
 
       // Single reconciliation: derive writeEndpoints from slotsOwned (the source
@@ -962,32 +966,40 @@ public class MemqCommonClient implements Closeable {
   }
 
   /**
-   * Drop the evicting source broker entirely from {@code slotsOwned} and
-   * redistribute its remaining slots evenly across the surviving brokers
-   * (which includes the new eviction target). Returns true if the source was
-   * present and dropped.
+   * Honor the {@code maxConnections} cap after an eviction added a new target
+   * by dropping the single lightest-weight connection that is <b>not</b> the
+   * eviction target. Returns the dropped broker IP, or {@code null} if nothing
+   * was dropped.
    * <p>
-   * The redistribution preserves the total slot count: per-survivor share is
-   * {@code dropped / n}, with the {@code dropped % n} remainder spread one-by-one
-   * across iteration order so no slots are lost.
+   * Unlike the previous behavior, this does not drop the evicting source
+   * wholesale, nor fabricate a redistribution of the dropped broker's slots: a
+   * 1-slot eviction must not turn into abandoning a heavily-weighted connection.
+   * Dropping the lightest connection minimizes the routing discontinuity, and
+   * because routing weights are relative (renormalized on every
+   * {@link #rebuildWeightedMap()}), the dropped broker's share is absorbed by
+   * the survivors automatically. Their real broker-side EMAs then re-report
+   * actual slot counts within a few ticks, so the "redistribution" happens
+   * through the real control loop instead of fabricated integers. The cold
+   * target keeps its post-eviction routing boost, biasing the orphaned share
+   * toward it rather than toward the heaviest survivor.
    */
-  private boolean swapEvictingBroker(String sourceIp) {
-    Integer dropped = slotsOwned.remove(sourceIp);
-    if (dropped == null) {
-      return false;
-    }
-    if (slotsOwned.isEmpty() || dropped <= 0) {
-      return true;
-    }
-    int n = slotsOwned.size();
-    int per = dropped / n;
-    int rem = dropped % n;
+  private String enforceConnectionCap(String targetIp) {
+    String victim = null;
+    int victimSlots = Integer.MAX_VALUE;
     for (Map.Entry<String, Integer> entry : slotsOwned.entrySet()) {
-      int extra = per + (rem > 0 ? 1 : 0);
-      if (rem > 0) rem--;
-      entry.setValue(entry.getValue() + extra);
+      if (entry.getKey().equals(targetIp)) {
+        continue;
+      }
+      if (entry.getValue() < victimSlots) {
+        victimSlots = entry.getValue();
+        victim = entry.getKey();
+      }
     }
-    return true;
+    if (victim != null) {
+      slotsOwned.remove(victim);
+      routingBoostUntilMs.remove(victim);
+    }
+    return victim;
   }
 
   /**

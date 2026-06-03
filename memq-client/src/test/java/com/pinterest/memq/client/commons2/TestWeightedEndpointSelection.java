@@ -163,11 +163,13 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
-  public void testConnectionSwapPreservesTotalSlotsAndDropsSource() throws Exception {
-    // Mirrors the spec example: maxConnections = 3, current
-    // [broker_0: 10, broker_1: 10, broker_2: 10]; broker_2 evicts 1 slot to broker_4.
-    // Naive result would be size 4 -> swap drops source (broker_2), redistributing
-    // its 9 remaining slots evenly across the 3 survivors -> [13, 13, 4].
+  public void testCapKeepsHeavySourceDropsLightestNonTarget() throws Exception {
+    // maxConnections = 3, current [broker_0: 2, broker_1: 10, broker_2: 20].
+    // broker_2 (the heavy source) evicts 1 slot to a brand-new target broker_4,
+    // pushing the set to size 4. The cap must be honored by dropping the
+    // *lightest non-target* connection (broker_0, 2 slots) -- NOT the source,
+    // which still owns 19 slots -- and without fabricating a redistribution of
+    // the dropped broker's slots onto the survivors.
     Properties props = new Properties();
     props.setProperty("numWriteEndpoints", "3");
     MemqCommonClient c = new MemqCommonClient(null, props);
@@ -179,65 +181,69 @@ public class TestWeightedEndpointSelection {
     setWriteEndpoints(c, new ArrayList<>(eps));
     c.setMaxConnections(3);
 
-    c.getSlotsOwned().put("10.0.0.0", 10);
+    c.getSlotsOwned().put("10.0.0.0", 2);
     c.getSlotsOwned().put("10.0.0.1", 10);
-    c.getSlotsOwned().put("10.0.0.2", 10);
+    c.getSlotsOwned().put("10.0.0.2", 20);
 
     InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.2", 9092);
-    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.4", 1, 9);
+    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.4", 1, 19);
     c.handleWriteResponse(eviction, sourceAddr);
 
     Map<String, Integer> result = c.getSlotsOwned();
     assertEquals("Connection count must be capped at maxConnections", 3, result.size());
-    assertFalse("Evicting source must be dropped entirely",
-        result.containsKey("10.0.0.2"));
+    assertFalse("Lightest non-target connection must be dropped",
+        result.containsKey("10.0.0.0"));
+    assertTrue("Heavy evicting source must be retained", result.containsKey("10.0.0.2"));
     assertTrue("Eviction target must be present", result.containsKey("10.0.0.4"));
 
-    int total = result.values().stream().mapToInt(Integer::intValue).sum();
-    assertEquals("Total slots must be preserved by redistribution", 30, total);
-    assertEquals(13, (int) result.get("10.0.0.0"));
-    assertEquals(13, (int) result.get("10.0.0.1"));
-    assertEquals(4, (int) result.get("10.0.0.4"));
+    // No fabrication: survivors keep their real counts; the dropped broker's
+    // slots are NOT sprayed onto them.
+    assertEquals("Source keeps its remaining slots", 19, (int) result.get("10.0.0.2"));
+    assertEquals("Survivor count must be unchanged (no fabrication)",
+        10, (int) result.get("10.0.0.1"));
+    assertEquals("Target carries only the evicted slot", 1, (int) result.get("10.0.0.4"));
 
-    // writeEndpoints must also reflect the swap: source out, target in
+    // writeEndpoints reflects the change: dropped broker out, target in.
     boolean targetInWrites = c.currentWriteEndpoints().stream()
         .anyMatch(e -> e.getAddress().getHostString().equals("10.0.0.4"));
-    boolean sourceInWrites = c.currentWriteEndpoints().stream()
-        .anyMatch(e -> e.getAddress().getHostString().equals("10.0.0.2"));
-    assertTrue("Target must be a write endpoint after swap", targetInWrites);
-    assertFalse("Dropped source must be removed from write endpoints", sourceInWrites);
+    boolean droppedInWrites = c.currentWriteEndpoints().stream()
+        .anyMatch(e -> e.getAddress().getHostString().equals("10.0.0.0"));
+    assertTrue("Target must be a write endpoint", targetInWrites);
+    assertFalse("Dropped broker must be removed from write endpoints", droppedInWrites);
     assertEquals(3, c.currentWriteEndpoints().size());
 
     c.close();
   }
 
   @Test
-  public void testRedistributionHandlesUnevenRemainder() throws Exception {
-    // 7 slots over 3 survivors -> 3,2,2 (each survivor gets at least floor(7/3)=2,
-    // and 7%3=1 remainder is given to one survivor).
+  public void testCapNeverDropsEvictionTarget() throws Exception {
+    // Even when the eviction target is the globally lightest entry (it starts at
+    // just the evicted slot count), the cap must never drop the target itself --
+    // it drops the lightest *other* connection instead.
     Properties props = new Properties();
-    props.setProperty("numWriteEndpoints", "2");
+    props.setProperty("numWriteEndpoints", "3");
     MemqCommonClient c = new MemqCommonClient(null, props);
     List<Endpoint> eps = new ArrayList<>();
     eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.0", 9092)));
     eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
     c.initialize(eps);
     setWriteEndpoints(c, new ArrayList<>(eps));
-    c.setMaxConnections(2);
+    c.setMaxConnections(3);
 
     c.getSlotsOwned().put("10.0.0.0", 5);
-    c.getSlotsOwned().put("10.0.0.1", 5);
+    c.getSlotsOwned().put("10.0.0.1", 6);
+    c.getSlotsOwned().put("10.0.0.2", 7);
 
-    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.0", 9092);
-    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.9", 1, 7);
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.2", 9092);
+    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.9", 1, 6);
     c.handleWriteResponse(eviction, sourceAddr);
 
     Map<String, Integer> result = c.getSlotsOwned();
-    assertEquals(2, result.size());
-    assertFalse(result.containsKey("10.0.0.0"));
-    int total = result.values().stream().mapToInt(Integer::intValue).sum();
-    // 5 (10.0.0.1, kept) + 1 (target: from eviction) + 7 (redistributed) = 13
-    assertEquals(13, total);
+    assertEquals(3, result.size());
+    assertTrue("Eviction target must never be dropped", result.containsKey("10.0.0.9"));
+    assertEquals("Target carries only the evicted slot", 1, (int) result.get("10.0.0.9"));
+    assertFalse("Lightest non-target must be dropped", result.containsKey("10.0.0.0"));
     c.close();
   }
 

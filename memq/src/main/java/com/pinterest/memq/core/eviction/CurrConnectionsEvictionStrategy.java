@@ -20,6 +20,7 @@ import com.pinterest.memq.core.gossip.GossipState;
 import com.pinterest.memq.core.slot.SlotManager;
 
 import java.util.AbstractMap;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -127,9 +128,42 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       return null;
     }
 
-    // Step 3: probabilistic top-N target selection.
+    // Step 3: probabilistic top-N target selection. Prefer "swap-free" targets
+    // -- ones the producer we would evict is already connected to -- so the
+    // client does not have to drop a connection to honor maxConnections. This
+    // is a preference, not a blocker: broker balance is still the hard gate
+    // (only the already-valid candidates are considered), and if no swap-free
+    // target is viable we fall back to the best balancing target (accepting the
+    // client-side swap, which is the genuinely necessary case).
     candidates.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
-    Map.Entry<String, Integer> target = selectTargetBroker(candidates);
+
+    Map.Entry<String, Integer> target = null;
+    if (config.isPreferConnectedTarget() && !producerConnections.isEmpty()) {
+      List<Map.Entry<String, Integer>> swapFree = new ArrayList<>();
+      for (Map.Entry<String, Integer> candidate : candidates) {
+        Set<String> served = brokerToTopics.getOrDefault(candidate.getKey(),
+            java.util.Collections.emptySet());
+        String pid = pickProducer(slotManager, producerConnections, candidate.getKey(),
+            served, true);
+        if (pid != null
+            && producerConnections.getOrDefault(pid, java.util.Collections.emptySet())
+                .contains(candidate.getKey())) {
+          swapFree.add(candidate);
+        }
+      }
+      if (!swapFree.isEmpty()) {
+        Map.Entry<String, Integer> swapFreeTarget = selectTargetBroker(swapFree);
+        if (swapFreeTarget != null
+            && isViableTarget(swapFreeTarget.getValue(), localFreeSlots,
+                slotManager.getTotalSlots())) {
+          target = swapFreeTarget;
+        }
+      }
+    }
+
+    if (target == null) {
+      target = selectTargetBroker(candidates);
+    }
 
     if (target == null) {
       logger.info("[" + brokerId + "] eviction skipped: target selection returned null");
@@ -171,7 +205,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
         java.util.Collections.emptySet());
 
     String pidToEvict = pickProducer(slotManager, producerConnections, target.getKey(),
-        targetServedTopics);
+        targetServedTopics, false);
 
     if (pidToEvict == null) {
       logger.info("[" + brokerId + "] eviction skipped: no v4 producer holds slots on a topic"
@@ -202,7 +236,8 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
   private String pickProducer(SlotManager slotManager,
                               Map<String, Set<String>> producerConnections,
                               String targetIp,
-                              Set<String> targetServedTopics) {
+                              Set<String> targetServedTopics,
+                              boolean quiet) {
     if (targetServedTopics.isEmpty()) {
       return null;
     }
@@ -249,15 +284,34 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     // capacity would just be reabsorbed by the heavier, backpressured one.
     if (heaviestConnectedPid != null
         && heaviestConnectedSlots >= heaviestSlots - config.getHeavyProducerSlotMargin()) {
-      logger.info("[" + brokerId + "] evicting pid=" + heaviestConnectedPid
-          + " (connected to target=" + targetIp + ", slots=" + heaviestConnectedSlots
-          + ", heaviestEligibleSlots=" + heaviestSlots + ")");
+      if (!quiet) {
+        logger.info("[" + brokerId + "] evicting pid=" + heaviestConnectedPid
+            + " (connected to target=" + targetIp + ", slots=" + heaviestConnectedSlots
+            + ", heaviestEligibleSlots=" + heaviestSlots + ")");
+      }
       return heaviestConnectedPid;
     }
-    logger.info("[" + brokerId + "] evicting pid=" + heaviestPid
-        + " (heaviest eligible producer, slots=" + heaviestSlots
-        + ", not connected to target=" + targetIp + ")");
+    if (!quiet) {
+      logger.info("[" + brokerId + "] evicting pid=" + heaviestPid
+          + " (heaviest eligible producer, slots=" + heaviestSlots
+          + ", not connected to target=" + targetIp + ")");
+    }
     return heaviestPid;
+  }
+
+  /**
+   * A target is viable for eviction if it has strictly more free slots than us
+   * and the gap exceeds the configured percentage threshold. Mirrors the Step 4
+   * checks; used to validate a swap-free target before preferring it (quietly,
+   * so the verbose skip diagnostics only fire on the final fallback target).
+   */
+  private boolean isViableTarget(int targetFreeSlots, int localFreeSlots, int totalSlots) {
+    if (targetFreeSlots <= localFreeSlots) {
+      return false;
+    }
+    double percentageDifference =
+        (double) Math.abs(localFreeSlots - targetFreeSlots) / totalSlots * 100;
+    return percentageDifference > config.getEvictionPercentageThreshold();
   }
 
   private static boolean writesToServedTopic(Collection<String> producerTopics,

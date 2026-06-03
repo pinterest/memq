@@ -26,6 +26,7 @@ public class EvictionConfig {
   private double pendingEvictionCooldownSeconds = 10.0;
   private int topNTargets = 3;
   private int heavyProducerSlotMargin = 2;
+  private boolean preferConnectedTarget = true;
 
   public boolean isEnabled() {
     return enabled;
@@ -92,6 +93,23 @@ public class EvictionConfig {
 
   public void setHeavyProducerSlotMargin(int heavyProducerSlotMargin) {
     this.heavyProducerSlotMargin = heavyProducerSlotMargin;
+  }
+
+  /**
+   * When true (default), eviction prefers a target broker that the producer it
+   * would evict is already connected to, so the producer does not have to drop
+   * an existing connection to honor its client-side {@code maxConnections} cap.
+   * Broker balance remains the hard gate -- only already-valid candidate targets
+   * are considered, and a swap-requiring target is still chosen when no
+   * swap-free target relieves congestion. A large {@code heavyProducerSlotMargin}
+   * combined with this restores connection-affinity-first behavior.
+   */
+  public boolean isPreferConnectedTarget() {
+    return preferConnectedTarget;
+  }
+
+  public void setPreferConnectedTarget(boolean preferConnectedTarget) {
+    this.preferConnectedTarget = preferConnectedTarget;
   }
 
 }
