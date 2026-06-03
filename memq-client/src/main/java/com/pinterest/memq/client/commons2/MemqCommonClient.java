@@ -665,9 +665,9 @@ public class MemqCommonClient implements Closeable {
    * <b>v3 (legacy) brokers</b>: the writeEndpoints set is grown until it
    * reaches {@code numWriteEndpoints} (round-robin fan-out width).
    * <p>
-   * <b>v4 brokers</b>: once {@code v4Active} flips, write endpoint membership
-   * is managed dynamically by the eviction logic
-   * ({@link #syncEndpointsAfterEviction}) and capped by {@code maxConnections}.
+   * <b>v4 brokers</b>: once {@code v4Active} flips, {@link #writeEndpoints} is a
+   * pure projection of {@link #slotsOwned} (the source of truth), rebuilt by
+   * {@link #reconcileWriteEndpoints()} and capped by {@code maxConnections}.
    * This method then only ensures locality discovery and clears failure counts
    * for the succeeding endpoint.
    *
@@ -713,8 +713,6 @@ public class MemqCommonClient implements Closeable {
 
       List<Endpoint> newLocals = new ArrayList<>(this.localityEndpoints);
       newLocals.remove(deadEndpoint);
-      List<Endpoint> newWrites = new ArrayList<>(this.writeEndpoints);
-      newWrites.remove(deadEndpoint);
 
       if (failures >= 2) {
         logger.warn("Dead endpoint " + deadEndpoint + " has failed 2 times, removing from future consideration");
@@ -723,10 +721,25 @@ public class MemqCommonClient implements Closeable {
         logger.warn("Dead endpoint " + deadEndpoint + " has failed " + failures + " times, deprioritizing it");
         newLocals.add(deadEndpoint); // move to end
       }
-
       this.localityEndpoints = Collections.unmodifiableList(newLocals);
-      this.writeEndpoints = Collections.unmodifiableList(newWrites);
-      rebuildWeightedMap();
+
+      if (v4Active) {
+        // slotsOwned is the source of truth: drop the dead broker from it (and
+        // clear its routing boost), then re-derive writeEndpoints. Removing it
+        // from writeEndpoints alone would be undone by the next reconcile, which
+        // rebuilds writeEndpoints from slotsOwned.
+        String ip = deadEndpoint.getAddress().getHostString();
+        synchronized (this) {
+          slotsOwned.remove(ip);
+          routingBoostUntilMs.remove(ip);
+          reconcileWriteEndpoints();
+        }
+      } else {
+        List<Endpoint> newWrites = new ArrayList<>(this.writeEndpoints);
+        newWrites.remove(deadEndpoint);
+        this.writeEndpoints = Collections.unmodifiableList(newWrites);
+        rebuildWeightedMap();
+      }
       validateEndpoints();
   }
 
@@ -785,10 +798,17 @@ public class MemqCommonClient implements Closeable {
    *    </ul>
    * <p>
    * 2. Non-eviction path: the broker reports the producer's current slot ownership
-   *    (numSlotsOwned). We refresh {@code slotsOwned[sourceIp]} so weighted
-   *    selection reflects broker-side accounting over time, but only for sources
-   *    we are already tracking (or already writing to) so the map cannot grow
-   *    unboundedly from transient touches.
+   *    (numSlotsOwned). Once {@code v4Active}, the responding broker is one we
+   *    wrote to, so we track it in {@code slotsOwned} (seeding at a floor of 1
+   *    when it reports 0) and {@link #reconcileWriteEndpoints() reconcile}.
+   *    A brand-new broker is only admitted while under {@code maxConnections};
+   *    at the cap, membership changes only via the eviction swap above. Before
+   *    {@code v4Active} flips, only already-known brokers are refreshed so the
+   *    weighted set is not derived from an empty slot map.
+   * <p>
+   * In both v4 paths {@link #writeEndpoints} is a pure projection of
+   * {@link #slotsOwned} (rebuilt by {@link #reconcileWriteEndpoints()}), so the
+   * connection set can never drift above {@code maxConnections}.
    */
   public synchronized void handleWriteResponse(WriteResponsePacket writeResp,
                                                InetSocketAddress sourceAddress) {
@@ -852,7 +872,7 @@ public class MemqCommonClient implements Closeable {
       String targetIp = writeResp.getTargetBrokerIp();
       int slotsToEvict = writeResp.getNumSlotsToEvict();
 
-      // Step 1: apply eviction normally
+      // Apply the eviction to the source-of-truth slot map.
       slotsOwned.merge(targetIp, slotsToEvict, Integer::sum);
       if (sourceIp != null) {
         if (remaining > 0) {
@@ -862,7 +882,7 @@ public class MemqCommonClient implements Closeable {
         }
       }
 
-      // Step 1b: post-eviction routing boost.
+      // Post-eviction routing boost.
       // Arm the +1 routing-weight boost on the target so the producer
       // over-routes there long enough for the target's broker-side EMA
       // to decisively cross the next ceil(EMA/slotSize) boundary and
@@ -880,37 +900,63 @@ public class MemqCommonClient implements Closeable {
         routingBoostUntilMs.remove(sourceIp);
       }
 
-      // Step 2: enforce maxConnections via connection swap (drop source, redistribute)
-      boolean sourceDropped = false;
+      // Enforce the maxConnections cap: if adding the target pushed us over the
+      // cap, drop the evicting source entirely and redistribute its remaining
+      // slots across the survivors (including the target).
       if (sourceIp != null && maxConnections > 0 && slotsOwned.size() > maxConnections) {
-        sourceDropped = swapEvictingBroker(sourceIp);
+        swapEvictingBroker(sourceIp);
       }
 
-      // Step 3: make target an active write endpoint immediately, drop dropped source
-      syncEndpointsAfterEviction(targetIp, sourceIp, sourceDropped);
-
-      // Step 4: rebuild the weighted endpoint map
-      rebuildWeightedMap();
+      // Single reconciliation: derive writeEndpoints from slotsOwned (the source
+      // of truth) and rebuild the weighted map. The dropped/drained source falls
+      // out of writeEndpoints automatically; the target is added immediately.
+      reconcileWriteEndpoints();
 
       logger.info("Eviction received: source=" + sourceAddress + " target=" + targetIp
           + " slotsToEvict=" + slotsToEvict + " remaining=" + remaining
-          + (sourceDropped ? " (source dropped, slots redistributed)" : "")
           + " slotsOwned=" + slotsOwned);
       return;
     }
 
-    // Non-eviction v4 response: keep slot accounting current for accurate weighting.
-    // Only update sources we are already tracking (avoids unbounded growth from
-    // transient writes to brokers that are not part of the active set).
-    if (sourceIp != null
-        && (slotsOwned.containsKey(sourceIp) || writeEndpointsContains(sourceIp))) {
-      if (remaining > 0) {
+    // Non-eviction response.
+    if (sourceIp == null) {
+      return;
+    }
+
+    if (!v4Active) {
+      // Legacy / pre-activation window: routing is governed by round-robin over
+      // writeEndpoints (managed by maybeRegisterWriteEndpoint). Only refresh
+      // slot data for brokers we already know so we never grow the weighted set
+      // -- and never derive writeEndpoints from the (still empty) slot map --
+      // before a v4 broker has been observed.
+      if ((slotsOwned.containsKey(sourceIp) || writeEndpointsContains(sourceIp))
+          && remaining > 0) {
         slotsOwned.put(sourceIp, remaining);
-      } else {
-        // numSlotsOwned == 0 may be transient (broker EMA briefly at 0); leave entry
-        // alone if we already had it, otherwise don't add a zero entry.
-        slotsOwned.computeIfPresent(sourceIp, (k, v) -> v);
+        rebuildWeightedMap();
       }
+      return;
+    }
+
+    // v4 non-eviction response: slotsOwned is the source of truth. The responding
+    // broker is one we wrote to, so track it (seeding at a floor of 1 when it
+    // reports 0) and reconcile so it participates in weighted routing. A
+    // brand-new broker is only admitted when we are under the maxConnections cap;
+    // at the cap, membership only changes via eviction swaps.
+    boolean isKnown = slotsOwned.containsKey(sourceIp);
+    if (!isKnown && maxConnections > 0 && slotsOwned.size() >= maxConnections) {
+      rebuildWeightedMap();
+      return;
+    }
+    boolean added = false;
+    if (remaining > 0) {
+      added = slotsOwned.put(sourceIp, remaining) == null;
+    } else if (!isKnown) {
+      slotsOwned.put(sourceIp, 1);
+      added = true;
+    }
+    if (added) {
+      reconcileWriteEndpoints();
+    } else {
       rebuildWeightedMap();
     }
   }
@@ -945,53 +991,42 @@ public class MemqCommonClient implements Closeable {
   }
 
   /**
-   * Make {@code targetIp} an active write endpoint immediately (so the next
-   * dispatch can route to it), and drop {@code sourceIp} from the write set if
-   * the connection swap removed it from {@code slotsOwned}.
+   * Reconcile the derived routing state from {@link #slotsOwned}, the single
+   * source of truth in v4 mode.
    * <p>
-   * If the target IP is unknown (not in current locality/write endpoints) we
-   * synthesize an {@link Endpoint} for it by reusing the port of an existing
-   * endpoint (MemQ broker fleets share a port) and tagging it with the
-   * producer's configured locality.
+   * {@link #writeEndpoints} is rebuilt to be exactly the set of brokers tracked
+   * in {@code slotsOwned} (so a broker dropped from {@code slotsOwned} -- whether
+   * by a connection swap or by draining to zero slots -- automatically falls out
+   * of the write set, and an eviction target is added immediately). Each tracked
+   * broker is also ensured present in {@link #localityEndpoints} so future
+   * failovers and reconnects can still see it. Finally the weighted map is
+   * rebuilt. Synthesized endpoints (for an IP not previously known) reuse the
+   * cluster port of an existing endpoint and the producer's configured locality.
+   * <p>
+   * Because writeEndpoints is a pure projection of {@code slotsOwned}, the two
+   * can no longer drift, which is what previously let the connection set exceed
+   * {@code maxConnections}.
    */
-  private void syncEndpointsAfterEviction(String targetIp, String sourceIp,
-                                          boolean sourceDropped) {
-    Endpoint targetEp = findOrCreateEndpoint(targetIp);
-
-    // Add target to localityEndpoints if missing so future failovers and
-    // reconnects also see it.
+  private void reconcileWriteEndpoints() {
     List<Endpoint> currentLocals = this.localityEndpoints;
-    if (!containsByIp(currentLocals, targetIp)) {
-      List<Endpoint> newLocals = new ArrayList<>(currentLocals.size() + 1);
-      newLocals.addAll(currentLocals);
-      newLocals.add(targetEp);
+    List<Endpoint> newLocals = null;
+    List<Endpoint> writes = new ArrayList<>(slotsOwned.size());
+    for (String ip : slotsOwned.keySet()) {
+      Endpoint ep = findOrCreateEndpoint(ip);
+      writes.add(ep);
+      if (!containsByIp(currentLocals, ip)
+          && (newLocals == null || !containsByIp(newLocals, ip))) {
+        if (newLocals == null) {
+          newLocals = new ArrayList<>(currentLocals);
+        }
+        newLocals.add(ep);
+      }
+    }
+    if (newLocals != null) {
       this.localityEndpoints = Collections.unmodifiableList(newLocals);
     }
-
-    // Sync writeEndpoints: drop source if swap removed it; add target if missing.
-    List<Endpoint> currentWrites = this.writeEndpoints;
-    boolean needsRebuild = sourceDropped || !containsByIp(currentWrites, targetIp);
-    if (!needsRebuild) {
-      return;
-    }
-    List<Endpoint> newWrites = new ArrayList<>(currentWrites.size() + 1);
-    for (Endpoint e : currentWrites) {
-      if (sourceDropped && sourceIp != null
-          && e.getAddress().getHostString().equals(sourceIp)) {
-        continue;
-      }
-      newWrites.add(e);
-    }
-    if (!containsByIp(newWrites, targetIp)) {
-      newWrites.add(targetEp);
-    }
-    this.writeEndpoints = Collections.unmodifiableList(newWrites);
-    if (sourceDropped && sourceIp != null) {
-      // Source is no longer eligible for writes; clear any failure record so a
-      // future reconnect-induced revisit is not penalised.
-      failureCounts.keySet().removeIf(
-          ep -> ep.getAddress().getHostString().equals(sourceIp));
-    }
+    this.writeEndpoints = Collections.unmodifiableList(writes);
+    rebuildWeightedMap();
   }
 
   private boolean writeEndpointsContains(String ip) {
