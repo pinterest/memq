@@ -504,9 +504,114 @@ public class TestWeightedEndpointSelection {
     // Target's effective routing weight must include the +1 boost.
     assertEquals("target gets slotsOwned (2 after merge) + 1 boost",
         3, client.effectiveWeight("10.0.0.2", before + 1));
-    // Other brokers must not be affected.
-    assertEquals(10, client.effectiveWeight("10.0.0.1", before + 1));
+    // The evicting source is penalized (default factor 0.5): 10 -> 5.
+    assertEquals("source weight is scaled down by the post-eviction penalty",
+        5, client.effectiveWeight("10.0.0.1", before + 1));
+    // Brokers uninvolved in the eviction are unaffected.
     assertEquals(1, client.effectiveWeight("10.0.0.3", before + 1));
+  }
+
+  @Test
+  public void testSourcePenaltyScalesDownEvictingSourceWeight() throws Exception {
+    // The evicting source's routing weight must be scaled down so traffic
+    // actually moves off it, instead of staying put and re-acquiring the slot.
+    Properties props = new Properties();
+    props.setProperty("numWriteEndpoints", "3");
+    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR, "0.5");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    List<Endpoint> eps = new ArrayList<>();
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
+    c.initialize(eps);
+    setWriteEndpoints(c, new ArrayList<>(eps));
+    c.getSlotsOwned().put("10.0.0.1", 24);
+    c.getSlotsOwned().put("10.0.0.2", 4);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    c.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 24), sourceAddr);
+
+    long now = System.currentTimeMillis();
+    assertEquals("source weight scaled by 0.5: 24 -> 12",
+        12, c.effectiveWeight("10.0.0.1", now));
+    assertEquals("target keeps slotsOwned (5 after merge) + 1 boost",
+        6, c.effectiveWeight("10.0.0.2", now));
+    c.close();
+  }
+
+  @Test
+  public void testSourcePenaltyDisabledWhenFactorIsOne() throws Exception {
+    // factor >= 1.0 disables the penalty: source weight is plain slotsOwned.
+    Properties props = new Properties();
+    props.setProperty("numWriteEndpoints", "3");
+    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR, "1.0");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    List<Endpoint> eps = new ArrayList<>();
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
+    c.initialize(eps);
+    setWriteEndpoints(c, new ArrayList<>(eps));
+    c.getSlotsOwned().put("10.0.0.1", 24);
+    c.getSlotsOwned().put("10.0.0.2", 4);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    c.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 24), sourceAddr);
+
+    long now = System.currentTimeMillis();
+    assertEquals("penalty disabled: source weight unchanged at 24",
+        24, c.effectiveWeight("10.0.0.1", now));
+    c.close();
+  }
+
+  @Test
+  public void testSourcePenaltyExpiresAfterTtl() throws Exception {
+    Properties props = new Properties();
+    props.setProperty("numWriteEndpoints", "3");
+    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_MS, "50");
+    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR, "0.5");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    List<Endpoint> eps = new ArrayList<>();
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
+    c.initialize(eps);
+    setWriteEndpoints(c, new ArrayList<>(eps));
+    c.getSlotsOwned().put("10.0.0.1", 24);
+    c.getSlotsOwned().put("10.0.0.2", 4);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    c.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 24), sourceAddr);
+
+    assertEquals("inside window: penalty active", 12,
+        c.effectiveWeight("10.0.0.1", System.currentTimeMillis()));
+
+    Thread.sleep(80);
+    assertEquals("after TTL: penalty gone, full slotsOwned weight",
+        24, c.effectiveWeight("10.0.0.1", System.currentTimeMillis()));
+    c.close();
+  }
+
+  @Test
+  public void testSourcePenaltyDisabledWhenWindowIsZero() throws Exception {
+    // The penalty window is independent of the boost window: a zero penalty
+    // window disables the penalty even with a penalizing factor.
+    Properties props = new Properties();
+    props.setProperty("numWriteEndpoints", "3");
+    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_MS, "0");
+    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR, "0.5");
+    MemqCommonClient c = new MemqCommonClient(null, props);
+    List<Endpoint> eps = new ArrayList<>();
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
+    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
+    c.initialize(eps);
+    setWriteEndpoints(c, new ArrayList<>(eps));
+    c.getSlotsOwned().put("10.0.0.1", 24);
+    c.getSlotsOwned().put("10.0.0.2", 4);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    c.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 24), sourceAddr);
+
+    assertEquals("zero penalty window disables the penalty",
+        24, c.effectiveWeight("10.0.0.1", System.currentTimeMillis()));
+    c.close();
   }
 
   @Test

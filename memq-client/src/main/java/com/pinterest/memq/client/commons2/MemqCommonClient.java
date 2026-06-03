@@ -100,11 +100,60 @@ public class MemqCommonClient implements Closeable {
    * over-routes to the eviction target for ~60s. Within that window
    * traffic genuinely shifts and the target broker acquires.
    * <p>
+   * This boost is an <i>additive</i> 1-slot nudge to the cold target; its
+   * counterpart on the hot eviction source is a <i>multiplicative</i>
+   * scale-down (see {@link #CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR} for why
+   * the two differ in form). The two windows are configured independently
+   * ({@link #CONFIG_POST_EVICTION_SOURCE_PENALTY_MS}).
+   * <p>
    * Set to {@code 0} to disable.
    */
   public static final String CONFIG_POST_EVICTION_ROUTING_BOOST_MS =
       "postEvictionRoutingBoostMs";
   public static final long DEFAULT_POST_EVICTION_ROUTING_BOOST_MS = 60_000L;
+
+  /**
+   * Producer-side post-eviction source penalty: the counterpart of the routing
+   * boost, with its own independent window. For
+   * {@link #CONFIG_POST_EVICTION_SOURCE_PENALTY_MS} milliseconds after an
+   * eviction named broker {@code S} as the <i>source</i>, {@code S}'s routing
+   * weight is scaled by {@link #CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR}
+   * (floored at 1 slot).
+   * <p>
+   * <b>Why a multiplicative factor and not an additive nudge like the boost?</b>
+   * The two signals act on opposite ends of the weight scale, so they are
+   * deliberately not identical in form:
+   * <ul>
+   *   <li>The boost acts on the <i>target</i>, which is cold and small (it
+   *       starts at ~{@code slotsToEvict} ≈ 1 slot). An additive {@code +1}
+   *       there is a large relative nudge ({@code 1 -> 2}) and is exactly the
+   *       "push past the next {@code ceil(EMA/slotSize)} boundary so it acquires
+   *       one slot" signal that broker needs.</li>
+   *   <li>The penalty acts on the <i>source</i>, which is hot and large (e.g.
+   *       24 slots). A mirrored {@code -1} would be a ~4% shift -- the same
+   *       negligible nudge the plain {@code slotsOwned[S] = remaining} decrement
+   *       already produces, which is the balance "treadmill" we are trying to
+   *       break. A proportional scale-down ({@code x0.5 -> 12}) shifts traffic
+   *       in proportion to how dominant the source is, which is what actually
+   *       moves load off it so its EMA falls and it releases instead of
+   *       re-acquiring the slot it just shed.</li>
+   * </ul>
+   * A factor {@code >= 1.0} (or a window {@code <= 0}) disables the penalty.
+   */
+  public static final String CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR =
+      "postEvictionSourcePenaltyFactor";
+  public static final double DEFAULT_POST_EVICTION_SOURCE_PENALTY_FACTOR = 0.5;
+
+  /**
+   * Window (milliseconds) over which the post-eviction source penalty applies,
+   * mirroring {@link #CONFIG_POST_EVICTION_ROUTING_BOOST_MS} for the boost.
+   * Kept as a separate knob so the boost and penalty windows are independent
+   * and each config is self-documenting (rather than the penalty silently
+   * borrowing the boost's window). Set to {@code 0} to disable the penalty.
+   */
+  public static final String CONFIG_POST_EVICTION_SOURCE_PENALTY_MS =
+      "postEvictionSourcePenaltyMs";
+  public static final long DEFAULT_POST_EVICTION_SOURCE_PENALTY_MS = 60_000L;
 
   private final NetworkClient networkClient;
   private long connectTimeout = 500;
@@ -132,6 +181,19 @@ public class MemqCommonClient implements Closeable {
   private final ConcurrentHashMap<String, Long> routingBoostUntilMs =
       new ConcurrentHashMap<>();
   private long postEvictionRoutingBoostMs = DEFAULT_POST_EVICTION_ROUTING_BOOST_MS;
+  /**
+   * Per-broker wall-clock millis until which {@link #rebuildWeightedMap} scales
+   * the broker's routing weight by {@link #postEvictionSourcePenaltyFactor}.
+   * Armed when the broker is the source of an eviction directive (symmetric to
+   * {@link #routingBoostUntilMs}). Lazily evaluated against {@code System
+   * .currentTimeMillis()} -- entries past their TTL behave like zero.
+   * See {@link #CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR}.
+   */
+  private final ConcurrentHashMap<String, Long> routingPenaltyUntilMs =
+      new ConcurrentHashMap<>();
+  private double postEvictionSourcePenaltyFactor =
+      DEFAULT_POST_EVICTION_SOURCE_PENALTY_FACTOR;
+  private long postEvictionSourcePenaltyMs = DEFAULT_POST_EVICTION_SOURCE_PENALTY_MS;
   // Sticky: flips to true the first time we observe a v4-only signal from any
   // broker (eviction directive or non-zero slot ownership). Once true, the
   // legacy numWriteEndpoints gates become no-ops and weighted selection
@@ -167,6 +229,14 @@ public class MemqCommonClient implements Closeable {
       if (networkProperties.containsKey(CONFIG_POST_EVICTION_ROUTING_BOOST_MS)) {
         this.postEvictionRoutingBoostMs = Math.max(0L, Long.parseLong(
             networkProperties.getProperty(CONFIG_POST_EVICTION_ROUTING_BOOST_MS)));
+      }
+      if (networkProperties.containsKey(CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR)) {
+        this.postEvictionSourcePenaltyFactor = Math.max(0.0, Double.parseDouble(
+            networkProperties.getProperty(CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR)));
+      }
+      if (networkProperties.containsKey(CONFIG_POST_EVICTION_SOURCE_PENALTY_MS)) {
+        this.postEvictionSourcePenaltyMs = Math.max(0L, Long.parseLong(
+            networkProperties.getProperty(CONFIG_POST_EVICTION_SOURCE_PENALTY_MS)));
       }
     }
     writeEndpoints = Collections.emptyList();
@@ -453,6 +523,7 @@ public class MemqCommonClient implements Closeable {
 
     slotsOwned.remove(ip);
     routingBoostUntilMs.remove(ip);
+    routingPenaltyUntilMs.remove(ip);
     failureCounts.keySet().removeIf(
         e -> e.getAddress().getHostString().equals(ip));
 
@@ -609,19 +680,32 @@ public class MemqCommonClient implements Closeable {
   }
 
   /**
-   * Per-broker routing weight: the broker's acknowledged slot count
-   * (with the legacy floor of 1) plus a {@code +1} boost when the broker
-   * is within its post-eviction routing-boost TTL.
+   * Per-broker routing weight: the broker's acknowledged slot count (with the
+   * legacy floor of 1), adjusted by the post-eviction routing signals -- a
+   * {@code +1} boost while the broker is an eviction target, or a
+   * {@link #postEvictionSourcePenaltyFactor} scaling (floored at 1) while it is
+   * an eviction source. A broker is never both at once.
    * <p>
    * Visible for test.
    */
   int effectiveWeight(String ip, long now) {
     int base = Math.max(slotsOwned.getOrDefault(ip, 1), 1);
-    return isRoutingBoostActive(ip, now) ? base + 1 : base;
+    if (isRoutingBoostActive(ip, now)) {
+      return base + 1;
+    }
+    if (isRoutingPenaltyActive(ip, now)) {
+      return Math.max(1, (int) Math.round(base * postEvictionSourcePenaltyFactor));
+    }
+    return base;
   }
 
   private boolean isRoutingBoostActive(String ip, long now) {
     Long until = routingBoostUntilMs.get(ip);
+    return until != null && until > now;
+  }
+
+  private boolean isRoutingPenaltyActive(String ip, long now) {
+    Long until = routingPenaltyUntilMs.get(ip);
     return until != null && until > now;
   }
 
@@ -637,12 +721,14 @@ public class MemqCommonClient implements Closeable {
       String ip = ep.getAddress().getHostString();
       int slots = Math.max(slotsOwned.getOrDefault(ip, 1), 1);
       boolean boosted = isRoutingBoostActive(ip, now);
-      int weight = boosted ? slots + 1 : slots;
+      boolean penalized = !boosted && isRoutingPenaltyActive(ip, now);
+      int weight = effectiveWeight(ip, now);
       int pct = (int) Math.round(100.0 * weight / totalSlots);
       sig.append(ip).append('=').append(weight).append(',');
       if (pretty.length() > 0) pretty.append(", ");
       pretty.append(ip).append('(').append(slots).append(" slots");
       if (boosted) pretty.append("+boost");
+      if (penalized) pretty.append("-penalty");
       pretty.append(", ").append(pct).append("%)");
     }
     String signature = sig.toString();
@@ -734,6 +820,7 @@ public class MemqCommonClient implements Closeable {
         synchronized (this) {
           slotsOwned.remove(ip);
           routingBoostUntilMs.remove(ip);
+          routingPenaltyUntilMs.remove(ip);
           reconcileWriteEndpoints();
         }
       } else {
@@ -897,9 +984,19 @@ public class MemqCommonClient implements Closeable {
       if (postEvictionRoutingBoostMs > 0 && targetIp != null) {
         routingBoostUntilMs.put(targetIp,
             System.currentTimeMillis() + postEvictionRoutingBoostMs);
+        // The target is being boosted, not penalized -- clear any stale penalty.
+        routingPenaltyUntilMs.remove(targetIp);
       }
       if (sourceIp != null) {
         routingBoostUntilMs.remove(sourceIp);
+        // Source penalty: scale the source's routing weight down for its own
+        // window so traffic actually moves off it (instead of the producer
+        // continuing to route the same share and the source just re-acquiring
+        // the slot it shed).
+        if (postEvictionSourcePenaltyMs > 0 && postEvictionSourcePenaltyFactor < 1.0) {
+          routingPenaltyUntilMs.put(sourceIp,
+              System.currentTimeMillis() + postEvictionSourcePenaltyMs);
+        }
       }
 
       // Enforce the maxConnections cap: if adding the target pushed us over the
@@ -998,6 +1095,7 @@ public class MemqCommonClient implements Closeable {
     if (victim != null) {
       slotsOwned.remove(victim);
       routingBoostUntilMs.remove(victim);
+      routingPenaltyUntilMs.remove(victim);
     }
     return victim;
   }
