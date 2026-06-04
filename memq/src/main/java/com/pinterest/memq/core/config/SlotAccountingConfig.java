@@ -84,7 +84,7 @@ public class SlotAccountingConfig {
    * to avoid stranding unfilled slots. Engage is fixed at a smoothed free-slot
    * count below 1.
    */
-  private double drainLatchDisengageFreeSlots = 2.0;
+  private double drainLatchDisengageFreeSlots = 4.0;
 
   /**
    * Maximum number of slots the broker will acquire or release for a single

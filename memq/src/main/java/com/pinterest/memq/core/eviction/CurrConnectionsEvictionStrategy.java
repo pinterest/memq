@@ -22,6 +22,8 @@ import com.pinterest.memq.core.slot.SlotManager;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -33,8 +35,34 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /**
- * Default eviction strategy. Picks the target broker first via a sequence
- * of guards, then chooses a producer to evict to it.
+ * Default eviction strategy. Picks the target broker first via load-balance
+ * guards, then chooses a producer to send there.
+ * <p>
+ * The strategy operates in two modes driven by the {@link SlotManager}'s drain
+ * latch:
+ * <ul>
+ *   <li><b>Routine mode</b> ({@code !drainLatched}): the broker is healthy and
+ *       evictions are about gentle rebalancing. Producers are sorted ascending
+ *       by source-slot count and the lightest are preferred -- a producer with
+ *       {@code 1} slot on the source naturally drops its source connection on
+ *       eviction (a "graceful swap"). The {@code maxConnectionsPerProducer}
+ *       cap is enforced: an eviction that would force a client-side connection
+ *       drop (producer at cap, target not in its set, source slots > 1) is
+ *       <i>refused</i> rather than dispatched. This avoids the "harmonic
+ *       dance" oscillation where forced drops repeatedly bounce the lightest
+ *       non-target connection between two brokers.</li>
+ *   <li><b>Drain mode</b> ({@code drainLatched}): the broker is saturated and
+ *       must shed load even at the cost of a connection drop. Producers are
+ *       sorted descending by source-slot count and the heaviest are preferred
+ *       -- moving a heavy, backpressured producer is what actually relieves
+ *       the saturation, since freeing a slot the heavy producer would just
+ *       reabsorb otherwise accomplishes nothing. The cap-violation check is
+ *       relaxed.</li>
+ * </ul>
+ * In both modes the top-{@code topNProducers} sorted candidates are picked
+ * uniformly at random, with "already connected to target" as the secondary
+ * tiebreaker. The randomization breaks deterministic cycles where the same
+ * (producer, source, target) triple is chosen tick after tick.
  * <p>
  * <b>Target broker filter (must pass all):</b>
  * <ol>
@@ -45,19 +73,14 @@ import java.util.stream.Collectors;
  *       a client-side metadata refresh + reconnect.</li>
  * </ol>
  * <b>Congestion check:</b> the local broker's free slots must be strictly
- * less than the mean free slots across the surviving target candidates.
+ * less than the mean free slots across <i>all</i> topic-sharing peers
+ * (including frozen and pending-cooldown ones, since they still represent
+ * load in the cluster shape).
  * <p>
- * <b>Target selection:</b> sort surviving targets by free slots (desc),
- * pick probabilistically from the top-N weighted by free slots. Then
- * verify the chosen target is strictly less loaded than us by more than
- * {@code evictionPercentageThreshold}.
- * <p>
- * <b>Producer selection:</b> among v4 producers that hold slots and write
- * to a topic the target broker serves, pick the one holding the most slots
- * (its share of the broker's throughput), since moving the heaviest producer
- * is what actually drains a saturated broker. A producer already connected to
- * the target is preferred (no new connection needed) unless an unconnected
- * producer is heavier by more than {@code heavyProducerSlotMargin} slots.
+ * <b>Target selection:</b> sort surviving target candidates by free slots
+ * (desc), pick probabilistically from the top-{@code topNTargets} weighted by
+ * free slots. Then verify the chosen target is strictly less loaded than us by
+ * more than {@code evictionPercentageThreshold}.
  * <p>
  * <b>v3 backward compatibility:</b> Only v4 producers are eviction
  * candidates -- {@code producerConnections} is populated exclusively from
@@ -94,7 +117,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     // serves locally. Both views derive from the same governor snapshot so
     // they are consistent within this tick.
     Map<String, Set<String>> brokerToTopics = invert(topicToBrokerIps);
-    Set<String> localTopics = brokerToTopics.getOrDefault(brokerId, java.util.Collections.emptySet());
+    Set<String> localTopics = brokerToTopics.getOrDefault(brokerId, Collections.emptySet());
 
     // Step 1: am I more loaded than the cluster? Compare local free slots to
     // the mean over the full load population -- every topic-sharing peer,
@@ -146,43 +169,12 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       return null;
     }
 
-    // Step 3: probabilistic top-N target selection. Prefer "swap-free" targets
-    // -- ones the producer we would evict is already connected to -- so the
-    // client does not have to drop a connection to honor maxConnections. This
-    // is a preference, not a blocker: broker balance is still the hard gate
-    // (only the already-valid candidates are considered), and if no swap-free
-    // target is viable we fall back to the best balancing target (accepting the
-    // client-side swap, which is the genuinely necessary case).
+    // Step 3: probabilistic top-N target selection, weighted by free slots so
+    // less loaded peers absorb more of the shedded traffic. Randomization
+    // within the top-N breaks deterministic cycles where the same target is
+    // chosen tick after tick.
     candidates.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
-
-    Map.Entry<String, Integer> target = null;
-    if (config.isPreferConnectedTarget() && !producerConnections.isEmpty()) {
-      List<Map.Entry<String, Integer>> swapFree = new ArrayList<>();
-      for (Map.Entry<String, Integer> candidate : candidates) {
-        Set<String> served = brokerToTopics.getOrDefault(candidate.getKey(),
-            java.util.Collections.emptySet());
-        String pid = pickProducer(slotManager, producerConnections, candidate.getKey(),
-            served, true);
-        if (pid != null
-            && producerConnections.getOrDefault(pid, java.util.Collections.emptySet())
-                .contains(candidate.getKey())) {
-          swapFree.add(candidate);
-        }
-      }
-      if (!swapFree.isEmpty()) {
-        Map.Entry<String, Integer> swapFreeTarget = selectTargetBroker(swapFree);
-        if (swapFreeTarget != null
-            && isViableTarget(swapFreeTarget.getValue(), localFreeSlots,
-                slotManager.getTotalSlots())) {
-          target = swapFreeTarget;
-        }
-      }
-    }
-
-    if (target == null) {
-      target = selectTargetBroker(candidates);
-    }
-
+    Map.Entry<String, Integer> target = selectTargetBroker(candidates);
     if (target == null) {
       logger.info("[" + brokerId + "] eviction skipped: target selection returned null");
       return null;
@@ -220,15 +212,21 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     // target broker serves -- otherwise the producer would be sent to a
     // broker that doesn't own its topic processor and would just REDIRECT.
     Set<String> targetServedTopics = brokerToTopics.getOrDefault(target.getKey(),
-        java.util.Collections.emptySet());
-
+        Collections.emptySet());
+    boolean drainMode = slotManager.isDrainLatched();
     String pidToEvict = pickProducer(slotManager, producerConnections, target.getKey(),
-        targetServedTopics, false);
+        targetServedTopics, drainMode);
 
     if (pidToEvict == null) {
-      logger.info("[" + brokerId + "] eviction skipped: no v4 producer holds slots on a topic"
-          + " served by target=" + target.getKey()
-          + " (registeredV4Producers=" + producerConnections.size()
+      // Two reasons this happens: (1) no producer writes to a topic served by
+      // the target, or (2) every producer-target pair would force a client
+      // connection drop and we are in routine mode. The next tick re-rolls
+      // the random target so a viable combination has another shot.
+      logger.info("[" + brokerId + "] eviction skipped: no eligible producer for target="
+          + target.getKey()
+          + " (drainMode=" + drainMode
+          + ", maxConnPerProducer=" + config.getMaxConnectionsPerProducer()
+          + ", registeredV4Producers=" + producerConnections.size()
           + ", targetServedTopics=" + targetServedTopics + ")");
       return null;
     }
@@ -238,6 +236,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     EvictionResult result = new EvictionResult(pidToEvict, target.getKey(), 1);
     logger.info("[" + brokerId + "] eviction decision: pid=" + pidToEvict
         + " target=" + target.getKey() + " slotsToEvict=1"
+        + " mode=" + (drainMode ? "drain" : "routine")
         + " (localFree=" + localFreeSlots + " targetFree=" + target.getValue()
         + " gap=" + String.format("%.2f", percentageDifference) + "%"
         + " v4Producers=" + producerConnections.size()
@@ -246,29 +245,38 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
   }
 
   /**
-   * Pick a producer to evict to {@code targetIp}. Constrained to v4 producers
-   * that hold slots on at least one topic the target broker serves. Among
-   * those, prefer producers that already have an active connection to the
-   * target (skips a new-connection setup on the producer side).
+   * Pick a producer to evict to {@code targetIp}.
+   * <ul>
+   *   <li>Eligibility: v4 producer with {@code > 0} source slots that writes to
+   *       a topic the target broker serves.</li>
+   *   <li>Routine mode ({@code !drainMode}): drop any producer whose eviction
+   *       would force a client connection drop. The producer must already be
+   *       below the {@code maxConnectionsPerProducer} cap, or the target must
+   *       already be in its connection set, or the eviction must naturally
+   *       drop the source connection ({@code sourceSlots == 1}).</li>
+   *   <li>Drain mode: keep cap-violating candidates -- the broker is
+   *       saturated and forcing a connection drop is the price of relief.</li>
+   *   <li>Sort: ascending source-slots in routine (prefer graceful swaps),
+   *       descending in drain (prefer impactful shifts). Connected-to-target
+   *       is the tiebreaker at equal slot count so swap-free moves win.</li>
+   *   <li>Pick uniformly at random from the top-{@code topNProducers}, so the
+   *       same producer is not deterministically targeted every tick.</li>
+   * </ul>
    */
   private String pickProducer(SlotManager slotManager,
                               Map<String, Set<String>> producerConnections,
                               String targetIp,
                               Set<String> targetServedTopics,
-                              boolean quiet) {
+                              boolean drainMode) {
     if (targetServedTopics.isEmpty()) {
       return null;
     }
-    // Track the heaviest eligible producer overall, and the heaviest one
-    // already connected to the target. Slots held are a proxy for the
-    // producer's share of the broker's (shaper-capped) throughput, so moving
-    // the heaviest producer is what actually drains a saturated broker.
-    String heaviestPid = null;
-    int heaviestSlots = 0;
-    String heaviestConnectedPid = null;
-    int heaviestConnectedSlots = 0;
+    int maxConns = config.getMaxConnectionsPerProducer();
+
+    List<ProducerCandidate> eligible = new ArrayList<>();
     for (Map.Entry<String, Set<String>> entry : producerConnections.entrySet()) {
       String pid = entry.getKey();
+      Set<String> conns = entry.getValue() != null ? entry.getValue() : Collections.emptySet();
       // Require real slot ownership, not just map presence. recordWrite
       // re-creates a zero-slot ProducerSlotState on every write, so a producer
       // that was evicted to 0 but keeps writing under backpressure still
@@ -282,54 +290,57 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       if (!writesToServedTopic(slotManager.getProducerTopics(pid), targetServedTopics)) {
         continue;
       }
-      if (slots > heaviestSlots) {
-        heaviestSlots = slots;
-        heaviestPid = pid;
+      boolean connectedToTarget = conns.contains(targetIp);
+      // Routine cap-violation skip: the producer is at the cap, the target is
+      // a fresh broker for it, and the eviction will not naturally drop the
+      // source connection. Picking it here would force the client to drop one
+      // of its existing connections, which is exactly the disruption the
+      // routine path is trying to avoid. Drain mode allows this disruption.
+      if (!drainMode
+          && maxConns > 0
+          && conns.size() >= maxConns
+          && !connectedToTarget
+          && slots > 1) {
+        continue;
       }
-      Set<String> conns = entry.getValue();
-      if (conns != null && conns.contains(targetIp) && slots > heaviestConnectedSlots) {
-        heaviestConnectedSlots = slots;
-        heaviestConnectedPid = pid;
-      }
+      eligible.add(new ProducerCandidate(pid, slots, connectedToTarget));
     }
-    if (heaviestPid == null) {
+    if (eligible.isEmpty()) {
       return null;
     }
-    // Prefer a producer already connected to the target (avoids a new
-    // producer-side connection) unless an unconnected producer is heavier by
-    // more than the configured margin -- in which case moving that heavier
-    // producer is worth the new connection because a lighter eviction's freed
-    // capacity would just be reabsorbed by the heavier, backpressured one.
-    if (heaviestConnectedPid != null
-        && heaviestConnectedSlots >= heaviestSlots - config.getHeavyProducerSlotMargin()) {
-      if (!quiet) {
-        logger.info("[" + brokerId + "] evicting pid=" + heaviestConnectedPid
-            + " (connected to target=" + targetIp + ", slots=" + heaviestConnectedSlots
-            + ", heaviestEligibleSlots=" + heaviestSlots + ")");
-      }
-      return heaviestConnectedPid;
-    }
-    if (!quiet) {
-      logger.info("[" + brokerId + "] evicting pid=" + heaviestPid
-          + " (heaviest eligible producer, slots=" + heaviestSlots
-          + ", not connected to target=" + targetIp + ")");
-    }
-    return heaviestPid;
+
+    // Primary sort: ascending by slots in routine (lightest first -> graceful
+    // swaps), descending in drain (heaviest first -> impactful shifts).
+    // Tiebreaker: connected-to-target before unconnected at equal slot count.
+    Comparator<ProducerCandidate> primary = drainMode
+        ? (a, b) -> Integer.compare(b.slots, a.slots)
+        : (a, b) -> Integer.compare(a.slots, b.slots);
+    Comparator<ProducerCandidate> tiebreaker =
+        (a, b) -> Boolean.compare(b.connectedToTarget, a.connectedToTarget);
+    eligible.sort(primary.thenComparing(tiebreaker));
+
+    int topN = Math.min(Math.max(1, config.getTopNProducers()), eligible.size());
+    ProducerCandidate chosen = eligible.get(ThreadLocalRandom.current().nextInt(topN));
+    logger.info("[" + brokerId + "] picking producer: pid=" + chosen.pid
+        + " slots=" + chosen.slots
+        + " connectedToTarget=" + chosen.connectedToTarget
+        + " mode=" + (drainMode ? "drain" : "routine")
+        + " topN=" + topN
+        + " eligible=" + eligible.size()
+        + " target=" + targetIp);
+    return chosen.pid;
   }
 
-  /**
-   * A target is viable for eviction if it has strictly more free slots than us
-   * and the gap exceeds the configured percentage threshold. Mirrors the Step 4
-   * checks; used to validate a swap-free target before preferring it (quietly,
-   * so the verbose skip diagnostics only fire on the final fallback target).
-   */
-  private boolean isViableTarget(int targetFreeSlots, int localFreeSlots, int totalSlots) {
-    if (targetFreeSlots <= localFreeSlots) {
-      return false;
+  private static final class ProducerCandidate {
+    final String pid;
+    final int slots;
+    final boolean connectedToTarget;
+
+    ProducerCandidate(String pid, int slots, boolean connectedToTarget) {
+      this.pid = pid;
+      this.slots = slots;
+      this.connectedToTarget = connectedToTarget;
     }
-    double percentageDifference =
-        (double) Math.abs(localFreeSlots - targetFreeSlots) / totalSlots * 100;
-    return percentageDifference > config.getEvictionPercentageThreshold();
   }
 
   private static boolean writesToServedTopic(Collection<String> producerTopics,

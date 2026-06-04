@@ -30,6 +30,7 @@ import com.pinterest.memq.core.slot.SlotManager;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
@@ -80,6 +81,19 @@ public class TestCurrConnectionsEvictionStrategy {
     Method tick = SlotManager.class.getDeclaredMethod("tick");
     tick.setAccessible(true);
     tick.invoke(sm);
+  }
+
+  /**
+   * Drain-mode tests need the latch engaged. The latch EMA decays slowly by
+   * design (so a single eviction's brief free-slot spike cannot disengage it),
+   * which makes natural engagement in unit tests prohibitively slow -- so the
+   * test forces it via reflection. Production engagement is exercised by
+   * {@code TestSlotManagerDrainLatch}.
+   */
+  private static void setDrainLatched(SlotManager sm, boolean latched) throws Exception {
+    Field f = SlotManager.class.getDeclaredField("drainLatched");
+    f.setAccessible(true);
+    f.set(sm, latched);
   }
 
   private Map<String, GossipState> peerWithFreeSlots(String peerId, int freeSlots) {
@@ -293,29 +307,31 @@ public class TestCurrConnectionsEvictionStrategy {
   }
 
   @Test
-  public void testEvictsHeavyUnconnectedProducerOverLightConnected() throws Exception {
-    // The heavy producer drives saturation; a light producer connected to the
-    // target must NOT shield it. When the unconnected producer is heavier than
-    // the connected one by more than the margin, evict the heavy one even
-    // though it costs a new producer-side connection -- otherwise the light
-    // eviction's freed slot is just reabsorbed by the heavy, backpressured one.
+  public void testRoutineModeEvictsLightestProducerForGracefulSwap() throws Exception {
+    // Routine mode (drain latch not engaged) sorts producers ascending by
+    // source-slot count. The lightest producer is preferred so the eviction
+    // is a "graceful swap" -- ideally a producer with a single source slot,
+    // whose connection naturally drops on eviction with no client-side
+    // disruption. The heavy producer is intentionally NOT picked in routine
+    // mode, even though it holds far more of the saturated broker's load,
+    // because moving it would force a client connection drop (against the
+    // maxConnectionsPerProducer cap) if it is also at the cap.
     SlotManager sm = createSlotManager(20);
 
-    // Both producers must record demand within the same tick so they hold
-    // slots simultaneously (the test EMA window is ~instant, so an idle tick
-    // would decay a producer back to zero slots).
     sm.recordWrite("heavy", TOPIC, 150 * MB);   // ceil(150/10)=15 slots
     sm.recordWrite("light", TOPIC, 15 * MB);    // ceil(15/10)=2 slots
     tickOnce(sm);
     assertTrue(sm.getTotalProducerSlots("heavy") > 10);
     assertTrue(sm.getTotalProducerSlots("light") > 0);
 
-    // Heavy connected only to a non-target broker; light connected to target.
     sm.recordProducerConnections("heavy",
         new HashSet<>(Collections.singletonList("broker-3")));
     sm.recordProducerConnections("light",
         new HashSet<>(Collections.singletonList("broker-2")));
 
+    // Deterministic pick: topNProducers=1 so the (ascending) top is always
+    // chosen, no random jitter. The wider-topN behavior is covered separately.
+    evictionConfig.setTopNProducers(1);
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
 
@@ -325,45 +341,144 @@ public class TestCurrConnectionsEvictionStrategy {
         sm.getProducerConnections(), allPeersServeTopic(peers));
 
     assertNotNull(result);
-    assertEquals("must evict the heavy producer, not the light connected one",
+    assertEquals("routine mode picks the lightest producer for a graceful swap",
+        "light", result.getPid());
+  }
+
+  @Test
+  public void testDrainModeEvictsHeaviestProducer() throws Exception {
+    // Drain mode (drain latch engaged) sorts producers descending by
+    // source-slot count. The heaviest is preferred because the broker is
+    // saturated and only shifting a meaningful share of the load relieves
+    // pressure -- evicting a light producer just lets the heavy one
+    // reabsorb the freed slot.
+    SlotManager sm = createSlotManager(20);
+
+    sm.recordWrite("heavy", TOPIC, 150 * MB);
+    sm.recordWrite("light", TOPIC, 15 * MB);
+    tickOnce(sm);
+    sm.recordProducerConnections("heavy",
+        new HashSet<>(Collections.singletonList("broker-3")));
+    sm.recordProducerConnections("light",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    // Force drain mode (production engages it via slow EMA; test bypasses).
+    setDrainLatched(sm, true);
+
+    evictionConfig.setTopNProducers(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull(result);
+    assertEquals("drain mode picks the heaviest producer to shift real load",
         "heavy", result.getPid());
   }
 
   @Test
-  public void testPrefersConnectedProducerWithinSlotMargin() throws Exception {
-    // When the connected producer is within the margin of the heaviest, keep
-    // the cheap behavior: evict the already-connected one (no new connection).
+  public void testRoutineModeSkipsCapViolatingEviction() throws Exception {
+    // The candidate producer is already at the cap and holds multiple source
+    // slots; the chosen target is a broker outside its connection set.
+    // Evicting it would force the client to drop one of its existing
+    // connections. Routine mode refuses the move so the producer keeps its
+    // connections; the broker waits for a graceful-swap opportunity instead.
+    // A non-v4 "filler" producer holds the rest of the slots so that the
+    // congestion check passes (localFree < mean) and the eviction flow
+    // actually reaches the cap-skip rule we are exercising here.
     SlotManager sm = createSlotManager(20);
-
-    // Unconnected slightly heavier (5 slots) than connected (4 slots) -- diff
-    // of 1 is within the default margin of 2, so the connected producer wins.
-    sm.recordWrite("unconnected", TOPIC, 50 * MB); // ceil(50/10)=5
-    sm.recordWrite("connected", TOPIC, 40 * MB);   // ceil(40/10)=4
+    // Both writes must land within the same tick so both producers hold
+    // slots simultaneously (the test EMA window is ~instant, so a tick
+    // between them would decay the earlier producer back to zero slots).
+    sm.recordWrite("filler", TOPIC, 150 * MB);              // 15 slots, no v4 conns
+    sm.recordWrite("at-cap", TOPIC, 50 * MB);               // 5 slots, v4 candidate
     tickOnce(sm);
-    assertEquals(5, sm.getTotalProducerSlots("unconnected"));
-    assertEquals(4, sm.getTotalProducerSlots("connected"));
+    assertTrue(sm.getTotalProducerSlots("at-cap") > 1);
 
-    sm.recordProducerConnections("unconnected",
-        new HashSet<>(Collections.singletonList("broker-3")));
-    sm.recordProducerConnections("connected",
-        new HashSet<>(Collections.singletonList("broker-2")));
+    Set<String> existingConns = new HashSet<>();
+    existingConns.add("broker-X");
+    existingConns.add("broker-Y");
+    existingConns.add("broker-Z");
+    sm.recordProducerConnections("at-cap", existingConns);
 
+    evictionConfig.setMaxConnectionsPerProducer(3);
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
 
     Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 18);
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
 
-    boolean fired = false;
-    for (int i = 0; i < 20; i++) {
-      EvictionResult result = strategy.evaluate(sm, peers,
-          sm.getProducerConnections(), allPeersServeTopic(peers));
-      if (result != null) {
-        fired = true;
-        assertEquals("within margin, prefer the connected producer",
-            "connected", result.getPid());
-      }
-    }
-    assertTrue("eviction should have fired at least once", fired);
+    assertNull("routine mode must refuse evictions that would force a connection drop",
+        result);
+  }
+
+  @Test
+  public void testDrainModeAllowsCapViolatingEviction() throws Exception {
+    // Same setup as testRoutineModeSkipsCapViolatingEviction, but the drain
+    // latch is engaged. The broker is saturated and must shed load even at
+    // the cost of a client-side connection drop, so the cap-skip rule is
+    // relaxed and eviction proceeds.
+    SlotManager sm = createSlotManager(20);
+    sm.recordWrite("filler", TOPIC, 150 * MB);
+    sm.recordWrite("at-cap", TOPIC, 50 * MB);
+    tickOnce(sm);
+
+    Set<String> existingConns = new HashSet<>();
+    existingConns.add("broker-X");
+    existingConns.add("broker-Y");
+    existingConns.add("broker-Z");
+    sm.recordProducerConnections("at-cap", existingConns);
+
+    setDrainLatched(sm, true);
+
+    evictionConfig.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 18);
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull("drain mode must allow cap-violating evictions to relieve saturation",
+        result);
+    assertEquals("at-cap", result.getPid());
+  }
+
+  @Test
+  public void testRoutineModeAllowsGracefulSwapAtCap() throws Exception {
+    // The producer is at the cap but holds only one source slot, so the
+    // eviction will naturally drop the source connection and the connection
+    // count stays at or below the cap. This is the "graceful swap" routine
+    // mode is specifically structured to prefer -- it must not be skipped
+    // even though target is not in the connection set. As above, a non-v4
+    // filler producer drives the congestion check.
+    SlotManager sm = createSlotManager(20);
+    sm.recordWrite("filler", TOPIC, 150 * MB);
+    sm.recordWrite("one-slot", TOPIC, 5 * MB);
+    tickOnce(sm);
+    assertEquals(1, sm.getTotalProducerSlots("one-slot"));
+
+    Set<String> existingConns = new HashSet<>();
+    existingConns.add("broker-X");
+    existingConns.add("broker-Y");
+    existingConns.add("broker-Z");
+    sm.recordProducerConnections("one-slot", existingConns);
+
+    evictionConfig.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 18);
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull("graceful swap (1 source slot) must not be blocked by cap check",
+        result);
+    assertEquals("one-slot", result.getPid());
   }
 
   @Test
@@ -624,13 +739,15 @@ public class TestCurrConnectionsEvictionStrategy {
 
   @Test
   public void testPrefersProducerConnectedToTarget() throws Exception {
+    // Two producers with equal source-slot counts -- the connected-to-target
+    // producer wins via the secondary tiebreaker. topNProducers=1 makes the
+    // pick deterministic regardless of the random jitter that would otherwise
+    // spread choices across the top-N.
     SlotManager sm = createSlotManager(20);
 
-    // Two v4 producers, both with slots
     acquireSlots(sm, "connected-producer", TOPIC, 50);
     acquireSlots(sm, "unconnected-producer", TOPIC, 50);
 
-    // Only connected-producer is connected to the target broker
     sm.recordProducerConnections("connected-producer",
         new HashSet<>(Collections.singletonList("broker-2")));
     sm.recordProducerConnections("unconnected-producer",
@@ -641,6 +758,7 @@ public class TestCurrConnectionsEvictionStrategy {
     config.setEvictionPercentageThreshold(0.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(1);
+    config.setTopNProducers(1);
 
 
     CurrConnectionsEvictionStrategy strategy =
@@ -651,7 +769,7 @@ public class TestCurrConnectionsEvictionStrategy {
     for (int i = 0; i < 100; i++) {
       EvictionResult result = strategy.evaluate(sm, peers, sm.getProducerConnections(), allPeersServeTopic(peers));
       if (result != null) {
-        assertEquals("should always prefer the producer connected to target",
+        assertEquals("at equal slot count the connected-to-target producer wins via tiebreaker",
             "connected-producer", result.getPid());
       }
     }
@@ -909,12 +1027,12 @@ public class TestCurrConnectionsEvictionStrategy {
   }
 
   @Test
-  public void testPrefersSwapFreeTargetWhenHeavyProducerConnected() throws Exception {
-    // Local broker is congested. Two valid targets: broker-1 is colder
-    // (the pure-balance choice) but the producer is NOT connected to it;
-    // broker-2 is warmer but the producer IS connected to it. The strategy
-    // must prefer the swap-free target (broker-2) so the client need not drop
-    // a connection to honor maxConnections.
+  public void testEvictsProducerWhenLocalCongestedRegardlessOfTarget() throws Exception {
+    // Local broker is congested; either peer is a valid target. Target picks
+    // are weighted random over the top-N, so we don't assert which target is
+    // chosen -- only that an eviction fires and routes the single eligible
+    // producer somewhere meaningful. Cap is not violated (producer holds 1
+    // connection, well under the default cap), so routine mode does not skip.
     SlotManager sm = createSlotManager(32);
     acquireSlots(sm, "heavy", TOPIC, 200); // ~20 slots -> localFree ~12
     sm.recordProducerConnections("heavy",
@@ -934,9 +1052,10 @@ public class TestCurrConnectionsEvictionStrategy {
         sm.getProducerConnections(), allPeersServeTopic(peers));
 
     assertNotNull(result);
-    assertEquals("must prefer the swap-free target the producer is connected to",
-        "broker-2", result.getTargetBrokerIp());
     assertEquals("heavy", result.getPid());
+    assertTrue("target must be one of the two candidates",
+        "broker-1".equals(result.getTargetBrokerIp())
+            || "broker-2".equals(result.getTargetBrokerIp()));
   }
 
   @Test

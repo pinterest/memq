@@ -163,13 +163,12 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
-  public void testCapKeepsHeavySourceDropsLightestNonTarget() throws Exception {
-    // maxConnections = 3, current [broker_0: 2, broker_1: 10, broker_2: 20].
-    // broker_2 (the heavy source) evicts 1 slot to a brand-new target broker_4,
-    // pushing the set to size 4. The cap must be honored by dropping the
-    // *lightest non-target* connection (broker_0, 2 slots) -- NOT the source,
-    // which still owns 19 slots -- and without fabricating a redistribution of
-    // the dropped broker's slots onto the survivors.
+  public void testEvictionAddsTargetWithoutDroppingExistingConnections() throws Exception {
+    // The producer-side cap was removed in favor of broker-side enforcement
+    // (EvictionConfig.maxConnectionsPerProducer): the broker refuses to evict
+    // to a target that would push the producer over the cap in routine mode,
+    // so a client receiving an eviction directive simply records the new
+    // target and reconciles. No connection swap is fabricated.
     Properties props = new Properties();
     props.setProperty("numWriteEndpoints", "3");
     MemqCommonClient c = new MemqCommonClient(null, props);
@@ -179,89 +178,6 @@ public class TestWeightedEndpointSelection {
     eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
     c.initialize(eps);
     setWriteEndpoints(c, new ArrayList<>(eps));
-    c.setMaxConnections(3);
-
-    c.getSlotsOwned().put("10.0.0.0", 2);
-    c.getSlotsOwned().put("10.0.0.1", 10);
-    c.getSlotsOwned().put("10.0.0.2", 20);
-
-    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.2", 9092);
-    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.4", 1, 19);
-    c.handleWriteResponse(eviction, sourceAddr);
-
-    Map<String, Integer> result = c.getSlotsOwned();
-    assertEquals("Connection count must be capped at maxConnections", 3, result.size());
-    assertFalse("Lightest non-target connection must be dropped",
-        result.containsKey("10.0.0.0"));
-    assertTrue("Heavy evicting source must be retained", result.containsKey("10.0.0.2"));
-    assertTrue("Eviction target must be present", result.containsKey("10.0.0.4"));
-
-    // No fabrication: survivors keep their real counts; the dropped broker's
-    // slots are NOT sprayed onto them.
-    assertEquals("Source keeps its remaining slots", 19, (int) result.get("10.0.0.2"));
-    assertEquals("Survivor count must be unchanged (no fabrication)",
-        10, (int) result.get("10.0.0.1"));
-    assertEquals("Target carries only the evicted slot", 1, (int) result.get("10.0.0.4"));
-
-    // writeEndpoints reflects the change: dropped broker out, target in.
-    boolean targetInWrites = c.currentWriteEndpoints().stream()
-        .anyMatch(e -> e.getAddress().getHostString().equals("10.0.0.4"));
-    boolean droppedInWrites = c.currentWriteEndpoints().stream()
-        .anyMatch(e -> e.getAddress().getHostString().equals("10.0.0.0"));
-    assertTrue("Target must be a write endpoint", targetInWrites);
-    assertFalse("Dropped broker must be removed from write endpoints", droppedInWrites);
-    assertEquals(3, c.currentWriteEndpoints().size());
-
-    c.close();
-  }
-
-  @Test
-  public void testCapNeverDropsEvictionTarget() throws Exception {
-    // Even when the eviction target is the globally lightest entry (it starts at
-    // just the evicted slot count), the cap must never drop the target itself --
-    // it drops the lightest *other* connection instead.
-    Properties props = new Properties();
-    props.setProperty("numWriteEndpoints", "3");
-    MemqCommonClient c = new MemqCommonClient(null, props);
-    List<Endpoint> eps = new ArrayList<>();
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.0", 9092)));
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
-    c.initialize(eps);
-    setWriteEndpoints(c, new ArrayList<>(eps));
-    c.setMaxConnections(3);
-
-    c.getSlotsOwned().put("10.0.0.0", 5);
-    c.getSlotsOwned().put("10.0.0.1", 6);
-    c.getSlotsOwned().put("10.0.0.2", 7);
-
-    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.2", 9092);
-    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.9", 1, 6);
-    c.handleWriteResponse(eviction, sourceAddr);
-
-    Map<String, Integer> result = c.getSlotsOwned();
-    assertEquals(3, result.size());
-    assertTrue("Eviction target must never be dropped", result.containsKey("10.0.0.9"));
-    assertEquals("Target carries only the evicted slot", 1, (int) result.get("10.0.0.9"));
-    assertFalse("Lightest non-target must be dropped", result.containsKey("10.0.0.0"));
-    c.close();
-  }
-
-  @Test
-  public void testEvictionWithoutMaxConnectionsKeepsSourceWhenRemainingPositive()
-      throws Exception {
-    Properties props = new Properties();
-    props.setProperty("numWriteEndpoints", "3");
-    // Explicitly opt out of the cap (default is 3); we want unbounded growth here.
-    props.setProperty(MemqCommonClient.CONFIG_MAX_CONNECTIONS, "0");
-    MemqCommonClient c = new MemqCommonClient(null, props);
-    List<Endpoint> eps = new ArrayList<>();
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.0", 9092)));
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
-    c.initialize(eps);
-    setWriteEndpoints(c, new ArrayList<>(eps));
-    // maxConnections == 0 means unbounded — no swap should happen.
 
     c.getSlotsOwned().put("10.0.0.0", 10);
     c.getSlotsOwned().put("10.0.0.1", 10);
@@ -272,9 +188,11 @@ public class TestWeightedEndpointSelection {
     c.handleWriteResponse(eviction, sourceAddr);
 
     Map<String, Integer> result = c.getSlotsOwned();
-    assertEquals("Without maxConnections cap, set may grow", 4, result.size());
-    assertEquals(9, (int) result.get("10.0.0.2"));
-    assertEquals(1, (int) result.get("10.0.0.4"));
+    assertEquals("Eviction adds the target without dropping survivors", 4, result.size());
+    assertEquals("Source retains its remaining slot count", 9, (int) result.get("10.0.0.2"));
+    assertEquals("Target carries the evicted slot", 1, (int) result.get("10.0.0.4"));
+    assertEquals("Survivors are untouched", 10, (int) result.get("10.0.0.0"));
+    assertEquals("Survivors are untouched", 10, (int) result.get("10.0.0.1"));
     c.close();
   }
 
@@ -454,44 +372,14 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
-  public void testMaxConnectionsDefaultMatchesConstant() throws Exception {
-    MemqCommonClient c = new MemqCommonClient(null, new Properties());
-    Field f = MemqCommonClient.class.getDeclaredField("maxConnections");
-    f.setAccessible(true);
-    assertEquals("Default maxConnections must match DEFAULT_MAX_CONNECTIONS",
-        MemqCommonClient.DEFAULT_MAX_CONNECTIONS, ((Integer) f.get(c)).intValue());
-    c.close();
-  }
-
-  @Test
-  public void testMaxConnectionsConfigurableViaProperties() throws Exception {
-    Properties props = new Properties();
-    props.setProperty(MemqCommonClient.CONFIG_MAX_CONNECTIONS, "7");
-    MemqCommonClient c = new MemqCommonClient(null, props);
-    Field f = MemqCommonClient.class.getDeclaredField("maxConnections");
-    f.setAccessible(true);
-    assertEquals(7, ((Integer) f.get(c)).intValue());
-    c.close();
-  }
-
-  @Test
-  public void testMaxConnectionsZeroDisablesCap() throws Exception {
-    Properties props = new Properties();
-    props.setProperty(MemqCommonClient.CONFIG_MAX_CONNECTIONS, "0");
-    MemqCommonClient c = new MemqCommonClient(null, props);
-    Field f = MemqCommonClient.class.getDeclaredField("maxConnections");
-    f.setAccessible(true);
-    assertEquals("0 must be honored verbatim (means unbounded)", 0, ((Integer) f.get(c)).intValue());
-    c.close();
-  }
-
-  @Test
   public void testRoutingBoostActiveAfterEvictionToTarget() throws Exception {
     // After the producer receives an eviction directive routing one slot to
     // a new target, the target must get a +1 routing weight on top of its
     // (now optimistically incremented) slotsOwned count, so the producer
     // over-routes there long enough for the target broker to actually
-    // acquire the slot.
+    // acquire the slot. The eviction source keeps its plain slotsOwned weight
+    // (the broker-side cooldown and the producer's natural routing decay are
+    // what move load off it -- no client-side source penalty is applied).
     setWriteEndpoints(client, new ArrayList<>(endpoints));
     client.getSlotsOwned().put("10.0.0.1", 11);
     client.getSlotsOwned().put("10.0.0.2", 1);
@@ -504,114 +392,12 @@ public class TestWeightedEndpointSelection {
     // Target's effective routing weight must include the +1 boost.
     assertEquals("target gets slotsOwned (2 after merge) + 1 boost",
         3, client.effectiveWeight("10.0.0.2", before + 1));
-    // The evicting source is penalized (default factor 0.5): 10 -> 5.
-    assertEquals("source weight is scaled down by the post-eviction penalty",
-        5, client.effectiveWeight("10.0.0.1", before + 1));
+    // Source weight reflects the decrement reported in numSlotsOwned but is
+    // not further penalized.
+    assertEquals("source weight is the decremented slotsOwned, no penalty",
+        10, client.effectiveWeight("10.0.0.1", before + 1));
     // Brokers uninvolved in the eviction are unaffected.
     assertEquals(1, client.effectiveWeight("10.0.0.3", before + 1));
-  }
-
-  @Test
-  public void testSourcePenaltyScalesDownEvictingSourceWeight() throws Exception {
-    // The evicting source's routing weight must be scaled down so traffic
-    // actually moves off it, instead of staying put and re-acquiring the slot.
-    Properties props = new Properties();
-    props.setProperty("numWriteEndpoints", "3");
-    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR, "0.5");
-    MemqCommonClient c = new MemqCommonClient(null, props);
-    List<Endpoint> eps = new ArrayList<>();
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
-    c.initialize(eps);
-    setWriteEndpoints(c, new ArrayList<>(eps));
-    c.getSlotsOwned().put("10.0.0.1", 24);
-    c.getSlotsOwned().put("10.0.0.2", 4);
-
-    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    c.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 24), sourceAddr);
-
-    long now = System.currentTimeMillis();
-    assertEquals("source weight scaled by 0.5: 24 -> 12",
-        12, c.effectiveWeight("10.0.0.1", now));
-    assertEquals("target keeps slotsOwned (5 after merge) + 1 boost",
-        6, c.effectiveWeight("10.0.0.2", now));
-    c.close();
-  }
-
-  @Test
-  public void testSourcePenaltyDisabledWhenFactorIsOne() throws Exception {
-    // factor >= 1.0 disables the penalty: source weight is plain slotsOwned.
-    Properties props = new Properties();
-    props.setProperty("numWriteEndpoints", "3");
-    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR, "1.0");
-    MemqCommonClient c = new MemqCommonClient(null, props);
-    List<Endpoint> eps = new ArrayList<>();
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
-    c.initialize(eps);
-    setWriteEndpoints(c, new ArrayList<>(eps));
-    c.getSlotsOwned().put("10.0.0.1", 24);
-    c.getSlotsOwned().put("10.0.0.2", 4);
-
-    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    c.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 24), sourceAddr);
-
-    long now = System.currentTimeMillis();
-    assertEquals("penalty disabled: source weight unchanged at 24",
-        24, c.effectiveWeight("10.0.0.1", now));
-    c.close();
-  }
-
-  @Test
-  public void testSourcePenaltyExpiresAfterTtl() throws Exception {
-    Properties props = new Properties();
-    props.setProperty("numWriteEndpoints", "3");
-    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_MS, "50");
-    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR, "0.5");
-    MemqCommonClient c = new MemqCommonClient(null, props);
-    List<Endpoint> eps = new ArrayList<>();
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
-    c.initialize(eps);
-    setWriteEndpoints(c, new ArrayList<>(eps));
-    c.getSlotsOwned().put("10.0.0.1", 24);
-    c.getSlotsOwned().put("10.0.0.2", 4);
-
-    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    c.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 24), sourceAddr);
-
-    assertEquals("inside window: penalty active", 12,
-        c.effectiveWeight("10.0.0.1", System.currentTimeMillis()));
-
-    Thread.sleep(80);
-    assertEquals("after TTL: penalty gone, full slotsOwned weight",
-        24, c.effectiveWeight("10.0.0.1", System.currentTimeMillis()));
-    c.close();
-  }
-
-  @Test
-  public void testSourcePenaltyDisabledWhenWindowIsZero() throws Exception {
-    // The penalty window is independent of the boost window: a zero penalty
-    // window disables the penalty even with a penalizing factor.
-    Properties props = new Properties();
-    props.setProperty("numWriteEndpoints", "3");
-    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_MS, "0");
-    props.setProperty(MemqCommonClient.CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR, "0.5");
-    MemqCommonClient c = new MemqCommonClient(null, props);
-    List<Endpoint> eps = new ArrayList<>();
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
-    c.initialize(eps);
-    setWriteEndpoints(c, new ArrayList<>(eps));
-    c.getSlotsOwned().put("10.0.0.1", 24);
-    c.getSlotsOwned().put("10.0.0.2", 4);
-
-    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    c.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 1, 24), sourceAddr);
-
-    assertEquals("zero penalty window disables the penalty",
-        24, c.effectiveWeight("10.0.0.1", System.currentTimeMillis()));
-    c.close();
   }
 
   @Test
@@ -664,7 +450,8 @@ public class TestWeightedEndpointSelection {
     InetSocketAddress fromB = InetSocketAddress.createUnresolved("10.0.0.2", 9092);
     client.handleWriteResponse(new WriteResponsePacket("10.0.0.3", 1, 1), fromB);
     long now2 = System.currentTimeMillis();
-    assertEquals("B's boost must be cleared once it acts as eviction source",
+    assertEquals("B's boost must be cleared once it acts as eviction source"
+        + " (slotsOwned is now 1 with no boost)",
         1, client.effectiveWeight("10.0.0.2", now2));
     assertEquals("C gets the new boost (slotsOwned 2 + 1)",
         3, client.effectiveWeight("10.0.0.3", now2));
@@ -715,36 +502,6 @@ public class TestWeightedEndpointSelection {
     Field f = MemqCommonClient.class.getDeclaredField("postEvictionRoutingBoostMs");
     f.setAccessible(true);
     assertEquals(12345L, ((Long) f.get(c)).longValue());
-    c.close();
-  }
-
-  @Test
-  public void testExplicitMaxConnectionsCapsConnectionGrowth() throws Exception {
-    Properties props = new Properties();
-    props.setProperty("numWriteEndpoints", "3");
-    props.setProperty(MemqCommonClient.CONFIG_MAX_CONNECTIONS, "3");
-    MemqCommonClient c = new MemqCommonClient(null, props);
-    List<Endpoint> eps = new ArrayList<>();
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.0", 9092)));
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.1", 9092)));
-    eps.add(new Endpoint(InetSocketAddress.createUnresolved("10.0.0.2", 9092)));
-    c.initialize(eps);
-    setWriteEndpoints(c, new ArrayList<>(eps));
-
-    c.getSlotsOwned().put("10.0.0.0", 10);
-    c.getSlotsOwned().put("10.0.0.1", 10);
-    c.getSlotsOwned().put("10.0.0.2", 10);
-
-    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.2", 9092);
-    WriteResponsePacket eviction = new WriteResponsePacket("10.0.0.4", 1, 9);
-    c.handleWriteResponse(eviction, sourceAddr);
-
-    Map<String, Integer> result = c.getSlotsOwned();
-    assertEquals("Cap of 3 must trigger swap when adding 4th broker", 3, result.size());
-    assertFalse("Evicting source must be dropped on cap-violating eviction",
-        result.containsKey("10.0.0.2"));
-    assertTrue("New target must be present after swap",
-        result.containsKey("10.0.0.4"));
     c.close();
   }
 

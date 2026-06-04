@@ -25,8 +25,8 @@ public class EvictionConfig {
   private double evictionPercentageThreshold = 10.0;
   private double pendingEvictionCooldownSeconds = 10.0;
   private int topNTargets = 3;
-  private int heavyProducerSlotMargin = 2;
-  private boolean preferConnectedTarget = true;
+  private int topNProducers = 3;
+  private int maxConnectionsPerProducer = 3;
 
   public boolean isEnabled() {
     return enabled;
@@ -77,39 +77,49 @@ public class EvictionConfig {
   }
 
   /**
-   * How many more slots an unconnected producer must hold than the heaviest
-   * producer already connected to the eviction target before the strategy
-   * will prefer it (and incur a new producer-side connection). This keeps the
-   * cheap "evict a producer already connected to the target" behavior for
-   * roughly balanced producers, while still letting the strategy target a
-   * materially heavier producer -- moving the heavy producer is what actually
-   * drains a saturated broker, since a backpressured heavy producer otherwise
-   * just reabsorbs whatever slot a lighter eviction frees. A very large value
-   * restores the old "always prefer connected" behavior.
+   * Size of the producer top-N for randomized picking inside the eviction
+   * strategy. Within the top-N (sorted ascending by source slots in routine
+   * mode, descending in drain mode) the strategy picks uniformly at random.
+   * Setting this to 1 makes producer selection deterministic. Larger values
+   * spread evictions across roughly equivalent producers, breaking the
+   * deterministic two-body cycles that produced the connection "harmonic
+   * dance" against a single victim broker.
    */
-  public int getHeavyProducerSlotMargin() {
-    return heavyProducerSlotMargin;
+  public int getTopNProducers() {
+    return topNProducers;
   }
 
-  public void setHeavyProducerSlotMargin(int heavyProducerSlotMargin) {
-    this.heavyProducerSlotMargin = heavyProducerSlotMargin;
+  public void setTopNProducers(int topNProducers) {
+    this.topNProducers = topNProducers;
   }
 
   /**
-   * When true (default), eviction prefers a target broker that the producer it
-   * would evict is already connected to, so the producer does not have to drop
-   * an existing connection to honor its client-side {@code maxConnections} cap.
-   * Broker balance remains the hard gate -- only already-valid candidate targets
-   * are considered, and a swap-requiring target is still chosen when no
-   * swap-free target relieves congestion. A large {@code heavyProducerSlotMargin}
-   * combined with this restores connection-affinity-first behavior.
+   * Cluster-wide cap on how many distinct broker connections a single producer
+   * should hold. This is the broker-side authority for what was previously
+   * enforced on the producer as {@code maxConnections}. The strategy uses it
+   * two ways:
+   * <ul>
+   *   <li><b>Routine mode (drain latch not engaged):</b> if an eviction would
+   *       push a producer above this cap (it is already at the cap, the chosen
+   *       target is not in its connection set, and it would still own slots on
+   *       this broker after the eviction), the strategy refuses the move so
+   *       the producer is not forced to drop one of its existing connections.
+   *       It instead waits for a "graceful swap" — a producer whose source-slot
+   *       count would naturally drop to zero on eviction, releasing the source
+   *       connection without ever exceeding the cap.</li>
+   *   <li><b>Drain mode (drain latch engaged):</b> the broker is saturated and
+   *       must shed load even at the cost of a connection drop, so the cap
+   *       check is relaxed and the strategy picks the heaviest producer in
+   *       the top-N regardless.</li>
+   * </ul>
+   * A value {@code <= 0} disables the cap entirely.
    */
-  public boolean isPreferConnectedTarget() {
-    return preferConnectedTarget;
+  public int getMaxConnectionsPerProducer() {
+    return maxConnectionsPerProducer;
   }
 
-  public void setPreferConnectedTarget(boolean preferConnectedTarget) {
-    this.preferConnectedTarget = preferConnectedTarget;
+  public void setMaxConnectionsPerProducer(int maxConnectionsPerProducer) {
+    this.maxConnectionsPerProducer = maxConnectionsPerProducer;
   }
 
 }

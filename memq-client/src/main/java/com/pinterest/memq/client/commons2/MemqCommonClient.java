@@ -67,17 +67,6 @@ public class MemqCommonClient implements Closeable {
   private static final int MAX_SEND_RETRIES = 3;
 
   public static final String CONFIG_NUM_WRITE_ENDPOINTS = "numWriteEndpoints"; // number of endpoints for writes
-  /**
-   * Hard cap on the number of distinct broker connections this client maintains
-   * once v4 weighted routing is active. When an eviction would push the
-   * connection set above this cap, the lightest-weight connection that is not
-   * the eviction target is dropped (see {@link #enforceConnectionCap}); its
-   * traffic share is absorbed by the survivors through normal weighted routing
-   * and their broker-side EMAs, not by fabricating slot counts.
-   * A value {@code <= 0} disables the cap (unbounded).
-   */
-  public static final String CONFIG_MAX_CONNECTIONS = "maxConnections";
-  public static final int DEFAULT_MAX_CONNECTIONS = 0;
 
   /**
    * Producer-side post-eviction routing boost: for this many milliseconds
@@ -100,60 +89,11 @@ public class MemqCommonClient implements Closeable {
    * over-routes to the eviction target for ~60s. Within that window
    * traffic genuinely shifts and the target broker acquires.
    * <p>
-   * This boost is an <i>additive</i> 1-slot nudge to the cold target; its
-   * counterpart on the hot eviction source is a <i>multiplicative</i>
-   * scale-down (see {@link #CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR} for why
-   * the two differ in form). The two windows are configured independently
-   * ({@link #CONFIG_POST_EVICTION_SOURCE_PENALTY_MS}).
-   * <p>
    * Set to {@code 0} to disable.
    */
   public static final String CONFIG_POST_EVICTION_ROUTING_BOOST_MS =
       "postEvictionRoutingBoostMs";
   public static final long DEFAULT_POST_EVICTION_ROUTING_BOOST_MS = 60_000L;
-
-  /**
-   * Producer-side post-eviction source penalty: the counterpart of the routing
-   * boost, with its own independent window. For
-   * {@link #CONFIG_POST_EVICTION_SOURCE_PENALTY_MS} milliseconds after an
-   * eviction named broker {@code S} as the <i>source</i>, {@code S}'s routing
-   * weight is scaled by {@link #CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR}
-   * (floored at 1 slot).
-   * <p>
-   * <b>Why a multiplicative factor and not an additive nudge like the boost?</b>
-   * The two signals act on opposite ends of the weight scale, so they are
-   * deliberately not identical in form:
-   * <ul>
-   *   <li>The boost acts on the <i>target</i>, which is cold and small (it
-   *       starts at ~{@code slotsToEvict} ≈ 1 slot). An additive {@code +1}
-   *       there is a large relative nudge ({@code 1 -> 2}) and is exactly the
-   *       "push past the next {@code ceil(EMA/slotSize)} boundary so it acquires
-   *       one slot" signal that broker needs.</li>
-   *   <li>The penalty acts on the <i>source</i>, which is hot and large (e.g.
-   *       24 slots). A mirrored {@code -1} would be a ~4% shift -- the same
-   *       negligible nudge the plain {@code slotsOwned[S] = remaining} decrement
-   *       already produces, which is the balance "treadmill" we are trying to
-   *       break. A proportional scale-down ({@code x0.5 -> 12}) shifts traffic
-   *       in proportion to how dominant the source is, which is what actually
-   *       moves load off it so its EMA falls and it releases instead of
-   *       re-acquiring the slot it just shed.</li>
-   * </ul>
-   * A factor {@code >= 1.0} (or a window {@code <= 0}) disables the penalty.
-   */
-  public static final String CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR =
-      "postEvictionSourcePenaltyFactor";
-  public static final double DEFAULT_POST_EVICTION_SOURCE_PENALTY_FACTOR = 0.5;
-
-  /**
-   * Window (milliseconds) over which the post-eviction source penalty applies,
-   * mirroring {@link #CONFIG_POST_EVICTION_ROUTING_BOOST_MS} for the boost.
-   * Kept as a separate knob so the boost and penalty windows are independent
-   * and each config is self-documenting (rather than the penalty silently
-   * borrowing the boost's window). Set to {@code 0} to disable the penalty.
-   */
-  public static final String CONFIG_POST_EVICTION_SOURCE_PENALTY_MS =
-      "postEvictionSourcePenaltyMs";
-  public static final long DEFAULT_POST_EVICTION_SOURCE_PENALTY_MS = 60_000L;
 
   private final NetworkClient networkClient;
   private long connectTimeout = 500;
@@ -168,7 +108,6 @@ public class MemqCommonClient implements Closeable {
   private volatile TreeMap<Double, Endpoint> weightedEndpointMap;
   private final String producerId = java.util.UUID.randomUUID().toString();
   private final ConcurrentHashMap<String, Integer> slotsOwned = new ConcurrentHashMap<>();
-  private int maxConnections = DEFAULT_MAX_CONNECTIONS;
   /**
    * Per-broker wall-clock millis until which {@link #rebuildWeightedMap}
    * adds {@code +1} to the broker's routing weight. Armed when the broker
@@ -181,19 +120,6 @@ public class MemqCommonClient implements Closeable {
   private final ConcurrentHashMap<String, Long> routingBoostUntilMs =
       new ConcurrentHashMap<>();
   private long postEvictionRoutingBoostMs = DEFAULT_POST_EVICTION_ROUTING_BOOST_MS;
-  /**
-   * Per-broker wall-clock millis until which {@link #rebuildWeightedMap} scales
-   * the broker's routing weight by {@link #postEvictionSourcePenaltyFactor}.
-   * Armed when the broker is the source of an eviction directive (symmetric to
-   * {@link #routingBoostUntilMs}). Lazily evaluated against {@code System
-   * .currentTimeMillis()} -- entries past their TTL behave like zero.
-   * See {@link #CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR}.
-   */
-  private final ConcurrentHashMap<String, Long> routingPenaltyUntilMs =
-      new ConcurrentHashMap<>();
-  private double postEvictionSourcePenaltyFactor =
-      DEFAULT_POST_EVICTION_SOURCE_PENALTY_FACTOR;
-  private long postEvictionSourcePenaltyMs = DEFAULT_POST_EVICTION_SOURCE_PENALTY_MS;
   // Sticky: flips to true the first time we observe a v4-only signal from any
   // broker (eviction directive or non-zero slot ownership). Once true, the
   // legacy numWriteEndpoints gates become no-ops and weighted selection
@@ -223,20 +149,9 @@ public class MemqCommonClient implements Closeable {
       if (networkProperties.containsKey(CONFIG_NUM_WRITE_ENDPOINTS)) {
         this.numWriteEndpoints = Math.max(1, Integer.parseInt(networkProperties.getProperty(CONFIG_NUM_WRITE_ENDPOINTS)));
       }
-      if (networkProperties.containsKey(CONFIG_MAX_CONNECTIONS)) {
-        this.maxConnections = Integer.parseInt(networkProperties.getProperty(CONFIG_MAX_CONNECTIONS));
-      }
       if (networkProperties.containsKey(CONFIG_POST_EVICTION_ROUTING_BOOST_MS)) {
         this.postEvictionRoutingBoostMs = Math.max(0L, Long.parseLong(
             networkProperties.getProperty(CONFIG_POST_EVICTION_ROUTING_BOOST_MS)));
-      }
-      if (networkProperties.containsKey(CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR)) {
-        this.postEvictionSourcePenaltyFactor = Math.max(0.0, Double.parseDouble(
-            networkProperties.getProperty(CONFIG_POST_EVICTION_SOURCE_PENALTY_FACTOR)));
-      }
-      if (networkProperties.containsKey(CONFIG_POST_EVICTION_SOURCE_PENALTY_MS)) {
-        this.postEvictionSourcePenaltyMs = Math.max(0L, Long.parseLong(
-            networkProperties.getProperty(CONFIG_POST_EVICTION_SOURCE_PENALTY_MS)));
       }
     }
     writeEndpoints = Collections.emptyList();
@@ -254,7 +169,6 @@ public class MemqCommonClient implements Closeable {
     logger.info("MemqCommonClient bootstrap: producerId=" + producerId
         + " locality=" + locality
         + " numWriteEndpoints=" + numWriteEndpoints
-        + " maxConnections=" + (maxConnections > 0 ? String.valueOf(maxConnections) : "unbounded")
         + " localityEndpoints=" + localityEndpoints.size()
         + " (v4Active=" + v4Active + " until first v4 broker response)");
   }
@@ -523,7 +437,6 @@ public class MemqCommonClient implements Closeable {
 
     slotsOwned.remove(ip);
     routingBoostUntilMs.remove(ip);
-    routingPenaltyUntilMs.remove(ip);
     failureCounts.keySet().removeIf(
         e -> e.getAddress().getHostString().equals(ip));
 
@@ -681,10 +594,8 @@ public class MemqCommonClient implements Closeable {
 
   /**
    * Per-broker routing weight: the broker's acknowledged slot count (with the
-   * legacy floor of 1), adjusted by the post-eviction routing signals -- a
-   * {@code +1} boost while the broker is an eviction target, or a
-   * {@link #postEvictionSourcePenaltyFactor} scaling (floored at 1) while it is
-   * an eviction source. A broker is never both at once.
+   * legacy floor of 1), plus the {@code +1} post-eviction boost while the
+   * broker is an eviction target.
    * <p>
    * Visible for test.
    */
@@ -693,19 +604,11 @@ public class MemqCommonClient implements Closeable {
     if (isRoutingBoostActive(ip, now)) {
       return base + 1;
     }
-    if (isRoutingPenaltyActive(ip, now)) {
-      return Math.max(1, (int) Math.round(base * postEvictionSourcePenaltyFactor));
-    }
     return base;
   }
 
   private boolean isRoutingBoostActive(String ip, long now) {
     Long until = routingBoostUntilMs.get(ip);
-    return until != null && until > now;
-  }
-
-  private boolean isRoutingPenaltyActive(String ip, long now) {
-    Long until = routingPenaltyUntilMs.get(ip);
     return until != null && until > now;
   }
 
@@ -721,14 +624,12 @@ public class MemqCommonClient implements Closeable {
       String ip = ep.getAddress().getHostString();
       int slots = Math.max(slotsOwned.getOrDefault(ip, 1), 1);
       boolean boosted = isRoutingBoostActive(ip, now);
-      boolean penalized = !boosted && isRoutingPenaltyActive(ip, now);
       int weight = effectiveWeight(ip, now);
       int pct = (int) Math.round(100.0 * weight / totalSlots);
       sig.append(ip).append('=').append(weight).append(',');
       if (pretty.length() > 0) pretty.append(", ");
       pretty.append(ip).append('(').append(slots).append(" slots");
       if (boosted) pretty.append("+boost");
-      if (penalized) pretty.append("-penalty");
       pretty.append(", ").append(pct).append("%)");
     }
     String signature = sig.toString();
@@ -739,7 +640,6 @@ public class MemqCommonClient implements Closeable {
     logger.info("Broker weights changed (writeEndpoints=" + writes.size()
         + ", totalSlots=" + totalSlots
         + ", trackedConnections=" + slotsOwned.size()
-        + (maxConnections > 0 ? "/" + maxConnections : "")
         + "): " + pretty);
   }
 
@@ -755,9 +655,11 @@ public class MemqCommonClient implements Closeable {
    * <p>
    * <b>v4 brokers</b>: once {@code v4Active} flips, {@link #writeEndpoints} is a
    * pure projection of {@link #slotsOwned} (the source of truth), rebuilt by
-   * {@link #reconcileWriteEndpoints()} and capped by {@code maxConnections}.
-   * This method then only ensures locality discovery and clears failure counts
-   * for the succeeding endpoint.
+   * {@link #reconcileWriteEndpoints()}. Per-producer connection limits are
+   * enforced authoritatively by the broker's eviction strategy
+   * ({@code EvictionConfig.maxConnectionsPerProducer}), so the client does not
+   * apply its own cap. This method then only ensures locality discovery and
+   * clears failure counts for the succeeding endpoint.
    *
    * @param endpoint
    * @param topic
@@ -820,7 +722,6 @@ public class MemqCommonClient implements Closeable {
         synchronized (this) {
           slotsOwned.remove(ip);
           routingBoostUntilMs.remove(ip);
-          routingPenaltyUntilMs.remove(ip);
           reconcileWriteEndpoints();
         }
       } else {
@@ -877,27 +778,28 @@ public class MemqCommonClient implements Closeable {
    *    producer to {@code targetBrokerIp}. We:
    *    <ul>
    *      <li>apply the eviction normally (bump target, update source remaining),</li>
-   *      <li>if the result would exceed {@code maxConnections}, drop the lightest
-   *          non-target connection ({@link #enforceConnectionCap}) without
-   *          fabricating any slot redistribution,</li>
+   *      <li>arm a post-eviction routing boost on the target so the producer
+   *          over-routes there long enough for the broker-side EMA to acquire
+   *          the transferred slot,</li>
    *      <li>register the target as an active write endpoint <b>immediately</b> so
    *          the next dispatch can route to it (no waiting for an existing endpoint
    *          to die or a reconnect to surface the new broker), and</li>
    *      <li>rebuild the weighted endpoint map with the updated slot data.</li>
    *    </ul>
    * <p>
-   * 2. Non-eviction path: the broker reports the producer's current slot ownership
-   *    (numSlotsOwned). Once {@code v4Active}, the responding broker is one we
-   *    wrote to, so we track it in {@code slotsOwned} (seeding at a floor of 1
-   *    when it reports 0) and {@link #reconcileWriteEndpoints() reconcile}.
-   *    A brand-new broker is only admitted while under {@code maxConnections};
-   *    at the cap, membership changes only via the eviction path above. Before
-   *    {@code v4Active} flips, only already-known brokers are refreshed so the
-   *    weighted set is not derived from an empty slot map.
+   * 2. Non-eviction path: the broker reports the producer's current slot
+   *    ownership (numSlotsOwned). Once {@code v4Active}, the responding broker
+   *    is one we wrote to, so we track it in {@code slotsOwned} (seeding at a
+   *    floor of 1 when it reports 0) and
+   *    {@link #reconcileWriteEndpoints() reconcile}. Before {@code v4Active}
+   *    flips, only already-known brokers are refreshed so the weighted set is
+   *    not derived from an empty slot map.
    * <p>
-   * In both v4 paths {@link #writeEndpoints} is a pure projection of
-   * {@link #slotsOwned} (rebuilt by {@link #reconcileWriteEndpoints()}), so the
-   * connection set can never drift above {@code maxConnections}.
+   * The per-producer connection cap is enforced authoritatively by the broker's
+   * eviction strategy ({@code EvictionConfig.maxConnectionsPerProducer}): the
+   * broker refuses to evict to a target that would push the producer above the
+   * cap in routine mode, so the client never needs to apply its own cap and
+   * the connection set converges to a steady size via the broker's decisions.
    */
   public synchronized void handleWriteResponse(WriteResponsePacket writeResp,
                                                InetSocketAddress sourceAddress) {
@@ -984,28 +886,9 @@ public class MemqCommonClient implements Closeable {
       if (postEvictionRoutingBoostMs > 0 && targetIp != null) {
         routingBoostUntilMs.put(targetIp,
             System.currentTimeMillis() + postEvictionRoutingBoostMs);
-        // The target is being boosted, not penalized -- clear any stale penalty.
-        routingPenaltyUntilMs.remove(targetIp);
       }
       if (sourceIp != null) {
         routingBoostUntilMs.remove(sourceIp);
-        // Source penalty: scale the source's routing weight down for its own
-        // window so traffic actually moves off it (instead of the producer
-        // continuing to route the same share and the source just re-acquiring
-        // the slot it shed).
-        if (postEvictionSourcePenaltyMs > 0 && postEvictionSourcePenaltyFactor < 1.0) {
-          routingPenaltyUntilMs.put(sourceIp,
-              System.currentTimeMillis() + postEvictionSourcePenaltyMs);
-        }
-      }
-
-      // Enforce the maxConnections cap: if adding the target pushed us over the
-      // cap, drop the lightest-weight non-target connection. We do NOT fabricate
-      // a redistribution of its slots -- weights are relative and renormalize on
-      // rebuild, and the survivors' real broker-side EMAs will true up their
-      // counts within a few ticks.
-      if (maxConnections > 0 && slotsOwned.size() > maxConnections) {
-        enforceConnectionCap(targetIp);
       }
 
       // Single reconciliation: derive writeEndpoints from slotsOwned (the source
@@ -1038,16 +921,12 @@ public class MemqCommonClient implements Closeable {
       return;
     }
 
-    // v4 non-eviction response: slotsOwned is the source of truth. The responding
-    // broker is one we wrote to, so track it (seeding at a floor of 1 when it
-    // reports 0) and reconcile so it participates in weighted routing. A
-    // brand-new broker is only admitted when we are under the maxConnections cap;
-    // at the cap, membership only changes via eviction swaps.
+    // v4 non-eviction response: slotsOwned is the source of truth. The
+    // responding broker is one we wrote to, so track it (seeding at a floor of
+    // 1 when it reports 0) and reconcile so it participates in weighted
+    // routing. The broker's eviction strategy is authoritative on connection
+    // cap enforcement, so the client adds any broker it actually wrote to.
     boolean isKnown = slotsOwned.containsKey(sourceIp);
-    if (!isKnown && maxConnections > 0 && slotsOwned.size() >= maxConnections) {
-      rebuildWeightedMap();
-      return;
-    }
     boolean added = false;
     if (remaining > 0) {
       added = slotsOwned.put(sourceIp, remaining) == null;
@@ -1063,59 +942,17 @@ public class MemqCommonClient implements Closeable {
   }
 
   /**
-   * Honor the {@code maxConnections} cap after an eviction added a new target
-   * by dropping the single lightest-weight connection that is <b>not</b> the
-   * eviction target. Returns the dropped broker IP, or {@code null} if nothing
-   * was dropped.
-   * <p>
-   * Unlike the previous behavior, this does not drop the evicting source
-   * wholesale, nor fabricate a redistribution of the dropped broker's slots: a
-   * 1-slot eviction must not turn into abandoning a heavily-weighted connection.
-   * Dropping the lightest connection minimizes the routing discontinuity, and
-   * because routing weights are relative (renormalized on every
-   * {@link #rebuildWeightedMap()}), the dropped broker's share is absorbed by
-   * the survivors automatically. Their real broker-side EMAs then re-report
-   * actual slot counts within a few ticks, so the "redistribution" happens
-   * through the real control loop instead of fabricated integers. The cold
-   * target keeps its post-eviction routing boost, biasing the orphaned share
-   * toward it rather than toward the heaviest survivor.
-   */
-  private String enforceConnectionCap(String targetIp) {
-    String victim = null;
-    int victimSlots = Integer.MAX_VALUE;
-    for (Map.Entry<String, Integer> entry : slotsOwned.entrySet()) {
-      if (entry.getKey().equals(targetIp)) {
-        continue;
-      }
-      if (entry.getValue() < victimSlots) {
-        victimSlots = entry.getValue();
-        victim = entry.getKey();
-      }
-    }
-    if (victim != null) {
-      slotsOwned.remove(victim);
-      routingBoostUntilMs.remove(victim);
-      routingPenaltyUntilMs.remove(victim);
-    }
-    return victim;
-  }
-
-  /**
    * Reconcile the derived routing state from {@link #slotsOwned}, the single
    * source of truth in v4 mode.
    * <p>
    * {@link #writeEndpoints} is rebuilt to be exactly the set of brokers tracked
    * in {@code slotsOwned} (so a broker dropped from {@code slotsOwned} -- whether
-   * by a connection swap or by draining to zero slots -- automatically falls out
-   * of the write set, and an eviction target is added immediately). Each tracked
-   * broker is also ensured present in {@link #localityEndpoints} so future
-   * failovers and reconnects can still see it. Finally the weighted map is
-   * rebuilt. Synthesized endpoints (for an IP not previously known) reuse the
+   * by an eviction draining its slots or by a connection failure -- automatically
+   * falls out of the write set, and an eviction target is added immediately).
+   * Each tracked broker is also ensured present in {@link #localityEndpoints} so
+   * future failovers and reconnects can still see it. Finally the weighted map
+   * is rebuilt. Synthesized endpoints (for an IP not previously known) reuse the
    * cluster port of an existing endpoint and the producer's configured locality.
-   * <p>
-   * Because writeEndpoints is a pure projection of {@code slotsOwned}, the two
-   * can no longer drift, which is what previously let the connection set exceed
-   * {@code maxConnections}.
    */
   private void reconcileWriteEndpoints() {
     List<Endpoint> currentLocals = this.localityEndpoints;
@@ -1199,10 +1036,6 @@ public class MemqCommonClient implements Closeable {
 
   public ConcurrentHashMap<String, Integer> getSlotsOwned() {
     return slotsOwned;
-  }
-
-  public void setMaxConnections(int maxConnections) {
-    this.maxConnections = maxConnections;
   }
 
   /**
