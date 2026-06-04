@@ -50,11 +50,16 @@ public class EvictionManager {
   private ScheduledExecutorService executor;
 
   /**
+   * @param strategy the eviction strategy to apply each tick.
+   * @param slotManager the local broker's slot manager (source of producer
+   *        connections, slot counts and drain-latch state).
+   * @param peerStatesSupplier supplies the current peer gossip state.
    * @param topicToBrokerIpsSupplier supplies a map of topic to broker IPs
    *        that serve writes for that topic. Used by the strategy to
    *        constrain eviction targets to brokers that actually serve the
    *        evicted producer's topics. Pass {@link Collections#emptyMap}
    *        to disable topic-aware filtering (e.g. in tests).
+   * @param config eviction configuration (interval, thresholds, top-N sizes).
    */
   public EvictionManager(EvictionStrategy strategy,
                          SlotManager slotManager,
@@ -68,7 +73,14 @@ public class EvictionManager {
     this.config = config;
   }
 
-  /** Convenience constructor for tests with no topic affinity. */
+  /**
+   * Convenience constructor for tests with no topic affinity.
+   *
+   * @param strategy the eviction strategy to apply each tick.
+   * @param slotManager the local broker's slot manager.
+   * @param peerStatesSupplier supplies the current peer gossip state.
+   * @param config eviction configuration.
+   */
   public EvictionManager(EvictionStrategy strategy,
                          SlotManager slotManager,
                          Supplier<Map<String, GossipState>> peerStatesSupplier,

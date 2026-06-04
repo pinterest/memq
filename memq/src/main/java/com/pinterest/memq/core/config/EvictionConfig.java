@@ -84,6 +84,8 @@ public class EvictionConfig {
    * spread evictions across roughly equivalent producers, breaking the
    * deterministic two-body cycles that produced the connection "harmonic
    * dance" against a single victim broker.
+   *
+   * @return the configured top-N producer pool size.
    */
   public int getTopNProducers() {
     return topNProducers;
@@ -113,6 +115,8 @@ public class EvictionConfig {
    *       the top-N regardless.</li>
    * </ul>
    * A value {@code <= 0} disables the cap entirely.
+   *
+   * @return the configured per-producer connection cap.
    */
   public int getMaxConnectionsPerProducer() {
     return maxConnectionsPerProducer;

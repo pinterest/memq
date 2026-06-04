@@ -157,6 +157,8 @@ public class GossipServer {
    * from the returned snapshot.
    * <p>
    * Called by {@code EvictionManager} on its tick, not on any hot path.
+   *
+   * @return a snapshot map of peer IP to its most recent fresh gossip state.
    */
   public Map<String, GossipState> getPeerStates() {
     long now = System.currentTimeMillis();

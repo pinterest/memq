@@ -127,6 +127,9 @@ public class SlotManager {
   }
 
   /**
+   * @param config slot-accounting configuration (slot size, thresholds,
+   *               cooldowns, drain latch parameters, etc.).
+   * @param totalSlots total slot capacity for this broker.
    * @param registry optional registry for per-(pid, topic) producer.ema /
    *                 producer.slots gauges. When non-null, gauges are
    *                 registered with names of the form
@@ -443,6 +446,8 @@ public class SlotManager {
    * Whether the broker is currently in the drain-latched state: it has
    * recently been at near-zero free slots, so slot acquisition is frozen until
    * it has drained. Visible for test and metrics.
+   *
+   * @return {@code true} if the drain latch is engaged; {@code false} otherwise.
    */
   public boolean isDrainLatched() {
     return drainLatched;
@@ -572,6 +577,9 @@ public class SlotManager {
    * {@link #releaseProducerSlots(String, String, int)}: callable from any
    * thread, uses the existing {@link #decrementSlots} for atomic
    * {@code totalOccupiedSlots} and {@code lastSlotChangeTimeMs} updates.
+   *
+   * @param topic the topic whose per-producer slot state and capacity should
+   *        be released. No-op if no producer holds state for the topic.
    */
   public void dropTopic(String topic) {
     int affected = 0;

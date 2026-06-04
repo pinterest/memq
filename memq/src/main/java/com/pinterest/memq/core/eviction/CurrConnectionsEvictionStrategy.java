@@ -47,7 +47,7 @@ import java.util.stream.Collectors;
  *       {@code 1} slot on the source naturally drops its source connection on
  *       eviction (a "graceful swap"). The {@code maxConnectionsPerProducer}
  *       cap is enforced: an eviction that would force a client-side connection
- *       drop (producer at cap, target not in its set, source slots > 1) is
+ *       drop (producer at cap, target not in its set, source slots &gt; 1) is
  *       <i>refused</i> rather than dispatched. This avoids the "harmonic
  *       dance" oscillation where forced drops repeatedly bounce the lightest
  *       non-target connection between two brokers.</li>
