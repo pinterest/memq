@@ -96,13 +96,43 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     Map<String, Set<String>> brokerToTopics = invert(topicToBrokerIps);
     Set<String> localTopics = brokerToTopics.getOrDefault(brokerId, java.util.Collections.emptySet());
 
-    // Step 1: filter candidate target brokers. Each filter is a reason to
-    // not evict; all must pass.
+    // Step 1: am I more loaded than the cluster? Compare local free slots to
+    // the mean over the full load population -- every topic-sharing peer,
+    // including frozen and pending-cooldown ones. Excluding them biases the
+    // mean toward higher free slots (frozen peers are typically saturated,
+    // i.e. low-free) and systematically over-evicts.
+    int localFreeSlots = slotManager.getFreeSlots();
+    List<Integer> loadPopulation = peerStates.entrySet().stream()
+        .filter(e -> !brokerId.equals(e.getKey()))
+        .filter(e -> sharesTopic(e.getKey(), brokerToTopics, localTopics))
+        .map(e -> e.getValue().getMessage().getFreeSlots())
+        .collect(Collectors.toList());
+
+    if (loadPopulation.isEmpty()) {
+      logger.info("[" + brokerId + "] eviction skipped: no topic-sharing peers to compare against"
+          + " (peerCount=" + peerStates.size()
+          + ", localTopics=" + localTopics.size() + ")");
+      return null;
+    }
+
+    double meanFreeSlots = loadPopulation.stream().mapToInt(Integer::intValue).average().orElse(0);
+    if (localFreeSlots >= meanFreeSlots) {
+      logger.info("[" + brokerId + "] eviction skipped: local broker is not above mean load"
+          + " (localFreeSlots=" + localFreeSlots
+          + " >= meanFreeSlots=" + String.format("%.1f", meanFreeSlots)
+          + ", loadPeers=" + loadPopulation.size() + ")");
+      return null;
+    }
+
+    // Step 2: filter candidate target brokers. Each filter is a reason a
+    // topic-sharing peer cannot receive an eviction right now. Frozen peers
+    // and peers already in pending-target cooldown are excluded here even
+    // though they count toward the mean above.
     List<Map.Entry<String, Integer>> candidates = peerStates.entrySet().stream()
         .filter(e -> !brokerId.equals(e.getKey()))
+        .filter(e -> sharesTopic(e.getKey(), brokerToTopics, localTopics))
         .filter(e -> !e.getValue().getMessage().isFreeze())
         .filter(e -> !pendingEvictionTargets.containsKey(e.getKey()))
-        .filter(e -> sharesTopic(e.getKey(), brokerToTopics, localTopics))
         .map(e -> new AbstractMap.SimpleEntry<>(e.getKey(),
             e.getValue().getMessage().getFreeSlots()))
         .collect(Collectors.toList());
@@ -112,19 +142,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
           + " (peerCount=" + peerStates.size()
           + ", pendingTargets=" + pendingEvictionTargets.size()
           + ", localTopics=" + localTopics.size() + ")"
-          + " -- all peers are frozen, in cooldown, or share no topics with this broker");
-      return null;
-    }
-
-    // Step 2: am I more congested than the surviving candidate set?
-    double meanFreeSlots = candidates.stream().mapToInt(Map.Entry::getValue).average().orElse(0);
-    int localFreeSlots = slotManager.getFreeSlots();
-
-    if (localFreeSlots >= meanFreeSlots) {
-      logger.info("[" + brokerId + "] eviction skipped: local broker is not above mean load"
-          + " (localFreeSlots=" + localFreeSlots
-          + " >= meanFreeSlots=" + String.format("%.1f", meanFreeSlots)
-          + ", candidatePeers=" + candidates.size() + ")");
+          + " -- all topic-sharing peers are frozen or in cooldown");
       return null;
     }
 
