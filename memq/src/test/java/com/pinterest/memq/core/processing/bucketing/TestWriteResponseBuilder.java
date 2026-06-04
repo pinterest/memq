@@ -74,6 +74,9 @@ public class TestWriteResponseBuilder {
     slotConfig.setCooldownSeconds(0.0);
     slotConfig.setEmaWindowSeconds(0.001);
     slotConfig.setTickIntervalMs(1000);
+    // These tests acquire whole-gap in a single tick; opt out of the per-tick
+    // step clamp (covered by TestSlotManagerSlotStep).
+    slotConfig.setMaxSlotStep(0);
 
     evictionConfig = new EvictionConfig();
     evictionConfig.setEnabled(true);
