@@ -117,11 +117,13 @@ public class EvictionManager {
           producerConnections, topicToBrokerIps);
       if (result != null) {
         EvictionResult prev = pendingEvictions.put(result.getPid(), result);
+        String producerIp = slotManager.getProducerIp(result.getPid());
+        String ipSuffix = producerIp == null ? "" : " producerIp=" + producerIp;
         if (prev != null) {
-          logger.info("Eviction scheduled (overwrote prior pending): " + result
+          logger.info("Eviction scheduled (overwrote prior pending): " + result + ipSuffix
               + " replaced=" + prev + " (took " + (System.currentTimeMillis() - startMs) + "ms)");
         } else {
-          logger.info("Eviction scheduled: " + result
+          logger.info("Eviction scheduled: " + result + ipSuffix
               + " (took " + (System.currentTimeMillis() - startMs) + "ms)");
         }
       } else {

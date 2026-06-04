@@ -86,6 +86,22 @@ public class SlotAccountingConfig {
    */
   private double drainLatchDisengageFreeSlots = 2.0;
 
+  /**
+   * Maximum number of slots the broker will acquire or release for a single
+   * (producer, topic) in one tick. EMA-driven acquisition/release would
+   * otherwise close the entire gap between current and demanded slots in one
+   * step (e.g. {@code +11} at once when the client shifts a chunk of traffic
+   * onto this broker), which overshoots and drives the eviction/re-acquisition
+   * oscillation. Clamping the per-tick step makes load shift gradually -- one
+   * small increment per tick -- symmetric with the 1-slot eviction step, so the
+   * most-loaded brokers bleed toward the least-loaded ones without thrashing.
+   * <p>
+   * The per-tick <i>frequency</i> is already bounded by {@code cooldownSeconds};
+   * this bounds the per-step <i>size</i>. Set to a small value (1 or 2). A value
+   * {@code <= 0} disables the clamp (restores legacy whole-gap behavior).
+   */
+  private int maxSlotStep = 1;
+
   public boolean isEnabled() {
     return enabled;
   }
@@ -188,5 +204,13 @@ public class SlotAccountingConfig {
 
   public void setDrainLatchDisengageFreeSlots(double drainLatchDisengageFreeSlots) {
     this.drainLatchDisengageFreeSlots = drainLatchDisengageFreeSlots;
+  }
+
+  public int getMaxSlotStep() {
+    return maxSlotStep;
+  }
+
+  public void setMaxSlotStep(int maxSlotStep) {
+    this.maxSlotStep = maxSlotStep;
   }
 }

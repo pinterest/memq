@@ -50,6 +50,9 @@ public class TestSlotManagerEviction {
     config.setTickIntervalMs(1000);
     // Default off; cooldown-specific tests opt in by overriding this.
     config.setPostEvictionCooldownSeconds(0.0);
+    // These tests acquire slots in a single tick; opt out of the per-tick step
+    // clamp (covered by TestSlotManagerSlotStep).
+    config.setMaxSlotStep(0);
   }
 
   private SlotManager create(int totalSlots) {

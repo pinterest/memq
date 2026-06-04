@@ -65,6 +65,7 @@ public class SlotManager {
   private final boolean drainLatchEnabled;
   private final double drainLatchEmaDecay;
   private final double drainLatchDisengageFreeSlots;
+  private final int maxSlotStep;
 
   private final ConcurrentHashMap<String, ConcurrentHashMap<String, ProducerSlotState>> producers =
       new ConcurrentHashMap<>();
@@ -95,6 +96,13 @@ public class SlotManager {
   private volatile boolean drainLatched;
 
   private final ConcurrentHashMap<String, Set<String>> producerConnections = new ConcurrentHashMap<>();
+
+  /**
+   * Maps a producer id (a v4 client-generated UUID) to the remote IP of the
+   * connection it writes from, so slot/eviction logs keyed by the opaque UUID
+   * can be traced back to a host. For v3 producers the id already is the IP.
+   */
+  private final ConcurrentHashMap<String, String> producerIps = new ConcurrentHashMap<>();
 
   /**
    * Optional MetricRegistry into which we register tag-encoded
@@ -148,6 +156,7 @@ public class SlotManager {
     this.drainLatchEmaDecay = exp(-tickIntervalSec / drainLatchWindowSec);
     this.drainLatchDisengageFreeSlots =
         Math.max(config.getDrainLatchDisengageFreeSlots(), totalSlots / 10.0);
+    this.maxSlotStep = config.getMaxSlotStep();
     // Start un-latched: a freshly started, empty broker has all slots free.
     this.freeSlotsEma = totalSlots;
 
@@ -158,7 +167,8 @@ public class SlotManager {
         + " postEvictionCooldownMs=" + postEvictionCooldownMs
         + " drainLatchEnabled=" + drainLatchEnabled
         + " drainLatchEmaWindowSec=" + drainLatchWindowSec
-        + " drainLatchDisengageFreeSlots=" + drainLatchDisengageFreeSlots);
+        + " drainLatchDisengageFreeSlots=" + drainLatchDisengageFreeSlots
+        + " maxSlotStep=" + maxSlotStep);
   }
 
   /**
@@ -236,7 +246,10 @@ public class SlotManager {
             }
             double exceedsDuration = now - state.exceedsSinceMs;
             if (exceedsDuration >= acquireThresholdMs) {
-              int slotsToAcquire = expectedSlots - currentSlots;
+              // Clamp the per-tick step so load is picked up gradually (one
+              // small increment per tick) instead of closing the whole EMA gap
+              // at once, which overshoots and drives oscillation.
+              int slotsToAcquire = clampStep(expectedSlots - currentSlots);
               if (tryAcquireSlots(pid, topic, state, slotsToAcquire, now)) {
                 state.exceedsSinceMs = 0;
               }
@@ -248,7 +261,9 @@ public class SlotManager {
             }
             double belowDuration = now - state.belowSinceMs;
             if (belowDuration >= releaseThresholdMs) {
-              int slotsToRelease = currentSlots - expectedSlots;
+              // Clamp the per-tick step (symmetric with acquisition) so a broker
+              // sheds load gradually instead of dropping the whole gap at once.
+              int slotsToRelease = clampStep(currentSlots - expectedSlots);
               releaseSlots(pid, topic, topicMap, state, slotsToRelease);
               state.belowSinceMs = 0;
             }
@@ -314,6 +329,18 @@ public class SlotManager {
     }
   }
 
+  /**
+   * Bound an EMA-driven slot delta to at most {@code maxSlotStep} per tick so
+   * acquisition/release move gradually. A non-positive {@code maxSlotStep}
+   * disables the clamp (legacy whole-gap behavior).
+   */
+  private int clampStep(int desiredDelta) {
+    if (maxSlotStep <= 0) {
+      return desiredDelta;
+    }
+    return Math.min(desiredDelta, maxSlotStep);
+  }
+
   private boolean tryAcquireSlots(String pid, String topic, ProducerSlotState state,
                                   int count, long now) {
     if (now - lastSlotChangeTimeMs < cooldownMs) {
@@ -345,7 +372,8 @@ public class SlotManager {
     lastSlotChangeTimeMs = now;
     logger.info("+" + actual + " slot(s) for pid=" + pid + "/" + topic
         + " | total=" + state.currentSlots
-        + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots);
+        + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots
+        + ipLogSuffix(pid));
     return true;
   }
 
@@ -384,6 +412,7 @@ public class SlotManager {
       // registry too so that registry doesn't leak across producer churn.
       if (producers.remove(pid, topicMap)) {
         producerConnections.remove(pid);
+        producerIps.remove(pid);
       }
     }
   }
@@ -395,7 +424,8 @@ public class SlotManager {
     if (actual > 0) {
       logger.info("-" + actual + " slot(s) for pid=" + pid + "/" + topic
           + " | total=" + state.currentSlots
-          + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots);
+          + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots
+          + ipLogSuffix(pid));
     }
   }
 
@@ -600,7 +630,8 @@ public class SlotManager {
       logger.info("Eviction: -" + actual + " slot(s) for pid=" + pid + "/" + topic
           + " | remaining=" + state.currentSlots
           + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots
-          + " | cooldownUntilMs=" + cooldownUntil);
+          + " | cooldownUntilMs=" + cooldownUntil
+          + ipLogSuffix(pid));
     }
     return actual;
   }
@@ -679,6 +710,40 @@ public class SlotManager {
    */
   public void recordProducerConnections(String pid, Set<String> connections) {
     producerConnections.put(pid, connections);
+  }
+
+  /**
+   * Record the remote IP a producer writes from. Hot-path friendly: a plain
+   * {@code get} on the common path with a {@code put} only when the IP is new or
+   * changed (which is rare -- a producer keeps the same id/host for its life).
+   *
+   * @param pid the producer identifier
+   * @param ip the remote IP of the producer's connection
+   */
+  public void recordProducerIp(String pid, String ip) {
+    if (ip == null) {
+      return;
+    }
+    if (!ip.equals(producerIps.get(pid))) {
+      producerIps.put(pid, ip);
+    }
+  }
+
+  /**
+   * @param pid the producer identifier
+   * @return the last known remote IP for the producer, or {@code null}
+   */
+  public String getProducerIp(String pid) {
+    return producerIps.get(pid);
+  }
+
+  /**
+   * Render a {@code " | ip=<ip>"} suffix for log lines keyed by an opaque
+   * producer id, or an empty string when the IP is unknown.
+   */
+  private String ipLogSuffix(String pid) {
+    String ip = producerIps.get(pid);
+    return ip == null ? "" : " | ip=" + ip;
   }
 
   /**

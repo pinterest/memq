@@ -71,7 +71,9 @@ public final class WriteResponseBuilder {
           sm.releaseProducerSlots(producerId, topic, eviction.getNumSlotsToEvict());
         }
         int remaining = sm.getTotalProducerSlots(producerId);
+        String producerIp = sm.getProducerIp(producerId);
         logger.info("Eviction delivered to producer=" + producerId
+            + (producerIp == null ? "" : " producerIp=" + producerIp)
             + " target=" + eviction.getTargetBrokerIp()
             + " slotsToEvict=" + eviction.getNumSlotsToEvict()
             + " remainingSlotsForProducer=" + remaining);

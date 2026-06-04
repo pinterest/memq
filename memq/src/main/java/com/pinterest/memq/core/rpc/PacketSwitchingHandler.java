@@ -165,18 +165,22 @@ public class PacketSwitchingHandler {
       // Resolve the canonical producer ID. v4 clients send a client-generated
       // UUID so multiple producers on the same host are distinguished. v3
       // clients don't send one, so we fall back to the remote IP.
+      InetSocketAddress remote = (InetSocketAddress) ctx.channel().remoteAddress();
+      String remoteIp = remote.getAddress().getHostAddress();
       String producerId;
       if (requestPacket.getProtocolVersion() >= 4
           && writePacket.getProducerId() != null
           && !writePacket.getProducerId().isEmpty()) {
         producerId = writePacket.getProducerId();
       } else {
-        InetSocketAddress remote = (InetSocketAddress) ctx.channel().remoteAddress();
-        producerId = remote.getAddress().getHostAddress();
+        producerId = remoteIp;
       }
       SlotManager sm = mgr.getSlotManager();
       if (sm != null) {
         sm.recordWrite(producerId, writePacket.getTopicName(), writePacket.getDataLength());
+        // Map the opaque v4 UUID back to its source host so slot/eviction logs
+        // can be traced to an IP.
+        sm.recordProducerIp(producerId, remoteIp);
         if (requestPacket.getProtocolVersion() >= 4
             && writePacket.getProducerId() != null
             && !writePacket.getProducerId().isEmpty()) {

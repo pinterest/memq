@@ -56,6 +56,9 @@ public class TestSlotManagerDrainLatch {
     // the free-slots EMA appreciably.
     config.setDrainLatchEmaWindowSeconds(1.0);
     config.setDrainLatchDisengageFreeSlots(2.0);
+    // These tests fill slots in a single tick; opt out of the per-tick step
+    // clamp (covered by TestSlotManagerSlotStep) to keep that assumption.
+    config.setMaxSlotStep(0);
   }
 
   private SlotManager create(int totalSlots) {
