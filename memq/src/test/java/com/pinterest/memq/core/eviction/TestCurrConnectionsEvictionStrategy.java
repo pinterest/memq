@@ -1109,14 +1109,15 @@ public class TestCurrConnectionsEvictionStrategy {
 
   @Test
   public void testConsolidationFiresWhenConvergedAndOverCap() throws Exception {
-    // Setup: local broker is at or above mean -> converged. Producer has
-    // 4 connections (cap=3) and 1 slot here. Consolidation must fire.
+    // Setup: local and all peers have free-slot counts within the deadband
+    // (cluster genuinely converged). Producer has 4 connections (cap=3)
+    // and 1 slot here. Consolidation must fire.
     SlotManager sm = createSlotManager(32);
-    acquireSlots(sm, "fat", TOPIC, 10); // 1 slot here
+    acquireSlots(sm, "fat", TOPIC, 10); // 1 slot here -> local free=31
 
     EvictionConfig config = new EvictionConfig();
     config.setEnabled(true);
-    config.setEvictionPercentageThreshold(0.0);
+    config.setEvictionPercentageThreshold(10.0); // 32 * 10% = 3.2 slot spread allowance
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(1);
     config.setMaxConnectionsPerProducer(3);
@@ -1125,15 +1126,13 @@ public class TestCurrConnectionsEvictionStrategy {
 
     long now = System.currentTimeMillis();
     Map<String, GossipState> peers = new HashMap<>();
-    // Local has 31 free (1 slot used). Peers have fewer free slots, so
-    // local is NOT above mean -- the load-balance branch concludes
-    // "converged" and consolidation fires.
+    // Spread = 31-30 = 1 slot (3.1%), within the 10% deadband -> converged.
     peers.put("broker-1",
-        new GossipState(new GossipMessage("broker-1", 10, false, now), now));
+        new GossipState(new GossipMessage("broker-1", 30, false, now), now));
     peers.put("broker-2",
-        new GossipState(new GossipMessage("broker-2", 12, false, now), now));
+        new GossipState(new GossipMessage("broker-2", 31, false, now), now));
     peers.put("broker-3",
-        new GossipState(new GossipMessage("broker-3", 14, false, now), now));
+        new GossipState(new GossipMessage("broker-3", 31, false, now), now));
 
     sm.recordProducerConnections("fat",
         slotMap("broker-1", 5, "broker-2", 3, "broker-3", 2, BROKER_LOCAL, 1));
@@ -1148,6 +1147,48 @@ public class TestCurrConnectionsEvictionStrategy {
   }
 
   @Test
+  public void testConsolidationSuppressedWhenClusterDiverged() throws Exception {
+    // Local is on the freer side of a diverged cluster (one hot peer well
+    // below the deadband). Even though local would normally hit the
+    // "no eviction needed" branch (we're above mean), consolidation must
+    // be suppressed -- the hot peer needs to shed first.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 10); // local free=31
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(10.0); // 32 * 10% = 3.2 slot spread allowance
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    // Spread = 31-5 = 26 slots (81%), way above the 10% deadband.
+    // localFreeSlots (31) >= meanFreeSlots so branch 1 fires, but the
+    // cluster-spread gate must veto consolidation.
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 5, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 28, false, now), now));
+    peers.put("broker-3",
+        new GossipState(new GossipMessage("broker-3", 30, false, now), now));
+
+    // An above-cap producer is present -- pre-gate this test would have
+    // consolidated. After the gate, it must NOT.
+    sm.recordProducerConnections("fat",
+        slotMap("broker-1", 2, "broker-2", 5, "broker-3", 3, BROKER_LOCAL, 1));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNull("consolidation must be suppressed when the cluster is diverged",
+        result);
+  }
+
+  @Test
   public void testConsolidationDoesNotFireWhenAtCap() throws Exception {
     // Producer has exactly 3 connections (=cap). Consolidation must not fire.
     SlotManager sm = createSlotManager(32);
@@ -1156,7 +1197,7 @@ public class TestCurrConnectionsEvictionStrategy {
     EvictionConfig config = new EvictionConfig();
     config.setEnabled(true);
     config.setMaxConnectionsPerProducer(3);
-    config.setEvictionPercentageThreshold(0.0);
+    config.setEvictionPercentageThreshold(10.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(1);
     CurrConnectionsEvictionStrategy strategy =
@@ -1164,8 +1205,9 @@ public class TestCurrConnectionsEvictionStrategy {
 
     long now = System.currentTimeMillis();
     Map<String, GossipState> peers = new HashMap<>();
+    // Cluster converged so the cluster-spread gate doesn't mask the test.
     peers.put("broker-1",
-        new GossipState(new GossipMessage("broker-1", 10, false, now), now));
+        new GossipState(new GossipMessage("broker-1", 31, false, now), now));
 
     sm.recordProducerConnections("ok",
         slotMap("broker-1", 5, "broker-2", 3, BROKER_LOCAL, 1));
@@ -1226,7 +1268,7 @@ public class TestCurrConnectionsEvictionStrategy {
     EvictionConfig config = new EvictionConfig();
     config.setEnabled(true);
     config.setMaxConnectionsPerProducer(3);
-    config.setEvictionPercentageThreshold(0.0);
+    config.setEvictionPercentageThreshold(10.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(1);
     CurrConnectionsEvictionStrategy strategy =
@@ -1234,10 +1276,11 @@ public class TestCurrConnectionsEvictionStrategy {
 
     long now = System.currentTimeMillis();
     Map<String, GossipState> peers = new HashMap<>();
+    // Local uses 11 slots (1+10), free=21. Keep peers within deadband.
     peers.put("broker-1",
-        new GossipState(new GossipMessage("broker-1", 5, false, now), now));
+        new GossipState(new GossipMessage("broker-1", 21, false, now), now));
     peers.put("broker-2",
-        new GossipState(new GossipMessage("broker-2", 8, false, now), now));
+        new GossipState(new GossipMessage("broker-2", 21, false, now), now));
 
     sm.recordProducerConnections("light",
         slotMap("broker-1", 3, "broker-2", 2, "broker-3", 1, BROKER_LOCAL, 1));
@@ -1264,7 +1307,7 @@ public class TestCurrConnectionsEvictionStrategy {
     EvictionConfig config = new EvictionConfig();
     config.setEnabled(true);
     config.setMaxConnectionsPerProducer(3);
-    config.setEvictionPercentageThreshold(0.0);
+    config.setEvictionPercentageThreshold(10.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(1);
     CurrConnectionsEvictionStrategy strategy =
@@ -1272,14 +1315,14 @@ public class TestCurrConnectionsEvictionStrategy {
 
     long now = System.currentTimeMillis();
     Map<String, GossipState> peers = new HashMap<>();
-    // Note: broker-3 is freest (15) but producer owns the fewest slots
-    // there. broker-1 has the most producer slots; should win.
+    // All peers near local's free count (spread within deadband -> cluster
+    // converged). Producer slot counts vary; broker-1 should win.
     peers.put("broker-1",
-        new GossipState(new GossipMessage("broker-1", 5, false, now), now));
+        new GossipState(new GossipMessage("broker-1", 30, false, now), now));
     peers.put("broker-2",
-        new GossipState(new GossipMessage("broker-2", 8, false, now), now));
+        new GossipState(new GossipMessage("broker-2", 30, false, now), now));
     peers.put("broker-3",
-        new GossipState(new GossipMessage("broker-3", 15, false, now), now));
+        new GossipState(new GossipMessage("broker-3", 31, false, now), now));
 
     sm.recordProducerConnections("fat",
         slotMap("broker-1", 12, "broker-2", 5, "broker-3", 1, BROKER_LOCAL, 1));
@@ -1303,7 +1346,7 @@ public class TestCurrConnectionsEvictionStrategy {
     EvictionConfig config = new EvictionConfig();
     config.setEnabled(true);
     config.setMaxConnectionsPerProducer(3);
-    config.setEvictionPercentageThreshold(0.0);
+    config.setEvictionPercentageThreshold(10.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(1);
     CurrConnectionsEvictionStrategy strategy =
@@ -1311,12 +1354,14 @@ public class TestCurrConnectionsEvictionStrategy {
 
     long now = System.currentTimeMillis();
     Map<String, GossipState> peers = new HashMap<>();
+    // Spread = 31-28 = 3 slots (9.4%), inside the 10% deadband -> converged.
+    // broker-3 is the freest peer; with equal producer weights it should win.
     peers.put("broker-1",
-        new GossipState(new GossipMessage("broker-1", 5, false, now), now));
+        new GossipState(new GossipMessage("broker-1", 28, false, now), now));
     peers.put("broker-2",
-        new GossipState(new GossipMessage("broker-2", 8, false, now), now));
+        new GossipState(new GossipMessage("broker-2", 29, false, now), now));
     peers.put("broker-3",
-        new GossipState(new GossipMessage("broker-3", 15, false, now), now));
+        new GossipState(new GossipMessage("broker-3", 30, false, now), now));
 
     // Set<String> overload simulates a v4 producer: every entry is weight=1.
     Set<String> conns = new HashSet<>();
@@ -1344,7 +1389,7 @@ public class TestCurrConnectionsEvictionStrategy {
     EvictionConfig config = new EvictionConfig();
     config.setEnabled(true);
     config.setMaxConnectionsPerProducer(3);
-    config.setEvictionPercentageThreshold(0.0);
+    config.setEvictionPercentageThreshold(10.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(1);
     CurrConnectionsEvictionStrategy strategy =
@@ -1352,13 +1397,14 @@ public class TestCurrConnectionsEvictionStrategy {
 
     long now = System.currentTimeMillis();
     Map<String, GossipState> peers = new HashMap<>();
-    // broker-1 has the most producer slots but is frozen.
+    // All peers near local's free count -> cluster converged. broker-1 has
+    // the most producer slots but is frozen, so it must be excluded.
     peers.put("broker-1",
-        new GossipState(new GossipMessage("broker-1", 5, true, now), now));
+        new GossipState(new GossipMessage("broker-1", 30, true, now), now));
     peers.put("broker-2",
-        new GossipState(new GossipMessage("broker-2", 8, false, now), now));
+        new GossipState(new GossipMessage("broker-2", 30, false, now), now));
     peers.put("broker-3",
-        new GossipState(new GossipMessage("broker-3", 12, false, now), now));
+        new GossipState(new GossipMessage("broker-3", 31, false, now), now));
 
     sm.recordProducerConnections("fat",
         slotMap("broker-1", 20, "broker-2", 3, "broker-3", 2, BROKER_LOCAL, 1));
@@ -1382,7 +1428,7 @@ public class TestCurrConnectionsEvictionStrategy {
     EvictionConfig config = new EvictionConfig();
     config.setEnabled(true);
     config.setMaxConnectionsPerProducer(3);
-    config.setEvictionPercentageThreshold(0.0);
+    config.setEvictionPercentageThreshold(10.0);
     config.setPendingEvictionCooldownSeconds(0.0);
     config.setTopNTargets(1);
     CurrConnectionsEvictionStrategy strategy =
@@ -1390,8 +1436,10 @@ public class TestCurrConnectionsEvictionStrategy {
 
     long now = System.currentTimeMillis();
     Map<String, GossipState> peers = new HashMap<>();
+    // Cluster converged (local free=32, peer free=32) so the gate passes
+    // and we actually exercise the zero-slot rejection in tryConsolidation.
     peers.put("broker-1",
-        new GossipState(new GossipMessage("broker-1", 10, false, now), now));
+        new GossipState(new GossipMessage("broker-1", 32, false, now), now));
 
     // Register the over-cap producer but with 0 slots locally.
     sm.recordProducerConnections("ghost",
