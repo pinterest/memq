@@ -1485,4 +1485,468 @@ public class TestCurrConnectionsEvictionStrategy {
     assertEquals("fat", result.getPid());
     assertEquals("broker-1", result.getTargetBrokerIp());
   }
+
+  // ============================================================
+  // Linear-decay top-N target weighting
+  // ============================================================
+
+  /**
+   * Invoke the package-private {@code selectTargetBroker} via reflection so
+   * tests can verify the weighting distribution directly without going
+   * through {@code evaluate()} (which carries cooldown state that biases
+   * repeated calls).
+   */
+  @SuppressWarnings("unchecked")
+  private static Map.Entry<String, Integer> invokeSelectTargetBroker(
+      CurrConnectionsEvictionStrategy strategy,
+      java.util.List<Map.Entry<String, Integer>> sortedCandidates) throws Exception {
+    Method m = CurrConnectionsEvictionStrategy.class.getDeclaredMethod(
+        "selectTargetBroker", java.util.List.class);
+    m.setAccessible(true);
+    return (Map.Entry<String, Integer>) m.invoke(strategy, sortedCandidates);
+  }
+
+  @Test
+  public void testLinearDecayTargetWeighting() throws Exception {
+    // Direct invocation of selectTargetBroker to verify the rank-based
+    // linear decay distribution. With topN=3 the expected probabilities
+    // are 50% / 33% / 17% regardless of free-slot magnitudes (which is
+    // exactly the property that distinguishes the new rank-based weighting
+    // from the old free-slot-proportional weighting where, with free counts
+    // 30/29/28, picks would be roughly equal).
+    EvictionConfig config = new EvictionConfig();
+    config.setTopNTargets(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    java.util.List<Map.Entry<String, Integer>> candidates = new java.util.ArrayList<>();
+    candidates.add(new java.util.AbstractMap.SimpleEntry<>("broker-1", 30));
+    candidates.add(new java.util.AbstractMap.SimpleEntry<>("broker-2", 29));
+    candidates.add(new java.util.AbstractMap.SimpleEntry<>("broker-3", 28));
+
+    Map<String, Integer> picks = new HashMap<>();
+    int trials = 30000;
+    for (int i = 0; i < trials; i++) {
+      Map.Entry<String, Integer> r = invokeSelectTargetBroker(strategy, candidates);
+      picks.merge(r.getKey(), 1, Integer::sum);
+    }
+
+    double p1 = (double) picks.getOrDefault("broker-1", 0) / trials;
+    double p2 = (double) picks.getOrDefault("broker-2", 0) / trials;
+    double p3 = (double) picks.getOrDefault("broker-3", 0) / trials;
+    // Expected 50/33/17; allow ±3 percentage points slack (30k trials,
+    // binomial sd ~0.3pp, so 3pp is ~10 sigma).
+    assertTrue("rank-1 should win ~50% (got " + p1 + ")",
+        Math.abs(p1 - 0.50) < 0.03);
+    assertTrue("rank-2 should win ~33% (got " + p2 + ")",
+        Math.abs(p2 - 0.333) < 0.03);
+    assertTrue("rank-3 should win ~17% (got " + p3 + ")",
+        Math.abs(p3 - 0.167) < 0.03);
+  }
+
+  @Test
+  public void testLinearDecayInvariantToFreeSlotMagnitude() throws Exception {
+    // Distribution is purely rank-based, so wildly different free-slot
+    // magnitudes ([18, 17, 15] vs [30, 4, 2]) produce the same probabilities.
+    EvictionConfig config = new EvictionConfig();
+    config.setTopNTargets(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    java.util.List<Map.Entry<String, Integer>> closeMagnitudes = new java.util.ArrayList<>();
+    closeMagnitudes.add(new java.util.AbstractMap.SimpleEntry<>("a1", 18));
+    closeMagnitudes.add(new java.util.AbstractMap.SimpleEntry<>("a2", 17));
+    closeMagnitudes.add(new java.util.AbstractMap.SimpleEntry<>("a3", 15));
+
+    java.util.List<Map.Entry<String, Integer>> wideMagnitudes = new java.util.ArrayList<>();
+    wideMagnitudes.add(new java.util.AbstractMap.SimpleEntry<>("b1", 30));
+    wideMagnitudes.add(new java.util.AbstractMap.SimpleEntry<>("b2", 4));
+    wideMagnitudes.add(new java.util.AbstractMap.SimpleEntry<>("b3", 2));
+
+    int trials = 30000;
+    int closeRank1 = 0, wideRank1 = 0;
+    for (int i = 0; i < trials; i++) {
+      if (invokeSelectTargetBroker(strategy, closeMagnitudes).getKey().equals("a1")) closeRank1++;
+      if (invokeSelectTargetBroker(strategy, wideMagnitudes).getKey().equals("b1")) wideRank1++;
+    }
+    double closeP = (double) closeRank1 / trials;
+    double wideP = (double) wideRank1 / trials;
+    // Both should be ~50% (rank-based, magnitude-independent).
+    assertTrue("close-magnitude rank-1 wins ~50% (got " + closeP + ")",
+        Math.abs(closeP - 0.50) < 0.03);
+    assertTrue("wide-magnitude rank-1 wins ~50% (got " + wideP + ")",
+        Math.abs(wideP - 0.50) < 0.03);
+  }
+
+  @Test
+  public void testLinearDecayTopNOne() throws Exception {
+    // topN=1 collapses to deterministic top-1 pick (no randomization).
+    EvictionConfig config = new EvictionConfig();
+    config.setTopNTargets(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    java.util.List<Map.Entry<String, Integer>> candidates = new java.util.ArrayList<>();
+    candidates.add(new java.util.AbstractMap.SimpleEntry<>("broker-1", 30));
+    candidates.add(new java.util.AbstractMap.SimpleEntry<>("broker-2", 20));
+
+    for (int i = 0; i < 50; i++) {
+      Map.Entry<String, Integer> r = invokeSelectTargetBroker(strategy, candidates);
+      assertEquals("topN=1 must always pick the freest peer",
+          "broker-1", r.getKey());
+    }
+  }
+
+  // ============================================================
+  // Decoupled consolidation threshold
+  // ============================================================
+
+  @Test
+  public void testConsolidationFiresInLooseDeadbandOnly() throws Exception {
+    // Cluster spread 12.5% (= 4 slots / 32) is OUTSIDE the eviction deadband
+    // (10%) but INSIDE the consolidation deadband (20%). Local is at or above
+    // mean so the broker enters the "no eviction needed" branch, and the
+    // looser consolidation threshold should permit consolidation.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 10); // local free=31
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(10.0);
+    config.setConsolidationPercentageThreshold(20.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    // Spread = 31-27 = 4 slots (12.5%). > eviction threshold (10%), <= consolidation (20%).
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 27, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 30, false, now), now));
+    peers.put("broker-3",
+        new GossipState(new GossipMessage("broker-3", 31, false, now), now));
+
+    sm.recordProducerConnections("fat",
+        slotMap("broker-1", 5, "broker-2", 3, "broker-3", 2, BROKER_LOCAL, 1));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull("loose consolidation deadband should permit the consolidation",
+        result);
+    assertEquals("fat", result.getPid());
+    assertEquals("broker-1", result.getTargetBrokerIp());
+  }
+
+  @Test
+  public void testConsolidationSuppressedAboveLooseDeadband() throws Exception {
+    // Cluster spread 25% (= 8 slots / 32) is outside BOTH thresholds (eviction
+    // 10%, consolidation 20%). Consolidation must not fire.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 10);
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(10.0);
+    config.setConsolidationPercentageThreshold(20.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 23, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 25, false, now), now));
+    peers.put("broker-3",
+        new GossipState(new GossipMessage("broker-3", 30, false, now), now));
+
+    sm.recordProducerConnections("fat",
+        slotMap("broker-1", 5, "broker-2", 3, "broker-3", 2, BROKER_LOCAL, 1));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNull("consolidation must be suppressed when spread exceeds loose threshold",
+        result);
+  }
+
+  @Test
+  public void testConsolidationThresholdClampedToEvictionThreshold() throws Exception {
+    // Misconfiguration: consolidation threshold (5%) < eviction threshold (10%).
+    // The runtime clamp must use max() so consolidation can never be tighter
+    // than the band where eviction is still actively trying to shed.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 10); // local free=31
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(10.0);
+    config.setConsolidationPercentageThreshold(5.0); // misconfigured tighter
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    // Spread = 31-28 = 3 slots (9.4%). Inside eviction (10%), but
+    // OUTSIDE the misconfigured-tighter consolidation (5%). The clamp must
+    // raise it to 10% so consolidation fires.
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 28, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 30, false, now), now));
+
+    sm.recordProducerConnections("fat",
+        slotMap("broker-1", 5, "broker-2", 3, "broker-3", 2, BROKER_LOCAL, 1));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull("clamp must permit consolidation at the eviction threshold",
+        result);
+  }
+
+  // ============================================================
+  // Stuck-bypass safety valve
+  // ============================================================
+
+  @Test
+  public void testStuckBypassTriggersOnSecondConsecutiveBlock() throws Exception {
+    // Sparse-topology setup: one producer at cap=3 with multiple slots, all
+    // 3 of its connections are peers EXCLUDING the only freer broker the
+    // strategy will roll. Tick 1 hits "no eligible producer" (counter=1).
+    // Tick 2 should trigger stuck-bypass and evict despite cap.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 250); // local free=7
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setConsolidationPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1); // deterministic: always rolls "broker-target"
+    config.setTopNProducers(1);
+    config.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    // Single freest peer is "broker-target" -- not in the producer's set.
+    peers.put("broker-target",
+        new GossipState(new GossipMessage("broker-target", 30, false, now), now));
+    peers.put("broker-x",
+        new GossipState(new GossipMessage("broker-x", 10, false, now), now));
+    peers.put("broker-y",
+        new GossipState(new GossipMessage("broker-y", 10, false, now), now));
+
+    // Producer is at cap=3 with multiple slots locally (>1, so routine
+    // cap-skip would normally apply) but is NOT connected to broker-target.
+    sm.recordProducerConnections("fat",
+        slotMap(BROKER_LOCAL, 25, "broker-x", 1, "broker-y", 1));
+
+    Map<String, Set<String>> topicMap = allPeersServeTopic(peers);
+
+    // Tick 1: routine mode -> cap-skip -> "no eligible producer".
+    EvictionResult r1 = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), topicMap);
+    assertNull("tick 1 must be blocked by cap-skip", r1);
+
+    // Tick 2: counter==1 entering, so stuck-bypass kicks in. cap-skip is
+    // bypassed -> the heavy producer ("fat") gets evicted despite cap.
+    EvictionResult r2 = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), topicMap);
+    assertNotNull("stuck-bypass must fire on the 2nd consecutive blocked tick",
+        r2);
+    assertEquals("fat", r2.getPid());
+    assertEquals("broker-target", r2.getTargetBrokerIp());
+  }
+
+  /** Read the package-private blocked-tick counter via reflection. */
+  private static int getBlockedCounter(CurrConnectionsEvictionStrategy strategy)
+      throws Exception {
+    Field f = CurrConnectionsEvictionStrategy.class
+        .getDeclaredField("consecutiveBlockedEvictions");
+    f.setAccessible(true);
+    return f.getInt(strategy);
+  }
+
+  @Test
+  public void testStuckBypassCounterIncrementsOnBlockedTick() throws Exception {
+    // A single blocked tick should leave counter == 1 (not yet at the
+    // bypass threshold, so the tick ran in routine mode).
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 250);
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setConsolidationPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setTopNProducers(1);
+    config.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-target",
+        new GossipState(new GossipMessage("broker-target", 30, false, now), now));
+    peers.put("broker-x",
+        new GossipState(new GossipMessage("broker-x", 10, false, now), now));
+    peers.put("broker-y",
+        new GossipState(new GossipMessage("broker-y", 10, false, now), now));
+    sm.recordProducerConnections("fat",
+        slotMap(BROKER_LOCAL, 25, "broker-x", 1, "broker-y", 1));
+
+    EvictionResult r = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+    assertNull("tick 1 must be blocked by cap-skip", r);
+    assertEquals("counter increments to 1 after first blocked tick",
+        1, getBlockedCounter(strategy));
+  }
+
+  @Test
+  public void testStuckBypassCounterResetsOnSuccessfulEviction() throws Exception {
+    // Counter pre-loaded to 1 via reflection (simulating one prior blocked
+    // tick). A successful eviction this tick must reset it to 0 so a
+    // single isolated future block does not immediately trip the bypass.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 250);
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setConsolidationPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setTopNProducers(1);
+    config.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    // Producer IS connected to the freest peer -> normal eviction succeeds
+    // without needing bypass.
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-target",
+        new GossipState(new GossipMessage("broker-target", 30, false, now), now));
+    sm.recordProducerConnections("fat",
+        slotMap(BROKER_LOCAL, 25, "broker-target", 1));
+
+    // Pre-load the counter to 1 (one prior blocked tick).
+    Field counter = CurrConnectionsEvictionStrategy.class
+        .getDeclaredField("consecutiveBlockedEvictions");
+    counter.setAccessible(true);
+    counter.setInt(strategy, 1);
+
+    EvictionResult r = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+    assertNotNull("eviction must succeed (target is in producer's set)", r);
+    assertEquals("counter must reset to 0 after a successful eviction",
+        0, getBlockedCounter(strategy));
+  }
+
+  @Test
+  public void testStuckBypassResetsAfterUnsuccessfulBypassAttempt() throws Exception {
+    // Counter pre-loaded to 1 (one prior blocked tick); the current tick
+    // therefore enters bypass mode. But the producer writes a topic the
+    // target does not serve, so even bypass cannot evict. Counter must
+    // reset to 0 (NOT go to 2) to avoid perpetually re-entering bypass on
+    // a topology where the problem isn't cap-skip.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 250);
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setConsolidationPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setTopNProducers(1);
+    config.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-target",
+        new GossipState(new GossipMessage("broker-target", 30, false, now), now));
+
+    sm.recordProducerConnections("fat",
+        slotMap(BROKER_LOCAL, 25, "broker-x", 1, "broker-y", 1));
+
+    // Producer writes TOPIC. Local serves TOPIC and "otherTopic".
+    // broker-target serves ONLY "otherTopic". sharesTopic(target, local) =
+    // true (otherTopic), so target enters candidate list; but
+    // writesToServedTopic(producer={TOPIC}, target={otherTopic}) = false,
+    // so producer is rejected even with bypass.
+    Map<String, Set<String>> topicMap = new HashMap<>();
+    topicMap.put(TOPIC, new HashSet<>(java.util.Arrays.asList(BROKER_LOCAL)));
+    topicMap.put("otherTopic", new HashSet<>(
+        java.util.Arrays.asList(BROKER_LOCAL, "broker-target")));
+
+    // Pre-load counter to 1: this tick is the 2nd consecutive blocked ->
+    // bypass enabled.
+    Field counter = CurrConnectionsEvictionStrategy.class
+        .getDeclaredField("consecutiveBlockedEvictions");
+    counter.setAccessible(true);
+    counter.setInt(strategy, 1);
+
+    EvictionResult r = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), topicMap);
+    assertNull("bypass cannot help when the producer's topic isn't served by target",
+        r);
+    assertEquals("counter must reset to 0 after a failed bypass attempt",
+        0, getBlockedCounter(strategy));
+  }
+
+  @Test
+  public void testStuckBypassCounterResetsOnConvergedBranch() throws Exception {
+    // Counter pre-loaded to 1. The current tick takes the CONVERGED branch
+    // (local is at-or-above mean) -> consolidation path, not "no eligible
+    // producer". Counter must reset, not stay incremented.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 10); // local free=31
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(10.0);
+    config.setConsolidationPercentageThreshold(20.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 30, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 31, false, now), now));
+    sm.recordProducerConnections("fat",
+        slotMap("broker-1", 1, "broker-2", 1, BROKER_LOCAL, 1));
+
+    Field counter = CurrConnectionsEvictionStrategy.class
+        .getDeclaredField("consecutiveBlockedEvictions");
+    counter.setAccessible(true);
+    counter.setInt(strategy, 1);
+
+    strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+    assertEquals("converged-branch evaluation must reset the blocked counter",
+        0, getBlockedCounter(strategy));
+  }
 }

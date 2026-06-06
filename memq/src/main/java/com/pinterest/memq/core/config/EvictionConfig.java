@@ -23,6 +23,7 @@ public class EvictionConfig {
   private String strategyClass = CurrConnectionsEvictionStrategy.class.getName(); // default strategy
   private double intervalSeconds = 5.0;
   private double evictionPercentageThreshold = 10.0;
+  private double consolidationPercentageThreshold = 20.0;
   private double pendingEvictionCooldownSeconds = 10.0;
   private int topNTargets = 3;
   private int topNProducers = 3;
@@ -58,6 +59,39 @@ public class EvictionConfig {
 
   public void setEvictionPercentageThreshold(double evictionPercentageThreshold) {
     this.evictionPercentageThreshold = evictionPercentageThreshold;
+  }
+
+  /**
+   * Cluster-spread deadband within which {@linkplain
+   * CurrConnectionsEvictionStrategy steady-state consolidation} is allowed to
+   * fire. Expressed as a percentage of {@code totalSlots}. The strategy
+   * computes {@code spread = max(freeSlots) - min(freeSlots)} across
+   * topic-sharing brokers (including local) and fires consolidation only when
+   * {@code spread <= consolidationPercentageThreshold}.
+   * <p>
+   * Decoupled from {@link #getEvictionPercentageThreshold()} so consolidation
+   * can run on a looser deadband than the one that triggers normal eviction.
+   * Under sparse producer topologies (low producer-to-broker ratio), normal
+   * eviction often gets stuck on the cap-skip filter and the cluster
+   * persistently hovers just above the strict eviction deadband -- a strict
+   * consolidation deadband would never fire in that regime. A looser
+   * consolidation deadband lets over-cap producers gracefully shrink while
+   * normal eviction wrestles with the remaining imbalance.
+   * <p>
+   * <b>Invariant:</b> at runtime the strategy uses
+   * {@code max(consolidationPercentageThreshold, evictionPercentageThreshold)}.
+   * If misconfigured below the eviction threshold the value is silently
+   * clamped up -- consolidation must never be tighter than the band where
+   * normal eviction is still actively trying to shed load.
+   *
+   * @return the configured consolidation spread deadband, in percent.
+   */
+  public double getConsolidationPercentageThreshold() {
+    return consolidationPercentageThreshold;
+  }
+
+  public void setConsolidationPercentageThreshold(double consolidationPercentageThreshold) {
+    this.consolidationPercentageThreshold = consolidationPercentageThreshold;
   }
 
   public double getPendingEvictionCooldownSeconds() {

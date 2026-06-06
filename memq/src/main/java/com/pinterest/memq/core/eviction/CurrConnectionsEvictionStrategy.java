@@ -38,19 +38,19 @@ import java.util.stream.Collectors;
  * Default eviction strategy. Picks the target broker first via load-balance
  * guards, then chooses a producer to send there.
  * <p>
- * The strategy operates in two modes driven by the {@link SlotManager}'s drain
- * latch:
+ * The strategy operates in three modes:
  * <ul>
- *   <li><b>Routine mode</b> ({@code !drainLatched}): the broker is healthy and
- *       evictions are about gentle rebalancing. Producers are sorted ascending
- *       by source-slot count and the lightest are preferred -- a producer with
- *       {@code 1} slot on the source naturally drops its source connection on
- *       eviction (a "graceful swap"). The {@code maxConnectionsPerProducer}
- *       cap is enforced: an eviction that would force a client-side connection
- *       drop (producer at cap, target not in its set, source slots &gt; 1) is
- *       <i>refused</i> rather than dispatched. This avoids the "harmonic
- *       dance" oscillation where forced drops repeatedly bounce the lightest
- *       non-target connection between two brokers.</li>
+ *   <li><b>Routine mode</b> ({@code !drainLatched && !stuckBypass}): the
+ *       broker is healthy and evictions are about gentle rebalancing.
+ *       Producers are sorted ascending by source-slot count and the lightest
+ *       are preferred -- a producer with {@code 1} slot on the source
+ *       naturally drops its source connection on eviction (a "graceful
+ *       swap"). The {@code maxConnectionsPerProducer} cap is enforced: an
+ *       eviction that would force a client-side connection drop (producer at
+ *       cap, target not in its set, source slots &gt; 1) is <i>refused</i>
+ *       rather than dispatched. This avoids the "harmonic dance" oscillation
+ *       where forced drops repeatedly bounce the lightest non-target
+ *       connection between two brokers.</li>
  *   <li><b>Drain mode</b> ({@code drainLatched}): the broker is saturated and
  *       must shed load even at the cost of a connection drop. Producers are
  *       sorted descending by source-slot count and the heaviest are preferred
@@ -58,6 +58,16 @@ import java.util.stream.Collectors;
  *       the saturation, since freeing a slot the heavy producer would just
  *       reabsorb otherwise accomplishes nothing. The cap-violation check is
  *       relaxed.</li>
+ *   <li><b>Stuck-bypass mode</b>: a safety valve for sparse producer
+ *       topologies (low producer-to-broker ratio) where routine cap-skip
+ *       eliminates every candidate on most ticks. After
+ *       {@link #STUCK_BYPASS_THRESHOLD} consecutive {@code no eligible
+ *       producer} outcomes the next eviction tick runs with cap-skip
+ *       disabled, identical to drain mode but triggered by repeated failure
+ *       rather than local saturation. The producer that lands at
+ *       {@code cap+1} is then shrunk back to {@code cap} by the next
+ *       consolidation pass (which runs on its own looser deadband, see
+ *       {@code consolidationPercentageThreshold}).</li>
  * </ul>
  * In both modes the top-{@code topNProducers} sorted candidates are picked
  * uniformly at random, with "already connected to target" as the secondary
@@ -78,18 +88,26 @@ import java.util.stream.Collectors;
  * load in the cluster shape).
  * <p>
  * <b>Target selection:</b> sort surviving target candidates by free slots
- * (desc), pick probabilistically from the top-{@code topNTargets} weighted by
- * free slots. Then verify the chosen target is strictly less loaded than us by
- * more than {@code evictionPercentageThreshold}.
+ * (desc), pick from the top-{@code topNTargets} using a rank-based linear
+ * decay (weight {@code = topN - rank}, so for {@code topN=3} the freest peer
+ * wins with probability 50%, the second with 33%, the third with 17%). The
+ * decay concentrates probability on the actually-freest peer without locking
+ * the broker into a single deterministic target. Then verify the chosen
+ * target is strictly less loaded than us by more than
+ * {@code evictionPercentageThreshold}.
  * <p>
  * <b>Steady-state consolidation:</b> when the load-balance check concludes
  * "no eviction needed" <i>and</i> the cluster's free-slot spread (max minus
  * min across topic-sharing brokers including local) is within the
- * {@code evictionPercentageThreshold} deadband, the strategy looks for
- * producers whose connection count exceeds {@code maxConnectionsPerProducer}
- * and picks one with the lowest source-slot count to evict to an
- * already-connected target. This shrinks over-cap producers back to the cap
- * via gradual graceful drains, without disrupting balanced operation.
+ * {@code consolidationPercentageThreshold} deadband (typically looser than
+ * the eviction threshold), the strategy looks for producers whose connection
+ * count exceeds {@code maxConnectionsPerProducer} and picks one with the
+ * lowest source-slot count to evict to an already-connected target. This
+ * shrinks over-cap producers back to the cap via gradual graceful drains,
+ * without disrupting balanced operation. Decoupling consolidation from the
+ * eviction deadband lets consolidation fire in sparse-topology regimes where
+ * normal eviction perpetually wrestles with cap-skip and the cluster never
+ * tightens to the eviction deadband on its own.
  * <p>
  * Consolidation does <i>not</i> fire when:
  * <ul>
@@ -110,9 +128,30 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
 
   private static final Logger logger = Logger.getLogger(CurrConnectionsEvictionStrategy.class.getName());
 
+  /**
+   * Number of consecutive {@code no eligible producer} occurrences (including
+   * the current tick) at which the cap-skip filter is disabled for that
+   * tick ("stuck bypass"). With {@code 2}: the first blocked tick logs
+   * normally; the second consecutive blocked tick enables the bypass.
+   * Hard-coded -- this is a safety valve, not a tuning parameter. Higher
+   * values risk persistent under-eviction in sparse topologies; lower values
+   * risk premature cap violation.
+   */
+  private static final int STUCK_BYPASS_THRESHOLD = 2;
+
   private final String brokerId;
   private final EvictionConfig config;
   private final ConcurrentHashMap<String, Long> pendingEvictionTargets = new ConcurrentHashMap<>();
+  /**
+   * Count of consecutive eviction ticks that hit the {@code no eligible
+   * producer} branch. Reset on any successful eviction or any tick that did
+   * not reach the producer-selection step (e.g. converged / no targets /
+   * frozen). When this reaches {@link #STUCK_BYPASS_THRESHOLD} the next
+   * eviction call enables cap-skip bypass, then resets regardless of outcome.
+   * Access is single-threaded (the eviction tick runs one-at-a-time per
+   * broker) so a plain {@code int} suffices.
+   */
+  private int consecutiveBlockedEvictions = 0;
 
   public CurrConnectionsEvictionStrategy(String brokerId, EvictionConfig config) {
     this.brokerId = brokerId;
@@ -126,6 +165,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
                                  Map<String, Set<String>> topicToBrokerIps) {
     if (peerStates.isEmpty()) {
       logger.info("[" + brokerId + "] eviction skipped: no peers known via gossip yet");
+      consecutiveBlockedEvictions = 0;
       return null;
     }
 
@@ -155,6 +195,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       logger.info("[" + brokerId + "] eviction skipped: no topic-sharing peers to compare against"
           + " (peerCount=" + peerStates.size()
           + ", localTopics=" + localTopics.size() + ")");
+      consecutiveBlockedEvictions = 0;
       return null;
     }
 
@@ -170,7 +211,13 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     double spreadPct = slotManager.getTotalSlots() > 0
         ? (double) (clusterMaxFree - clusterMinFree) / slotManager.getTotalSlots() * 100
         : 0.0;
-    boolean clusterConverged = spreadPct <= config.getEvictionPercentageThreshold();
+    // Consolidation deadband must never be tighter than the eviction
+    // deadband -- otherwise we'd consolidate inside a band where normal
+    // eviction is still actively trying to shed load.
+    double consolidationThreshold = Math.max(
+        config.getConsolidationPercentageThreshold(),
+        config.getEvictionPercentageThreshold());
+    boolean clusterConverged = spreadPct <= consolidationThreshold;
 
     if (localFreeSlots >= meanFreeSlots) {
       logger.info("[" + brokerId + "] eviction skipped: local broker is not above mean load"
@@ -183,9 +230,10 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       // converged (max-min spread within deadband). When the cluster is
       // diverged in our favor (we're free, some peer is hot), consolidation
       // would just add load to our connected peers and slow real convergence.
+      consecutiveBlockedEvictions = 0;
       return maybeConsolidate(slotManager, peerStates, producerConnections,
           brokerToTopics, localTopics, clusterConverged,
-          clusterMaxFree, clusterMinFree, spreadPct);
+          clusterMaxFree, clusterMinFree, spreadPct, consolidationThreshold);
     }
 
     // Step 2: filter candidate target brokers. Each filter is a reason a
@@ -209,18 +257,23 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
           + " -- all topic-sharing peers are frozen or in cooldown");
       // BLOCKED branch: eviction is needed but cannot fire because every
       // peer is frozen or in cooldown. The cluster is acting; do not stack
-      // a consolidation on top.
+      // a consolidation on top. Don't increment the stuck counter either --
+      // this is a transient cluster-shape issue, not a producer-selection
+      // problem.
+      consecutiveBlockedEvictions = 0;
       return null;
     }
 
-    // Step 3: probabilistic top-N target selection, weighted by free slots so
-    // less loaded peers absorb more of the shedded traffic. Randomization
-    // within the top-N breaks deterministic cycles where the same target is
-    // chosen tick after tick.
+    // Step 3: rank-based linear-decay top-N target selection. The freest
+    // peer (rank 0) wins with weight = topN; each subsequent rank decays
+    // linearly. For topN=3 this is 50% / 33% / 17%. The decisive bias
+    // toward the freest peer focuses shedding where it helps most while
+    // keeping enough randomization to break deterministic cycles.
     candidates.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
     Map.Entry<String, Integer> target = selectTargetBroker(candidates);
     if (target == null) {
       logger.info("[" + brokerId + "] eviction skipped: target selection returned null");
+      consecutiveBlockedEvictions = 0;
       return null;
     }
 
@@ -231,9 +284,10 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
           + " <= local=" + localFreeSlots + ")");
       // CONVERGED branch (relative to chosen target). Consolidation also
       // requires the *whole* cluster to be converged.
+      consecutiveBlockedEvictions = 0;
       return maybeConsolidate(slotManager, peerStates, producerConnections,
           brokerToTopics, localTopics, clusterConverged,
-          clusterMaxFree, clusterMinFree, spreadPct);
+          clusterMaxFree, clusterMinFree, spreadPct, consolidationThreshold);
     }
 
     int slotDifference = Math.abs(localFreeSlots - target.getValue());
@@ -248,9 +302,10 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       // CONVERGED branch (gap to freest target is below deadband).
       // Consolidation also requires the *whole* cluster to be converged --
       // a low gap to the freest peer can coexist with a hot tail peer.
+      consecutiveBlockedEvictions = 0;
       return maybeConsolidate(slotManager, peerStates, producerConnections,
           brokerToTopics, localTopics, clusterConverged,
-          clusterMaxFree, clusterMinFree, spreadPct);
+          clusterMaxFree, clusterMinFree, spreadPct, consolidationThreshold);
     }
 
     // Only v4+ producers are eviction candidates.
@@ -258,17 +313,31 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       logger.info("[" + brokerId + "] eviction skipped: no v4+ producers registered yet"
           + " (target=" + target.getKey() + ") -- check that producers are using producer2"
           + " package and sending v4+ write requests");
+      consecutiveBlockedEvictions = 0;
       return null;
     }
 
     // Step 5: pick a producer. Constrain to producers writing to a topic the
     // target broker serves -- otherwise the producer would be sent to a
     // broker that doesn't own its topic processor and would just REDIRECT.
+    //
+    // Stuck-bypass: after STUCK_BYPASS_THRESHOLD consecutive "no eligible
+    // producer" outcomes the cap-skip filter is disabled for this single
+    // tick to break out of sparse-topology wedges where every producer is
+    // at cap and no rolled target is in any producer's connection set. The
+    // producer that gets evicted will land at cap+1 connections; consolidation
+    // (running on its own looser deadband) will gracefully pull it back to
+    // cap on a subsequent tick.
     Set<String> targetServedTopics = brokerToTopics.getOrDefault(target.getKey(),
         Collections.emptySet());
     boolean drainMode = slotManager.isDrainLatched();
+    // Treat *this* tick as the (counter+1)-th in a potential streak. Enable
+    // bypass when that count would reach STUCK_BYPASS_THRESHOLD. With
+    // threshold=2 and counter=1 entering (one prior blocked tick), the
+    // current tick is the 2nd in the streak -> bypass enabled.
+    boolean stuckBypass = (consecutiveBlockedEvictions + 1) >= STUCK_BYPASS_THRESHOLD;
     String pidToEvict = pickProducer(slotManager, producerConnections, target.getKey(),
-        targetServedTopics, drainMode);
+        targetServedTopics, drainMode, stuckBypass);
 
     if (pidToEvict == null) {
       // Two reasons this happens: (1) no producer writes to a topic served by
@@ -278,11 +347,21 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       logger.info("[" + brokerId + "] eviction skipped: no eligible producer for target="
           + target.getKey()
           + " (drainMode=" + drainMode
+          + ", stuckBypass=" + stuckBypass
+          + ", consecutiveBlocked=" + consecutiveBlockedEvictions
           + ", maxConnPerProducer=" + config.getMaxConnectionsPerProducer()
           + ", registeredV4Producers=" + producerConnections.size()
           + ", targetServedTopics=" + targetServedTopics + ")");
       // BLOCKED branch: routine cap-skip exhaustion, or topic-affinity
       // mismatch. Do not consolidate -- the cluster wants to act but can't.
+      if (stuckBypass) {
+        // Bypass already tried and still failed -> reset counter so we
+        // don't perpetually re-enter bypass mode on a topology where the
+        // problem is something other than cap-skip (e.g. topic mismatch).
+        consecutiveBlockedEvictions = 0;
+      } else {
+        consecutiveBlockedEvictions++;
+      }
       return null;
     }
 
@@ -291,11 +370,12 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     EvictionResult result = new EvictionResult(pidToEvict, target.getKey(), 1);
     logger.info("[" + brokerId + "] eviction decision: pid=" + pidToEvict
         + " target=" + target.getKey() + " slotsToEvict=1"
-        + " mode=" + (drainMode ? "drain" : "routine")
+        + " mode=" + (drainMode ? "drain" : stuckBypass ? "stuck-bypass" : "routine")
         + " (localFree=" + localFreeSlots + " targetFree=" + target.getValue()
         + " gap=" + String.format("%.2f", percentageDifference) + "%"
         + " v4Producers=" + producerConnections.size()
         + " targetTopics=" + targetServedTopics.size() + ")");
+    consecutiveBlockedEvictions = 0;
     return result;
   }
 
@@ -304,16 +384,22 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
    * <ul>
    *   <li>Eligibility: v4 producer with {@code > 0} source slots that writes to
    *       a topic the target broker serves.</li>
-   *   <li>Routine mode ({@code !drainMode}): drop any producer whose eviction
-   *       would force a client connection drop. The producer must already be
-   *       below the {@code maxConnectionsPerProducer} cap, or the target must
-   *       already be in its connection set, or the eviction must naturally
-   *       drop the source connection ({@code sourceSlots == 1}).</li>
+   *   <li>Routine mode ({@code !drainMode && !stuckBypass}): drop any producer
+   *       whose eviction would force a client connection drop. The producer
+   *       must already be below the {@code maxConnectionsPerProducer} cap, or
+   *       the target must already be in its connection set, or the eviction
+   *       must naturally drop the source connection ({@code sourceSlots == 1}).</li>
    *   <li>Drain mode: keep cap-violating candidates -- the broker is
    *       saturated and forcing a connection drop is the price of relief.</li>
+   *   <li>Stuck-bypass mode: same cap-skip relaxation as drain, used to
+   *       break out of sparse-topology wedges where routine cap-skip has
+   *       eliminated every candidate for too many consecutive ticks. The
+   *       producer that lands at {@code cap+1} connections is shrunk back to
+   *       {@code cap} by the next consolidation pass.</li>
    *   <li>Sort: ascending source-slots in routine (prefer graceful swaps),
-   *       descending in drain (prefer impactful shifts). Connected-to-target
-   *       is the tiebreaker at equal slot count so swap-free moves win.</li>
+   *       descending in drain/stuck-bypass (prefer impactful shifts).
+   *       Connected-to-target is the tiebreaker at equal slot count so
+   *       swap-free moves win.</li>
    *   <li>Pick uniformly at random from the top-{@code topNProducers}, so the
    *       same producer is not deterministically targeted every tick.</li>
    * </ul>
@@ -322,11 +408,13 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
                               Map<String, Map<String, Integer>> producerConnections,
                               String targetIp,
                               Set<String> targetServedTopics,
-                              boolean drainMode) {
+                              boolean drainMode,
+                              boolean stuckBypass) {
     if (targetServedTopics.isEmpty()) {
       return null;
     }
     int maxConns = config.getMaxConnectionsPerProducer();
+    boolean capRelaxed = drainMode || stuckBypass;
 
     List<ProducerCandidate> eligible = new ArrayList<>();
     for (Map.Entry<String, Map<String, Integer>> entry : producerConnections.entrySet()) {
@@ -352,8 +440,9 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       // a fresh broker for it, and the eviction will not naturally drop the
       // source connection. Picking it here would force the client to drop one
       // of its existing connections, which is exactly the disruption the
-      // routine path is trying to avoid. Drain mode allows this disruption.
-      if (!drainMode
+      // routine path is trying to avoid. Drain mode and stuck-bypass mode
+      // both allow this disruption.
+      if (!capRelaxed
           && maxConns > 0
           && conns.size() >= maxConns
           && !connectedToTarget
@@ -367,9 +456,11 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     }
 
     // Primary sort: ascending by slots in routine (lightest first -> graceful
-    // swaps), descending in drain (heaviest first -> impactful shifts).
-    // Tiebreaker: connected-to-target before unconnected at equal slot count.
-    Comparator<ProducerCandidate> primary = drainMode
+    // swaps), descending in drain/stuck-bypass (heaviest first -> impactful
+    // shifts -- the cap violation we're about to incur is only worth it for
+    // a heavy producer). Tiebreaker: connected-to-target before unconnected
+    // at equal slot count.
+    Comparator<ProducerCandidate> primary = capRelaxed
         ? (a, b) -> Integer.compare(b.slots, a.slots)
         : (a, b) -> Integer.compare(a.slots, b.slots);
     Comparator<ProducerCandidate> tiebreaker =
@@ -381,7 +472,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     logger.info("[" + brokerId + "] picking producer: pid=" + chosen.pid
         + " slots=" + chosen.slots
         + " connectedToTarget=" + chosen.connectedToTarget
-        + " mode=" + (drainMode ? "drain" : "routine")
+        + " mode=" + (drainMode ? "drain" : stuckBypass ? "stuck-bypass" : "routine")
         + " topN=" + topN
         + " eligible=" + eligible.size()
         + " target=" + targetIp);
@@ -402,8 +493,8 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
    * The spread is {@code max(freeSlots) - min(freeSlots)} over the
    * topic-sharing population including local, expressed as a percentage
    * of {@code totalSlots}. We only consolidate when it is at or below the
-   * same {@code evictionPercentageThreshold} deadband used for eviction
-   * triggering.
+   * effective {@code consolidationPercentageThreshold} deadband, which is
+   * clamped at runtime to be no tighter than the eviction deadband.
    */
   private EvictionResult maybeConsolidate(SlotManager slotManager,
                                           Map<String, GossipState> peerStates,
@@ -413,13 +504,14 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
                                           boolean clusterConverged,
                                           int clusterMaxFree,
                                           int clusterMinFree,
-                                          double spreadPct) {
+                                          double spreadPct,
+                                          double consolidationThreshold) {
     if (!clusterConverged) {
       logger.info("[" + brokerId + "] consolidation skipped: cluster diverged"
           + " (clusterMaxFree=" + clusterMaxFree
           + " clusterMinFree=" + clusterMinFree
           + " spread=" + String.format("%.2f", spreadPct) + "%"
-          + " > threshold=" + config.getEvictionPercentageThreshold() + "%)"
+          + " > consolidationThreshold=" + String.format("%.2f", consolidationThreshold) + "%)"
           + " -- local is on the freer side of a diverged cluster; let the"
           + " hot peer(s) shed before opportunistic moves");
       return null;
@@ -660,6 +752,23 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     return out;
   }
 
+  /**
+   * Pick a target from the sorted (free-slots desc) candidate list using a
+   * <b>rank-based linear decay</b>: weight {@code = topN - rank} for
+   * {@code rank} in {@code [0, topN)}. For {@code topN=3} this is weights
+   * {@code 3, 2, 1} or probabilities {@code 50%, 33%, 17%}; for
+   * {@code topN=5} it is weights {@code 5, 4, 3, 2, 1} or probabilities
+   * {@code 33%, 27%, 20%, 13%, 7%}.
+   * <p>
+   * This replaces the previous free-slot-proportional weighting where, with
+   * top-3 of e.g. {@code [18, 17, 15]}, the picks were {@code 36%, 34%, 30%}
+   * -- almost flat, so the freest broker won only marginally more often than
+   * the third-freest. Linear decay always concentrates roughly half the
+   * probability mass on the freest peer regardless of free-slot magnitude,
+   * which is what we want to favor (a more decisive shift toward the freest
+   * peer) while still keeping enough randomization to break deterministic
+   * cycles where the same target gets hammered tick after tick.
+   */
   private Map.Entry<String, Integer> selectTargetBroker(
       List<Map.Entry<String, Integer>> sortedCandidates) {
     int topN = Math.min(config.getTopNTargets(), sortedCandidates.size());
@@ -671,18 +780,16 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     }
 
     List<Map.Entry<String, Integer>> topCandidates = sortedCandidates.subList(0, topN);
-    int totalFreeSlots = topCandidates.stream()
-        .mapToInt(e -> Math.max(e.getValue(), 1))
-        .sum();
-
-    double rand = ThreadLocalRandom.current().nextDouble() * totalFreeSlots;
+    // Weights: topN, topN-1, ..., 1. Sum = topN * (topN + 1) / 2.
+    int totalWeight = topN * (topN + 1) / 2;
+    double rand = ThreadLocalRandom.current().nextDouble() * totalWeight;
     double cumulative = 0;
-    for (Map.Entry<String, Integer> candidate : topCandidates) {
-      cumulative += Math.max(candidate.getValue(), 1);
+    for (int rank = 0; rank < topN; rank++) {
+      cumulative += (topN - rank);
       if (rand < cumulative) {
-        return candidate;
+        return topCandidates.get(rank);
       }
     }
-    return topCandidates.get(topCandidates.size() - 1);
+    return topCandidates.get(topN - 1);
   }
 }
