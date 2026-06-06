@@ -117,7 +117,7 @@ public class EvictionManager {
     long startMs = System.currentTimeMillis();
     try {
       Map<String, GossipState> peerStates = peerStatesSupplier.get();
-      Map<String, Set<String>> producerConnections = slotManager.getProducerConnections();
+      Map<String, Map<String, Integer>> producerConnections = slotManager.getProducerConnections();
       Map<String, Set<String>> topicToBrokerIps = topicToBrokerIpsSupplier.get();
       logger.info("Eviction tick: peers=" + peerStates.size()
           + " v4Producers=" + producerConnections.size()

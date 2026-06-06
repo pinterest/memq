@@ -164,11 +164,11 @@ public class TestSlotManagerEviction {
     connections.add("broker-2");
     sm.recordProducerConnections("producer-1", connections);
 
-    Map<String, Set<String>> allConnections = sm.getProducerConnections();
+    Map<String, Map<String, Integer>> allConnections = sm.getProducerConnections();
     assertNotNull(allConnections.get("producer-1"));
     assertEquals(2, allConnections.get("producer-1").size());
-    assertTrue(allConnections.get("producer-1").contains("broker-1"));
-    assertTrue(allConnections.get("producer-1").contains("broker-2"));
+    assertTrue(allConnections.get("producer-1").containsKey("broker-1"));
+    assertTrue(allConnections.get("producer-1").containsKey("broker-2"));
   }
 
   @Test
@@ -372,8 +372,8 @@ public class TestSlotManagerEviction {
     sm.recordProducerConnections("producer-1",
         new HashSet<>(Collections.singletonList("broker-2")));
 
-    Map<String, Set<String>> allConnections = sm.getProducerConnections();
+    Map<String, Map<String, Integer>> allConnections = sm.getProducerConnections();
     assertEquals(1, allConnections.get("producer-1").size());
-    assertTrue(allConnections.get("producer-1").contains("broker-2"));
+    assertTrue(allConnections.get("producer-1").containsKey("broker-2"));
   }
 }

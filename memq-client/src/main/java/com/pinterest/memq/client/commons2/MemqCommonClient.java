@@ -28,6 +28,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -1027,11 +1028,25 @@ public class MemqCommonClient implements Closeable {
     return producerId;
   }
 
-  public List<String> getCurrentConnectionsList() {
+  /**
+   * Snapshot of {@code slotsOwned} sent on every v4+ write request so the
+   * broker can register this producer's connection set and (on v5) its
+   * per-broker slot distribution.
+   * <p>
+   * The map's key set is the producer's connection set; the values are
+   * the producer's slot ownership snapshot per broker. On v5 the broker
+   * uses these counts to choose consolidation targets where the
+   * producer already has substantial slot share (anti-ping-pong) and to
+   * break ties in regular target selection. On v4 the values are
+   * dropped on the wire and the broker reconstructs equal-weight 1s.
+   *
+   * @return a snapshot map of broker IP to slot count owned there.
+   */
+  public Map<String, Integer> getCurrentConnectionSlots() {
     if (slotsOwned.isEmpty()) {
-      return Collections.emptyList();
+      return Collections.emptyMap();
     }
-    return new ArrayList<>(slotsOwned.keySet());
+    return new LinkedHashMap<>(slotsOwned);
   }
 
   public ConcurrentHashMap<String, Integer> getSlotsOwned() {

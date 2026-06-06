@@ -22,6 +22,7 @@ import com.pinterest.memq.core.config.SlotAccountingConfig;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -95,7 +96,23 @@ public class SlotManager {
   private double freeSlotsEma;
   private volatile boolean drainLatched;
 
-  private final ConcurrentHashMap<String, Set<String>> producerConnections = new ConcurrentHashMap<>();
+  /**
+   * Per-producer connection-to-slots view (pid -&gt; broker IP -&gt; slots).
+   * <ul>
+   *   <li>The map's <i>key set</i> is the producer's connection set (which
+   *       brokers it currently routes writes to). Membership queries should
+   *       use {@code containsKey}, equivalent to the previous
+   *       {@code Set.contains}.</li>
+   *   <li>The values are the per-target slot ownership snapshot reported on
+   *       the most recent write. v5 producers report real slot counts; v4
+   *       producers (or pre-bootstrap) report {@code 1} for every entry
+   *       (equal weighting fallback). The eviction strategy reads these to
+   *       choose consolidation targets where the producer already has
+   *       substantial slot share (anti-ping-pong), with target free-slot
+   *       count as a tiebreaker.</li>
+   * </ul>
+   */
+  private final ConcurrentHashMap<String, Map<String, Integer>> producerConnections = new ConcurrentHashMap<>();
 
   /**
    * Maps a producer id (a v4 client-generated UUID) to the remote IP of the
@@ -700,24 +717,47 @@ public class SlotManager {
   }
 
   /**
-   * Record which brokers a producer is currently connected to.
-   * Called on the write request hot path for v4 producers only.
-   * <p>
-   * This map doubles as the <b>v4 producer registry</b>: only producers
-   * present here are eligible for eviction. v3 producers never call this
-   * method, so they are naturally excluded from eviction decisions.
-   * <p>
-   * The {@code connections} set may be empty during bootstrap (the producer
-   * has not yet learned about its slot ownership from any broker). An empty
-   * set still registers the producer as v4-capable; the eviction strategy
-   * gracefully falls back to "any v4 producer" when no producer has a known
-   * connection to the eviction target.
+   * Record which brokers a producer is currently connected to, treating
+   * every entry as equal weight. Convenience overload for v4 producers
+   * (which don't report per-target slot counts) and for tests.
    *
    * @param pid the producer identifier
    * @param connections the set of broker IPs this producer is connected to (may be empty)
    */
   public void recordProducerConnections(String pid, Set<String> connections) {
-    producerConnections.put(pid, connections);
+    if (connections == null || connections.isEmpty()) {
+      producerConnections.put(pid, Collections.emptyMap());
+      return;
+    }
+    Map<String, Integer> slots = new LinkedHashMap<>(connections.size());
+    for (String conn : connections) {
+      slots.put(conn, 1);
+    }
+    producerConnections.put(pid, slots);
+  }
+
+  /**
+   * Record which brokers a producer is currently connected to, with
+   * per-target slot counts. Called on the write request hot path for v5
+   * producers; v4 producers go through the {@code Set<String>} overload
+   * above with equal-weight fallback.
+   * <p>
+   * This map doubles as the <b>v4+ producer registry</b>: only producers
+   * present here are eligible for eviction. v3 producers never call this
+   * method, so they are naturally excluded from eviction decisions.
+   * <p>
+   * The {@code connectionSlots} map may be empty during bootstrap (the
+   * producer has not yet learned about its slot ownership from any
+   * broker). An empty map still registers the producer; the eviction
+   * strategy gracefully falls back to "any producer" when no producer
+   * has a known connection to the eviction target.
+   *
+   * @param pid the producer identifier
+   * @param connectionSlots broker IP to producer's slot count there (may be empty)
+   */
+  public void recordProducerConnections(String pid, Map<String, Integer> connectionSlots) {
+    producerConnections.put(pid,
+        connectionSlots == null ? Collections.emptyMap() : connectionSlots);
   }
 
   /**
@@ -755,12 +795,19 @@ public class SlotManager {
   }
 
   /**
-   * Get the current producer connections map (v4 producers only).
+   * Get the current producer connections map (v4+ producers only).
    * Used by EvictionManager to pass to the eviction strategy.
+   * <p>
+   * Outer map: producer id to inner map.<br>
+   * Inner map: broker IP to producer's slot count on that broker. For v5
+   * producers these counts are the producer's reported slot ownership;
+   * for v4 producers every entry holds the equal-weight placeholder
+   * {@code 1}. Use {@code .keySet()} when only the connection set is
+   * needed.
    *
-   * @return unmodifiable map of producer IDs to their connected broker IPs
+   * @return unmodifiable map of producer IDs to their per-broker slot counts
    */
-  public Map<String, Set<String>> getProducerConnections() {
+  public Map<String, Map<String, Integer>> getProducerConnections() {
     return Collections.unmodifiableMap(producerConnections);
   }
 

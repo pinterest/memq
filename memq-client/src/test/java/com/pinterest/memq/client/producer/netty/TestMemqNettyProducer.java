@@ -171,6 +171,10 @@ public class TestMemqNettyProducer {
       for (int i = 0; i < connCount; i++) {
         short connLen = buf.readShort();
         if (connLen > 0) buf.skipBytes(connLen);
+        // v5 also carries a per-entry int slot count
+        if (RequestType.PROTOCOL_VERSION >= 5) {
+          buf.readInt();
+        }
       }
     }
     int payloadLength = buf.readInt();

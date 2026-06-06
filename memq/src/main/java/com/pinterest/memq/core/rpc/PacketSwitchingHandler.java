@@ -45,8 +45,7 @@ import com.pinterest.memq.core.slot.SlotManager;
 
 import java.net.InetSocketAddress;
 import java.util.Collections;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.Map;
 
 import io.netty.channel.ChannelHandlerContext;
 
@@ -184,15 +183,19 @@ public class PacketSwitchingHandler {
         if (requestPacket.getProtocolVersion() >= 4
             && writePacket.getProducerId() != null
             && !writePacket.getProducerId().isEmpty()) {
-          // The presence of a v4 producerId is itself the signal that this is
-          // a v4 producer. Always register so EvictionManager can target it,
-          // even if currentConnections is empty (bootstrap: producer hasn't
+          // The presence of a v4+ producerId is itself the signal that this
+          // is a v4+ producer. Always register so EvictionManager can target
+          // it, even if the slot map is empty (bootstrap: producer hasn't
           // received any slot ownership info from any broker yet).
-          List<String> connections = writePacket.getCurrentConnections();
-          Set<String> connectionSet = (connections == null || connections.isEmpty())
-              ? Collections.emptySet()
-              : new HashSet<>(connections);
-          sm.recordProducerConnections(producerId, connectionSet);
+          //
+          // v5 producers report per-target slot counts; v4 producers carry
+          // only the connection set and the packet codec already populated
+          // the map with equal-weight 1s on decode. The eviction strategy
+          // treats equal-weight maps as ranking targets purely by free
+          // slots, identical to legacy behavior.
+          Map<String, Integer> connectionSlots = writePacket.getCurrentConnectionSlots();
+          sm.recordProducerConnections(producerId,
+              connectionSlots == null ? Collections.<String, Integer>emptyMap() : connectionSlots);
         }
       }
       topicProcessor.registerChannel(ctx.channel());

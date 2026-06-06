@@ -230,16 +230,16 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
-  public void testGetCurrentConnectionsList() {
-    assertTrue(client.getCurrentConnectionsList().isEmpty());
+  public void testGetCurrentConnectionSlots() {
+    assertTrue(client.getCurrentConnectionSlots().isEmpty());
 
     client.getSlotsOwned().put("10.0.0.1", 3);
     client.getSlotsOwned().put("10.0.0.2", 5);
 
-    List<String> connections = client.getCurrentConnectionsList();
-    assertEquals(2, connections.size());
-    assertTrue(connections.contains("10.0.0.1"));
-    assertTrue(connections.contains("10.0.0.2"));
+    java.util.Map<String, Integer> slots = client.getCurrentConnectionSlots();
+    assertEquals(2, slots.size());
+    assertEquals(Integer.valueOf(3), slots.get("10.0.0.1"));
+    assertEquals(Integer.valueOf(5), slots.get("10.0.0.2"));
   }
 
   @Test

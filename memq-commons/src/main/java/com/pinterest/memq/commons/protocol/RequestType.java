@@ -46,7 +46,20 @@ public enum RequestType {
     this.responseImplementationSupplier = responseImplementationSupplier;
   }
 
-  public static final short PROTOCOL_VERSION = 4;
+  /**
+   * Wire protocol version.
+   * <p>
+   * <b>v5:</b> v4 fields plus a per-target slot-ownership map sent alongside
+   * the connection list in {@link WriteRequestPacket}. The broker uses the
+   * map to make connection-count consolidation decisions in
+   * {@code CurrConnectionsEvictionStrategy}. A v5 broker still accepts v4
+   * write requests (it interprets the missing slot info as equal weight),
+   * so brokers must be upgraded before producers.
+   * <p>
+   * <b>v4:</b> producer-id and connection list added to write requests for
+   * eviction-aware routing.
+   */
+  public static final short PROTOCOL_VERSION = 5;
 
   public static RequestType extractPacketType(ByteBuf inBuffer) throws IOException {
     int requestTypeCode = (int) inBuffer.readByte();

@@ -46,7 +46,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.util.List;
+import java.util.Map;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -108,7 +108,7 @@ public class Request {
   private final ByteBuf writeRequestPacketHeaderByteBuf;
   private final ByteBuf payloadByteBuf;
   private final String snapshotProducerId;
-  private final List<String> snapshotConnections;
+  private final Map<String, Integer> snapshotConnectionSlots;
   private OutputStream outputStream;
   private byte[] messageIdHash;
   private int messageCount;
@@ -159,12 +159,13 @@ public class Request {
     int writeHeaderSize;
     if (RequestType.PROTOCOL_VERSION >= 4) {
       snapshotProducerId = client.getProducerId();
-      snapshotConnections = client.getCurrentConnectionsList();
+      snapshotConnectionSlots = client.getCurrentConnectionSlots();
       writeHeaderSize = WriteRequestPacket.getHeaderSize(
-          RequestType.PROTOCOL_VERSION, topic, snapshotProducerId, snapshotConnections);
+          RequestType.PROTOCOL_VERSION, topic, snapshotProducerId,
+          snapshotConnectionSlots);
     } else {
       snapshotProducerId = null;
-      snapshotConnections = null;
+      snapshotConnectionSlots = null;
       writeHeaderSize = WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, topic);
     }
     writeRequestPacketHeaderByteBuf = largeByteBuf.retainedSlice(
@@ -340,7 +341,7 @@ public class Request {
             topic.getBytes(), true, checksum, payload.duplicate());
     if (RequestType.PROTOCOL_VERSION >= 4) {
       writeRequestPacket.setProducerId(snapshotProducerId);
-      writeRequestPacket.setCurrentConnections(snapshotConnections);
+      writeRequestPacket.setCurrentConnectionSlots(snapshotConnectionSlots);
     }
 
     ByteBuf headerBuf = writeRequestPacketHeaderByteBuf;

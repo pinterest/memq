@@ -17,9 +17,9 @@ package com.pinterest.memq.commons.protocol;
 
 import java.io.IOException;
 import java.nio.charset.Charset;
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
@@ -33,7 +33,24 @@ public class WriteRequestPacket implements Packet {
   protected int dataLength;
   protected ByteBuf data;
   protected String producerId;
-  protected List<String> currentConnections;
+  /**
+   * Per-broker slot ownership snapshot. Maps broker IP to the number of
+   * slots this producer holds there.
+   * <p>
+   * Single source of truth for both the v4 and v5 connection-set wire
+   * formats. On v5, the wire carries IP + slot count for each entry. On
+   * v4, the wire carries only the IPs (in insertion order) and the map
+   * is populated with placeholder weight {@code 1} for each entry --
+   * "equal weighting" semantics. On v3 the map is {@code null} (the
+   * field is not part of the v3 protocol).
+   * <p>
+   * The broker eviction strategy uses these counts to choose
+   * consolidation targets where the producer already has substantial
+   * slot share (anti-ping-pong) and to break ties in regular target
+   * selection. A v4 producer's equal-weight map degenerates that ranking
+   * to "freest target wins", matching the legacy behavior.
+   */
+  protected Map<String, Integer> currentConnectionSlots;
 
   public WriteRequestPacket() {
   }
@@ -55,7 +72,8 @@ public class WriteRequestPacket implements Packet {
     if (protocolVersion >= 4) {
       return Byte.BYTES + Short.BYTES + topicName.length + Integer.BYTES
           + ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(producerId)
-          + getConnectionsSerializedSize() + Integer.BYTES + dataLength;
+          + getConnectionsSerializedSize(protocolVersion)
+          + Integer.BYTES + dataLength;
     }
     return Byte.BYTES + Short.BYTES + topicName.length + Integer.BYTES + dataLength
         + (protocolVersion >= 1 ? Integer.BYTES : 0);
@@ -67,14 +85,18 @@ public class WriteRequestPacket implements Packet {
   }
 
   public static int getHeaderSize(short protocolVersion, String topicName,
-                                   String producerId, List<String> currentConnections) {
+                                   String producerId,
+                                   Map<String, Integer> currentConnectionSlots) {
     if (protocolVersion >= 4) {
       int size = Byte.BYTES + Short.BYTES + topicName.length() + Integer.BYTES
           + ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(producerId)
           + Short.BYTES + Integer.BYTES;
-      if (currentConnections != null) {
-        for (String conn : currentConnections) {
-          size += ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(conn);
+      if (currentConnectionSlots != null) {
+        for (Map.Entry<String, Integer> e : currentConnectionSlots.entrySet()) {
+          size += ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(e.getKey());
+          if (protocolVersion >= 5) {
+            size += Integer.BYTES;
+          }
         }
       }
       return size;
@@ -85,13 +107,13 @@ public class WriteRequestPacket implements Packet {
   @Override
   public void readFields(ByteBuf inBuffer, short protocolVersion) {
     if (protocolVersion >= 4) {
-      readFieldsV4(inBuffer);
+      readFieldsV4(inBuffer, protocolVersion);
     } else {
       readFieldsV3(inBuffer, protocolVersion);
     }
   }
 
-  private void readFieldsV4(ByteBuf inBuffer) {
+  private void readFieldsV4(ByteBuf inBuffer, short protocolVersion) {
     disableAcks = inBuffer.readBoolean();
     short topicNameLength = inBuffer.readShort();
     topicName = new byte[topicNameLength];
@@ -103,12 +125,16 @@ public class WriteRequestPacket implements Packet {
 
     short connCount = inBuffer.readShort();
     if (connCount > 0) {
-      currentConnections = new ArrayList<>(connCount);
+      currentConnectionSlots = new LinkedHashMap<>(connCount);
       for (int i = 0; i < connCount; i++) {
-        currentConnections.add(ProtocolUtils.readStringWithTwoByteEncoding(inBuffer));
+        String ip = ProtocolUtils.readStringWithTwoByteEncoding(inBuffer);
+        // v5 carries per-entry slot counts; v4 has only the IPs and the
+        // broker treats each entry as equal weight (placeholder 1).
+        int slots = protocolVersion >= 5 ? inBuffer.readInt() : 1;
+        currentConnectionSlots.put(ip, slots);
       }
     } else {
-      currentConnections = Collections.emptyList();
+      currentConnectionSlots = Collections.emptyMap();
     }
 
     dataLength = inBuffer.readInt();
@@ -143,13 +169,13 @@ public class WriteRequestPacket implements Packet {
   @Override
   public void writeHeader(ByteBuf headerBuf, short protocolVersion) {
     if (protocolVersion >= 4) {
-      writeHeaderV4(headerBuf);
+      writeHeaderV4(headerBuf, protocolVersion);
     } else {
       writeHeaderV3(headerBuf);
     }
   }
 
-  private void writeHeaderV4(ByteBuf headerBuf) {
+  private void writeHeaderV4(ByteBuf headerBuf, short protocolVersion) {
     headerBuf.writeBoolean(disableAcks);
     headerBuf.writeShort((short) topicName.length);
     headerBuf.writeBytes(topicName);
@@ -157,10 +183,15 @@ public class WriteRequestPacket implements Packet {
 
     ProtocolUtils.writeStringWithTwoByteEncoding(headerBuf, producerId);
 
-    if (currentConnections != null && !currentConnections.isEmpty()) {
-      headerBuf.writeShort((short) currentConnections.size());
-      for (String conn : currentConnections) {
-        ProtocolUtils.writeStringWithTwoByteEncoding(headerBuf, conn);
+    if (currentConnectionSlots != null && !currentConnectionSlots.isEmpty()) {
+      headerBuf.writeShort((short) currentConnectionSlots.size());
+      for (Map.Entry<String, Integer> e : currentConnectionSlots.entrySet()) {
+        ProtocolUtils.writeStringWithTwoByteEncoding(headerBuf, e.getKey());
+        // v5 carries per-entry slot counts; v4 drops them and the receiver
+        // reconstructs as equal-weight 1s.
+        if (protocolVersion >= 5) {
+          headerBuf.writeInt(e.getValue() == null ? 0 : e.getValue());
+        }
       }
     } else {
       headerBuf.writeShort(0);
@@ -177,11 +208,14 @@ public class WriteRequestPacket implements Packet {
     headerBuf.writeInt(dataLength);
   }
 
-  private int getConnectionsSerializedSize() {
+  private int getConnectionsSerializedSize(short protocolVersion) {
     int size = Short.BYTES;
-    if (currentConnections != null) {
-      for (String conn : currentConnections) {
-        size += ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(conn);
+    if (currentConnectionSlots != null) {
+      for (Map.Entry<String, Integer> e : currentConnectionSlots.entrySet()) {
+        size += ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(e.getKey());
+        if (protocolVersion >= 5) {
+          size += Integer.BYTES;
+        }
       }
     }
     return size;
@@ -246,12 +280,12 @@ public class WriteRequestPacket implements Packet {
     this.producerId = producerId;
   }
 
-  public List<String> getCurrentConnections() {
-    return currentConnections;
+  public Map<String, Integer> getCurrentConnectionSlots() {
+    return currentConnectionSlots;
   }
 
-  public void setCurrentConnections(List<String> currentConnections) {
-    this.currentConnections = currentConnections;
+  public void setCurrentConnectionSlots(Map<String, Integer> currentConnectionSlots) {
+    this.currentConnectionSlots = currentConnectionSlots;
   }
 
   @Override

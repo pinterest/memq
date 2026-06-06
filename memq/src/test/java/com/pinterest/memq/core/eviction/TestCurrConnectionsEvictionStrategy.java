@@ -590,9 +590,9 @@ public class TestCurrConnectionsEvictionStrategy {
         new HashSet<>(Collections.singletonList("broker-3")));
 
     assertEquals(1, sm.getProducerConnections().get(uuid1).size());
-    assertTrue(sm.getProducerConnections().get(uuid1).contains("broker-2"));
+    assertTrue(sm.getProducerConnections().get(uuid1).containsKey("broker-2"));
     assertEquals(1, sm.getProducerConnections().get(uuid2).size());
-    assertTrue(sm.getProducerConnections().get(uuid2).contains("broker-3"));
+    assertTrue(sm.getProducerConnections().get(uuid2).containsKey("broker-3"));
   }
 
   @Test
@@ -1090,5 +1090,351 @@ public class TestCurrConnectionsEvictionStrategy {
     assertEquals("falls back to the balance-optimal (coldest) target",
         "broker-1", result.getTargetBrokerIp());
     assertEquals("heavy", result.getPid());
+  }
+
+  // -----------------------------------------------------------------------
+  // Consolidation (steady-state, over-cap producers)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Build a slot map for an over-cap producer.
+   */
+  private static Map<String, Integer> slotMap(Object... pairs) {
+    Map<String, Integer> m = new java.util.LinkedHashMap<>();
+    for (int i = 0; i < pairs.length; i += 2) {
+      m.put((String) pairs[i], (Integer) pairs[i + 1]);
+    }
+    return m;
+  }
+
+  @Test
+  public void testConsolidationFiresWhenConvergedAndOverCap() throws Exception {
+    // Setup: local broker is at or above mean -> converged. Producer has
+    // 4 connections (cap=3) and 1 slot here. Consolidation must fire.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 10); // 1 slot here
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setMaxConnectionsPerProducer(3);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    // Local has 31 free (1 slot used). Peers have fewer free slots, so
+    // local is NOT above mean -- the load-balance branch concludes
+    // "converged" and consolidation fires.
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 10, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 12, false, now), now));
+    peers.put("broker-3",
+        new GossipState(new GossipMessage("broker-3", 14, false, now), now));
+
+    sm.recordProducerConnections("fat",
+        slotMap("broker-1", 5, "broker-2", 3, "broker-3", 2, BROKER_LOCAL, 1));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull("consolidation should fire in converged + over-cap state", result);
+    assertEquals("fat", result.getPid());
+    assertEquals("anti-ping-pong: pick target where producer owns most slots",
+        "broker-1", result.getTargetBrokerIp());
+  }
+
+  @Test
+  public void testConsolidationDoesNotFireWhenAtCap() throws Exception {
+    // Producer has exactly 3 connections (=cap). Consolidation must not fire.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "ok", TOPIC, 10);
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setMaxConnectionsPerProducer(3);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 10, false, now), now));
+
+    sm.recordProducerConnections("ok",
+        slotMap("broker-1", 5, "broker-2", 3, BROKER_LOCAL, 1));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNull("consolidation should not fire when producer is at or below cap", result);
+  }
+
+  @Test
+  public void testConsolidationDoesNotFireWhenBlockedByFrozenPeers() throws Exception {
+    // Local is loaded (above mean -> wants to evict), but all peers are
+    // frozen -> normal eviction is blocked. Consolidation must not stack on
+    // top of a blocked eviction.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 250); // 25 slots, local free=7
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setMaxConnectionsPerProducer(3);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    // freeze=true on every peer
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 30, true, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 30, true, now), now));
+
+    sm.recordProducerConnections("fat",
+        slotMap("broker-1", 5, "broker-2", 5, "broker-3", 5, BROKER_LOCAL, 25));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNull("consolidation should not fire when eviction is blocked", result);
+  }
+
+  @Test
+  public void testConsolidationPrefersLowestSourceSlotProducer() throws Exception {
+    // Two over-cap producers: "light" has 1 slot here, "heavy" has 10.
+    // The lightest should be picked so it drops the source connection
+    // on this eviction (graceful single-step drain).
+    SlotManager sm = createSlotManager(32);
+    // Concurrent writes -> single tick so both producers' EMAs land in the
+    // same window. Calling acquireSlots twice would let the first producer's
+    // EMA decay across the second tick.
+    sm.recordWrite("light", TOPIC, 10 * MB);   // ceil(10/10)=1 slot
+    sm.recordWrite("heavy", TOPIC, 100 * MB);  // ceil(100/10)=10 slots
+    tickOnce(sm);
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setMaxConnectionsPerProducer(3);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 5, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 8, false, now), now));
+
+    sm.recordProducerConnections("light",
+        slotMap("broker-1", 3, "broker-2", 2, "broker-3", 1, BROKER_LOCAL, 1));
+    sm.recordProducerConnections("heavy",
+        slotMap("broker-1", 4, "broker-2", 2, "broker-3", 1, BROKER_LOCAL, 10));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull(result);
+    assertEquals("lowest-source-slot producer should be picked first",
+        "light", result.getPid());
+  }
+
+  @Test
+  public void testConsolidationAntiPingPongTargetByProducerSlots() throws Exception {
+    // Producer is over-cap with non-uniform slot distribution on peers.
+    // Consolidation must pick the broker where the producer owns the most
+    // slots so the receiving broker has the least incentive to consolidate
+    // the producer right back to us.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 10);
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setMaxConnectionsPerProducer(3);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    // Note: broker-3 is freest (15) but producer owns the fewest slots
+    // there. broker-1 has the most producer slots; should win.
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 5, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 8, false, now), now));
+    peers.put("broker-3",
+        new GossipState(new GossipMessage("broker-3", 15, false, now), now));
+
+    sm.recordProducerConnections("fat",
+        slotMap("broker-1", 12, "broker-2", 5, "broker-3", 1, BROKER_LOCAL, 1));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull(result);
+    assertEquals("anti-ping-pong: pick target with highest producer slot count",
+        "broker-1", result.getTargetBrokerIp());
+  }
+
+  @Test
+  public void testConsolidationFreeSlotsTiebreakerWithEqualWeights() throws Exception {
+    // Equal-weight fallback: producer-side wire format is v4 (no slot
+    // counts), so all connection entries have value 1. With ties on the
+    // primary key, target should be the freest.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 10);
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setMaxConnectionsPerProducer(3);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 5, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 8, false, now), now));
+    peers.put("broker-3",
+        new GossipState(new GossipMessage("broker-3", 15, false, now), now));
+
+    // Set<String> overload simulates a v4 producer: every entry is weight=1.
+    Set<String> conns = new HashSet<>();
+    conns.add("broker-1");
+    conns.add("broker-2");
+    conns.add("broker-3");
+    conns.add(BROKER_LOCAL);
+    sm.recordProducerConnections("fat", conns);
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull("consolidation works in equal-weight mode too", result);
+    assertEquals("with all weights equal, freest target wins",
+        "broker-3", result.getTargetBrokerIp());
+  }
+
+  @Test
+  public void testConsolidationSkipsFrozenAndPendingTargets() throws Exception {
+    // Producer is over-cap. Of its 3 peer connections, broker-1 is frozen
+    // and broker-2 is the only valid target. Consolidation must pick broker-2.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 10);
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setMaxConnectionsPerProducer(3);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    // broker-1 has the most producer slots but is frozen.
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 5, true, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 8, false, now), now));
+    peers.put("broker-3",
+        new GossipState(new GossipMessage("broker-3", 12, false, now), now));
+
+    sm.recordProducerConnections("fat",
+        slotMap("broker-1", 20, "broker-2", 3, "broker-3", 2, BROKER_LOCAL, 1));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull(result);
+    // broker-1 is best by producer slots but frozen -> excluded.
+    // Between broker-2 (3 producer slots) and broker-3 (2 producer slots),
+    // broker-2 has the higher producer-slot count -> picked.
+    assertEquals("frozen target must be excluded; pick next-best",
+        "broker-2", result.getTargetBrokerIp());
+  }
+
+  @Test
+  public void testConsolidationSkipsZeroSlotProducer() throws Exception {
+    // Over-cap producer with 0 slots here: nothing to evict, skip.
+    SlotManager sm = createSlotManager(32);
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setMaxConnectionsPerProducer(3);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 10, false, now), now));
+
+    // Register the over-cap producer but with 0 slots locally.
+    sm.recordProducerConnections("ghost",
+        slotMap("broker-1", 5, "broker-2", 3, "broker-3", 2, BROKER_LOCAL, 0));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNull("over-cap producer with 0 source slots cannot be consolidated", result);
+  }
+
+  @Test
+  public void testConsolidationSkipsLoadGapBelowThresholdAndFires() throws Exception {
+    // Load gap is non-zero but below threshold (deadband) -> "converged"
+    // branch -> consolidation fires.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "fat", TOPIC, 60); // 6 slots, free=26
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setMaxConnectionsPerProducer(3);
+    // Big deadband: gap between 26 free and ~28 free is below threshold.
+    config.setEvictionPercentageThreshold(50.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    long now = System.currentTimeMillis();
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.put("broker-1",
+        new GossipState(new GossipMessage("broker-1", 28, false, now), now));
+    peers.put("broker-2",
+        new GossipState(new GossipMessage("broker-2", 28, false, now), now));
+
+    sm.recordProducerConnections("fat",
+        slotMap("broker-1", 6, "broker-2", 3, "broker-3", 2, BROKER_LOCAL, 6));
+
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull("converged-by-deadband should still allow consolidation", result);
+    assertEquals("fat", result.getPid());
+    assertEquals("broker-1", result.getTargetBrokerIp());
   }
 }
