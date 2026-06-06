@@ -271,7 +271,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
         .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
         .maxPayloadBytes(RequestPacket.getHeaderSize() + WriteRequestPacket.getHeaderSize(
                 RequestType.PROTOCOL_VERSION, "test",
-                "00000000-0000-0000-0000-000000000000", Collections.emptyList()) +
+                "00000000-0000-0000-0000-000000000000", Collections.<String, Integer>emptyMap()) +
                 MemqMessageHeader.getHeaderLength() + RawRecord
             .newInstance(null, null, null, new byte["test message that has 32 bytes 1".length()], 0)
             .calculateEncodedLogMessageLength())
@@ -319,7 +319,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
         .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
         .maxPayloadBytes(RequestPacket.getHeaderSize() + WriteRequestPacket.getHeaderSize(
                 RequestType.PROTOCOL_VERSION, "test",
-                "00000000-0000-0000-0000-000000000000", Collections.emptyList()) +
+                "00000000-0000-0000-0000-000000000000", Collections.<String, Integer>emptyMap()) +
                 MemqMessageHeader.getHeaderLength() + RawRecord
             .newInstance(null, null, null, new byte["test message that has 32 bytes 1".length()], 0)
             .calculateEncodedLogMessageLength())
@@ -384,7 +384,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
         .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
         .maxPayloadBytes(RequestPacket.getHeaderSize() + WriteRequestPacket.getHeaderSize(
                 RequestType.PROTOCOL_VERSION, "test",
-                "00000000-0000-0000-0000-000000000000", Collections.emptyList()) +
+                "00000000-0000-0000-0000-000000000000", Collections.<String, Integer>emptyMap()) +
                 MemqMessageHeader.getHeaderLength() + RawRecord
             .newInstance(null, null, null, new byte["test message that has 32 bytes 1".length()], 0)
             .calculateEncodedLogMessageLength())
@@ -478,7 +478,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
         .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
         .maxPayloadBytes(RequestPacket.getHeaderSize() + WriteRequestPacket.getHeaderSize(
                 RequestType.PROTOCOL_VERSION, "test",
-                "00000000-0000-0000-0000-000000000000", Collections.emptyList()) +
+                "00000000-0000-0000-0000-000000000000", Collections.<String, Integer>emptyMap()) +
                 MemqMessageHeader.getHeaderLength() + RawRecord
             .newInstance(null, null, null, new byte["test message that has 32 bytes 1".length()], 0)
             .calculateEncodedLogMessageLength())
@@ -542,7 +542,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
         .retryStrategy(new UniformRetryStrategy())
         .maxPayloadBytes(RequestPacket.getHeaderSize() + WriteRequestPacket.getHeaderSize(
                 RequestType.PROTOCOL_VERSION, "test",
-                "00000000-0000-0000-0000-000000000000", Collections.emptyList()) +
+                "00000000-0000-0000-0000-000000000000", Collections.<String, Integer>emptyMap()) +
                 MemqMessageHeader.getHeaderLength() + RawRecord
             .newInstance(null, null, null, new byte["test message that has 32 bytes 1".length()], 0)
             .calculateEncodedLogMessageLength())
@@ -620,7 +620,7 @@ public class TestMemqProducer extends TestMemqProducerBase {
         .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
         .maxPayloadBytes(RequestPacket.getHeaderSize() + WriteRequestPacket.getHeaderSize(
                 RequestType.PROTOCOL_VERSION, "test",
-                "00000000-0000-0000-0000-000000000000", Collections.emptyList()) +
+                "00000000-0000-0000-0000-000000000000", Collections.<String, Integer>emptyMap()) +
                 MemqMessageHeader.getHeaderLength() + RawRecord
             .newInstance(null, null, null, sampleValue, 0).calculateEncodedLogMessageLength())
         .compression(Compression.NONE).networkProperties(networkProperties)

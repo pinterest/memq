@@ -135,7 +135,7 @@ public class TestMemqProducerMultipleEndpoints extends TestMemqProducerBase {
       RequestPacket.getHeaderSize() + 
       RequestPacket.getHeaderSize() + 
       WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, "test",
-          "00000000-0000-0000-0000-000000000000", Collections.emptyList()) + 
+          "00000000-0000-0000-0000-000000000000", Collections.<String, Integer>emptyMap()) + 
       MemqMessageHeader.getHeaderLength() + 
       RawRecord.newInstance(null, null, null, "test1".getBytes(), 0).calculateEncodedLogMessageLength();
     
@@ -281,7 +281,7 @@ public class TestMemqProducerMultipleEndpoints extends TestMemqProducerBase {
       RequestPacket.getHeaderSize() + 
       RequestPacket.getHeaderSize() + 
       WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, "test",
-          "00000000-0000-0000-0000-000000000000", Collections.emptyList()) + 
+          "00000000-0000-0000-0000-000000000000", Collections.<String, Integer>emptyMap()) + 
       MemqMessageHeader.getHeaderLength() + 
       RawRecord.newInstance(null, null, null, "test1".getBytes(), 0).calculateEncodedLogMessageLength();
     
