@@ -43,7 +43,7 @@ public class TestSlotManager {
     config.setTickIntervalMs(100);
     config.setIdleProducerTimeoutMs(500);
     // Keep legacy tests insensitive to the post-eviction cooldown; tests
-    // exercising that feature live in TestSlotManagerEviction.
+    // exercising that feature live in TestSlotManagerEviction
     config.setPostEvictionCooldownSeconds(0.0);
     // Legacy tests assert whole-gap acquisition/release in a single tick; the
     // per-tick step clamp is covered by TestSlotManagerSlotStep.
