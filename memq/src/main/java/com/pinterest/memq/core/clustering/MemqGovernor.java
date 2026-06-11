@@ -20,6 +20,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -31,9 +33,12 @@ import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.framework.recipes.leader.LeaderSelector;
 import org.apache.curator.framework.recipes.leader.LeaderSelectorListener;
 import org.apache.curator.framework.state.ConnectionState;
+import org.apache.curator.framework.state.ConnectionStateListener;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.KeeperException;
 
+import com.codahale.metrics.MetricRegistry;
 import com.google.gson.Gson;
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicAssignment;
@@ -51,6 +56,8 @@ public class MemqGovernor {
   public static final String ZNODE_BROKERS = "/brokers";
   public static final String ZNODE_TOPICS_BASE = "/topics/";
   public static final String ZNODE_TOPICS = "/topics";
+  public static final String METRIC_BROKER_ZNODE_MISSING = "broker.znode.missing";
+  public static final String METRIC_BROKER_REREGISTERED = "broker.znode.reregistered";
   private static final Gson GSON = new Gson();
   private static final Logger logger = Logger.getLogger(MemqGovernor.class.getCanonicalName());
   private MemqConfig config;
@@ -62,6 +69,12 @@ public class MemqGovernor {
   private ClusteringConfig clusteringConfig;
   private String brokerZnodePath;
   private volatile boolean closed = false;
+  private MetricRegistry metricRegistry;
+  private final ExecutorService reRegistrationExecutor = Executors.newSingleThreadExecutor(r -> {
+    Thread t = new Thread(r, "BrokerReRegistration");
+    t.setDaemon(true);
+    return t;
+  });
 
   public MemqGovernor(MemqManager mgr, MemqConfig config, EnvironmentProvider provider) {
     this.mgr = mgr;
@@ -104,6 +117,36 @@ public class MemqGovernor {
     client.start();
     client.blockUntilConnected(100, TimeUnit.SECONDS);
     logger.info("Connected to zookeeper:" + zookeeperConnectionString);
+
+    // Reuse the shared registry map so the clustering counters are exported alongside
+    // the other "_"-prefixed (non-topic) metrics.
+    Map<String, MetricRegistry> registryMap = mgr.getRegistry();
+    metricRegistry = registryMap != null
+        ? registryMap.computeIfAbsent("_cluster", k -> new MetricRegistry())
+        : new MetricRegistry();
+
+    // The broker registers itself as an EPHEMERAL znode that is tied to the ZK
+    // session. When the session expires (SUSPENDED -> LOST), ZooKeeper deletes the
+    // node server-side and Curator establishes a brand new session. Without this
+    // listener nothing recreates the broker znode and the broker stays invisible to
+    // the cluster until it is restarted. Re-announce the broker on every RECONNECTED.
+    client.getConnectionStateListenable().addListener(new ConnectionStateListener() {
+      @Override
+      public void stateChanged(CuratorFramework cf, ConnectionState newState) {
+        logger.info("Curator connection state changed:" + newState);
+        if (closed) {
+          return;
+        }
+        if (newState == ConnectionState.LOST) {
+          // Session expired: ZooKeeper has dropped our ephemeral broker znode.
+          metricRegistry.counter(METRIC_BROKER_ZNODE_MISSING).inc();
+          logger.warning("ZK session lost, broker znode is now missing:" + brokerZnodePath);
+        } else if (newState == ConnectionState.RECONNECTED) {
+          // Run off the Curator event thread to avoid blocking it on ZK operations.
+          reRegisterBroker();
+        }
+      }
+    });
 
     initializeZNodesAndWatchers(client);
 
@@ -160,23 +203,83 @@ public class MemqGovernor {
       client.create().withMode(CreateMode.PERSISTENT).forPath(ZNODE_BROKERS);
     }
 
-    Broker broker = new Broker(provider.getIP(), config.getNettyServerConfig().getPort(),
-        provider.getInstanceType(), provider.getRack(), config.getBrokerType(),
-        mgr.getTopicAssignment());
-
-    brokerZnodePath = ZNODE_BROKERS_BASE + broker.getBrokerIP();
-    if (client.checkExists().forPath(brokerZnodePath) != null) {
-      client.delete().forPath(brokerZnodePath);
-    }
-    client.create().withMode(CreateMode.EPHEMERAL).forPath(brokerZnodePath,
-        GSON.toJson(broker).getBytes());
+    Broker broker = registerBroker(false);
 
     if (clusteringConfig.isEnableLocalAssigner()) {
-      Thread th = new Thread(new TopicAssignmentWatcher(mgr, brokerZnodePath, broker, client));
+      Thread th = new Thread(
+          new TopicAssignmentWatcher(mgr, brokerZnodePath, broker, client, this::reRegisterBroker));
       th.setDaemon(true);
       th.setName("TopicAssignmentWatcher");
       th.start();
     }
+  }
+
+  /**
+   * Idempotently (re)creates this broker's EPHEMERAL znode under {@code /brokers/<ip>}.
+   *
+   * <p>
+   * A fresh {@link Broker} snapshot is built on every call so the published znode always
+   * reflects the broker's current topic assignment (the assignment can change between the
+   * initial registration and a later re-registration triggered by a ZK session expiry).
+   * The method tolerates the races inherent to recreating an ephemeral node whose previous
+   * incarnation may still be lingering on the just-expired session.
+   * </p>
+   */
+  synchronized Broker registerBroker(boolean reRegistration) throws Exception {
+    Broker broker = new Broker(provider.getIP(), config.getNettyServerConfig().getPort(),
+        provider.getInstanceType(), provider.getRack(), config.getBrokerType(),
+        mgr.getTopicAssignment());
+    brokerZnodePath = ZNODE_BROKERS_BASE + broker.getBrokerIP();
+    if (closed) {
+      return broker;
+    }
+    byte[] brokerData = GSON.toJson(broker).getBytes();
+    // Parent could be missing if it never existed yet; ensure it before the child create.
+    if (client.checkExists().forPath(ZNODE_BROKERS) == null) {
+      try {
+        client.create().withMode(CreateMode.PERSISTENT).forPath(ZNODE_BROKERS);
+      } catch (KeeperException.NodeExistsException ignore) {
+        // created concurrently, fine
+      }
+    }
+    try {
+      if (client.checkExists().forPath(brokerZnodePath) != null) {
+        client.delete().forPath(brokerZnodePath);
+      }
+      client.create().withMode(CreateMode.EPHEMERAL).forPath(brokerZnodePath, brokerData);
+      logger.info("Registered broker ephemeral znode:" + brokerZnodePath);
+    } catch (KeeperException.NodeExistsException e) {
+      // A stale ephemeral from the prior (expired) session may briefly linger, or a
+      // concurrent re-registration won the race. Refresh the payload and move on.
+      client.setData().forPath(brokerZnodePath, brokerData);
+      logger.info("Broker znode already existed, refreshed data:" + brokerZnodePath);
+    } catch (KeeperException.NoNodeException e) {
+      // delete() raced with another deletion; the node is gone so just (re)create it.
+      client.create().withMode(CreateMode.EPHEMERAL).forPath(brokerZnodePath, brokerData);
+      logger.info("Re-created broker ephemeral znode after NoNode race:" + brokerZnodePath);
+    }
+    if (reRegistration) {
+      metricRegistry.counter(METRIC_BROKER_REREGISTERED).inc();
+    }
+    return broker;
+  }
+
+  /**
+   * Best-effort, non-throwing re-registration used as a recovery callback (e.g. when the
+   * {@link TopicAssignmentWatcher} notices the broker znode has vanished). The primary
+   * recovery path remains the {@link ConnectionStateListener}; this is a safety net.
+   */
+  void reRegisterBroker() {
+    if (closed) {
+      return;
+    }
+    reRegistrationExecutor.submit(() -> {
+      try {
+        registerBroker(true);
+      } catch (Exception e) {
+        logger.log(Level.SEVERE, "Failed to re-register broker znode", e);
+      }
+    });
   }
 
   public Map<String, TopicMetadata> getTopicMetadataMap() {
@@ -188,6 +291,10 @@ public class MemqGovernor {
   }
 
   public void stop() {
+    // Flip closed first so any in-flight RECONNECTED callback short-circuits instead of
+    // racing the shutdown by recreating the broker znode we are about to delete.
+    closed = true;
+    reRegistrationExecutor.shutdownNow();
     if (brokerZnodePath != null && client != null) {
       try {
         // best effort remove broker znode during shutdown
@@ -197,9 +304,17 @@ public class MemqGovernor {
             "Failed to deregister broker znode, will be removed after session timeout", e);
       }
     }
-    closed = true;
-    leaderSelector.close();
-    client.close();
+    if (leaderSelector != null) {
+      try {
+        leaderSelector.close();
+      } catch (IllegalStateException e) {
+        // leader selector may not have been started (e.g. disabled via config); ignore
+        logger.log(Level.FINE, "Leader selector was not started, skipping close", e);
+      }
+    }
+    if (client != null) {
+      client.close();
+    }
   }
 
   public void createTopic(TopicConfig topipConfig) throws Exception {

@@ -16,9 +16,11 @@
 package com.pinterest.memq.core.clustering;
 
 import java.util.Set;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import org.apache.curator.framework.CuratorFramework;
+import org.apache.zookeeper.KeeperException;
 
 import com.google.common.collect.Sets;
 import com.google.gson.Gson;
@@ -37,14 +39,24 @@ public final class TopicAssignmentWatcher implements Runnable {
   private final String path;
   private final CuratorFramework client;
   private MemqManager mgr;
+  private final Runnable onMissingZnode;
 
   public TopicAssignmentWatcher(MemqManager mgr,
                                 String path,
                                 Broker broker,
                                 CuratorFramework client) {
+    this(mgr, path, broker, client, null);
+  }
+
+  public TopicAssignmentWatcher(MemqManager mgr,
+                                String path,
+                                Broker broker,
+                                CuratorFramework client,
+                                Runnable onMissingZnode) {
     this.mgr = mgr;
     this.path = path;
     this.client = client;
+    this.onMissingZnode = onMissingZnode;
   }
 
   @Override
@@ -87,15 +99,23 @@ public final class TopicAssignmentWatcher implements Runnable {
         if (updated) {
           mgr.updateTopicCache();
         }
+      } catch (KeeperException.NoNodeException e) {
+        // The broker's ephemeral znode is gone, most likely because the ZK session
+        // expired and ZooKeeper deleted it server-side. Don't spam stack traces on the
+        // tight poll loop; log distinctly and ask the governor to re-announce the broker.
+        logger.log(Level.WARNING,
+            "Broker znode is missing at " + path + "; requesting re-registration");
+        if (onMissingZnode != null) {
+          onMissingZnode.run();
+        }
       } catch (Exception e) {
-        // TODO Auto-generated catch block
-        e.printStackTrace();
+        logger.log(Level.WARNING, "Failed to poll topic assignment from " + path, e);
       }
       try {
         Thread.sleep(2000);
       } catch (InterruptedException e) {
-        // TODO Auto-generated catch block
-        e.printStackTrace();
+        Thread.currentThread().interrupt();
+        return;
       }
     }
   }
