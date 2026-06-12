@@ -70,6 +70,10 @@ public class MemqGovernor {
   private ClusteringConfig clusteringConfig;
   private String brokerZnodePath;
   private volatile boolean closed = false;
+  // Set on LOST so we only re-register on the following RECONNECTED. A plain
+  // SUSPENDED -> RECONNECTED keeps the same session, so the ephemeral broker
+  // znode survives and must not be rewritten.
+  private volatile boolean sessionLost = false;
   private MetricRegistry metricRegistry;
   private final ExecutorService reRegistrationExecutor = Executors.newSingleThreadExecutor(r -> {
     Thread t = new Thread(r, "BrokerReRegistration");
@@ -127,10 +131,10 @@ public class MemqGovernor {
         : new MetricRegistry();
 
     // The broker registers itself as an EPHEMERAL znode that is tied to the ZK
-    // session. When the session expires (SUSPENDED -> LOST), ZooKeeper deletes the
-    // node server-side and Curator establishes a brand new session. Without this
-    // listener nothing recreates the broker znode and the broker stays invisible to
-    // the cluster until it is restarted. Re-announce the broker on every RECONNECTED.
+    // session. Only a session expiry (LOST) deletes the node server-side and forces
+    // Curator onto a brand new session; a plain SUSPENDED -> RECONNECTED keeps the
+    // same session and the znode intact. So re-announce the broker only on the
+    // RECONNECTED that follows a LOST, otherwise we needlessly rewrite a live znode.
     client.getConnectionStateListenable().addListener(new ConnectionStateListener() {
       @Override
       public void stateChanged(CuratorFramework cf, ConnectionState newState) {
@@ -140,11 +144,19 @@ public class MemqGovernor {
         }
         if (newState == ConnectionState.LOST) {
           // Session expired: ZooKeeper has dropped our ephemeral broker znode.
+          sessionLost = true;
           metricRegistry.counter(METRIC_BROKER_ZNODE_MISSING).inc();
           logger.warning("ZK session lost, broker znode is now missing:" + brokerZnodePath);
         } else if (newState == ConnectionState.RECONNECTED) {
-          // Run off the Curator event thread to avoid blocking it on ZK operations.
-          reRegisterBroker();
+          if (sessionLost) {
+            sessionLost = false;
+            // Run off the Curator event thread to avoid blocking it on ZK operations.
+            reRegisterBroker();
+          } else {
+            logger.info(
+                "Reconnected without session loss, broker znode intact, skipping re-registration:"
+                    + brokerZnodePath);
+          }
         }
       }
     });
