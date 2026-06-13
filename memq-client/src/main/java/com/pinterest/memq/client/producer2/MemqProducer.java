@@ -130,10 +130,9 @@ public class MemqProducer<K, V> implements Closeable {
     // series per producer process (the pid is stable for the client's life).
     // Two views: physical channels (live TCP connections) and owned endpoints
     // (brokers where this producer holds slots -- the slot/eviction view).
-    String pidTag = "|pid=" + client.getProducerId();
-    metricRegistry.gauge("producer.connections.channels" + pidTag,
+    metricRegistry.gauge("producer.connections.channels",
         () -> (Gauge<Integer>) () -> client.getActiveChannelCount());
-    metricRegistry.gauge("producer.connections.endpoints" + pidTag,
+    metricRegistry.gauge("producer.connections.endpoints",
         () -> (Gauge<Integer>) () -> client.getOwnedEndpointCount());
   }
 
