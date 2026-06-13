@@ -102,6 +102,19 @@ public class SlotAccountingConfig {
    */
   private int maxSlotStep = 1;
 
+  /**
+   * When true, the {@link com.pinterest.memq.core.slot.SlotManager} registers a
+   * per-{@code (pid, topic)} {@code producer.ema} and {@code producer.slots}
+   * gauge. Because {@code pid} is a client-generated UUID for v4+ producers,
+   * this is unbounded-cardinality tagging: every producer (and every restart,
+   * which yields a fresh UUID) adds two more time series that the OpenTSDB
+   * reporter walks each interval and that retain a {@code ProducerSlotState}
+   * reference on the heap until the producer is deregistered. Default
+   * {@code false} so the broker emits only the aggregate slot gauges; flip to
+   * {@code true} only for short-lived per-producer debugging.
+   */
+  private boolean emitPerPidSlotMetrics = false;
+
   public boolean isEnabled() {
     return enabled;
   }
@@ -212,5 +225,13 @@ public class SlotAccountingConfig {
 
   public void setMaxSlotStep(int maxSlotStep) {
     this.maxSlotStep = maxSlotStep;
+  }
+
+  public boolean isEmitPerPidSlotMetrics() {
+    return emitPerPidSlotMetrics;
+  }
+
+  public void setEmitPerPidSlotMetrics(boolean emitPerPidSlotMetrics) {
+    this.emitPerPidSlotMetrics = emitPerPidSlotMetrics;
   }
 }

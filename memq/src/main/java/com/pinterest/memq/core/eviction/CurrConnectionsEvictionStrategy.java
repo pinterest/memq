@@ -508,20 +508,27 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
 
     long now = System.currentTimeMillis();
     for (ConsolidationCandidate cand : candidates) {
-      ConsolidationTarget chosen = pickConsolidationTarget(slotManager, peerStates,
+      String targetIp = pickConsolidationTarget(slotManager, peerStates,
           brokerToTopics, cand);
-      if (chosen == null) {
+      if (targetIp == null) {
         continue;
       }
-      pendingEvictionTargets.put(chosen.ip, now);
-      EvictionResult result = new EvictionResult(cand.pid, chosen.ip, 1);
+      pendingEvictionTargets.put(targetIp, now);
+      // Re-derive the log-only fields with O(1) reads on the (rare) success
+      // path -- both maps are still in scope and hold the same values the
+      // selection saw, so this avoids materializing a result holder just to
+      // carry two numbers into the log line.
+      Integer slotsBoxed = cand.conns.get(targetIp);
+      int targetProducerSlots = slotsBoxed == null ? 0 : slotsBoxed;
+      int targetFreeSlots = peerStates.get(targetIp).getMessage().getFreeSlots();
+      EvictionResult result = new EvictionResult(cand.pid, targetIp, 1);
       logger.info("[" + brokerId + "] consolidation eviction: pid=" + cand.pid
-          + " target=" + chosen.ip + " slotsToEvict=1"
+          + " target=" + targetIp + " slotsToEvict=1"
           + " (connectionCount=" + cand.conns.size()
           + " > cap=" + maxConns
           + ", sourceSlots=" + cand.sourceSlots
-          + ", targetProducerSlots=" + chosen.producerSlotsOnTarget
-          + ", targetFreeSlots=" + chosen.freeSlots
+          + ", targetProducerSlots=" + targetProducerSlots
+          + ", targetFreeSlots=" + targetFreeSlots
           + ", clusterSpread=" + String.format("%.2f", spreadPct) + "%)");
       return result;
     }
@@ -536,18 +543,24 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
   }
 
   /**
-   * Pick the eviction target for a consolidation candidate. Targets must be
+   * Pick the eviction target IP for a consolidation candidate. Targets must be
    * already-connected (so this never adds a new edge), serve a topic the
    * producer writes, not be frozen, and not be in pending-eviction cooldown.
-   * Sort lexicographically by (slot count the producer holds there desc,
-   * target free slots desc).
+   * The winner is the lexicographic max by (slot count the producer holds there
+   * desc, target free slots desc), tracked over primitive locals so the whole
+   * selection allocates nothing -- the returned reference is an existing
+   * connection-map key.
+   *
+   * @return the chosen target IP, or {@code null} if no connected peer qualifies.
    */
-  private ConsolidationTarget pickConsolidationTarget(SlotManager slotManager,
-                                                      Map<String, GossipState> peerStates,
-                                                      Map<String, Set<String>> brokerToTopics,
-                                                      ConsolidationCandidate cand) {
+  private String pickConsolidationTarget(SlotManager slotManager,
+                                         Map<String, GossipState> peerStates,
+                                         Map<String, Set<String>> brokerToTopics,
+                                         ConsolidationCandidate cand) {
     Collection<String> producerTopics = slotManager.getProducerTopics(cand.pid);
-    ConsolidationTarget best = null;
+    String bestIp = null;
+    int bestProducerSlots = -1;
+    int bestFree = -1;
     for (Map.Entry<String, Integer> conn : cand.conns.entrySet()) {
       String targetIp = conn.getKey();
       if (brokerId.equals(targetIp)) {
@@ -568,13 +581,17 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       }
       int producerSlotsOnTarget = conn.getValue() == null ? 0 : conn.getValue();
       int targetFree = peer.getMessage().getFreeSlots();
-      ConsolidationTarget candidate =
-          new ConsolidationTarget(targetIp, producerSlotsOnTarget, targetFree);
-      if (best == null || candidate.compareTo(best) > 0) {
-        best = candidate;
+      // Lexicographic preference: producer's slot count on the target (desc),
+      // then the target's free slots (desc). First occurrence wins ties.
+      if (bestIp == null
+          || producerSlotsOnTarget > bestProducerSlots
+          || (producerSlotsOnTarget == bestProducerSlots && targetFree > bestFree)) {
+        bestIp = targetIp;
+        bestProducerSlots = producerSlotsOnTarget;
+        bestFree = targetFree;
       }
     }
-    return best;
+    return bestIp;
   }
 
   private static final class ConsolidationCandidate {
@@ -586,36 +603,6 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       this.pid = pid;
       this.sourceSlots = sourceSlots;
       this.conns = conns;
-    }
-  }
-
-  /**
-   * Eviction target for a consolidation move. Ranking is lexicographic:
-   * primary = the producer's slot count on this target (descending, so we
-   * pick targets where the producer already has substantial share and the
-   * receiving broker won't immediately pick this producer for another
-   * consolidation), secondary = the target's free slots (descending, so
-   * the move lands on the least-loaded among the qualifying targets).
-   */
-  private static final class ConsolidationTarget implements Comparable<ConsolidationTarget> {
-    final String ip;
-    final int producerSlotsOnTarget;
-    final int freeSlots;
-
-    ConsolidationTarget(String ip, int producerSlotsOnTarget, int freeSlots) {
-      this.ip = ip;
-      this.producerSlotsOnTarget = producerSlotsOnTarget;
-      this.freeSlots = freeSlots;
-    }
-
-    @Override
-    public int compareTo(ConsolidationTarget other) {
-      int byProducerSlots = Integer.compare(this.producerSlotsOnTarget,
-          other.producerSlotsOnTarget);
-      if (byProducerSlots != 0) {
-        return byProducerSlots;
-      }
-      return Integer.compare(this.freeSlots, other.freeSlots);
     }
   }
 

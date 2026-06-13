@@ -67,6 +67,7 @@ public class SlotManager {
   private final double drainLatchEmaDecay;
   private final double drainLatchDisengageFreeSlots;
   private final int maxSlotStep;
+  private final boolean emitPerPidSlotMetrics;
 
   private final ConcurrentHashMap<String, ConcurrentHashMap<String, ProducerSlotState>> producers =
       new ConcurrentHashMap<>();
@@ -177,6 +178,7 @@ public class SlotManager {
     this.drainLatchDisengageFreeSlots =
         Math.max(config.getDrainLatchDisengageFreeSlots(), totalSlots / 10.0);
     this.maxSlotStep = config.getMaxSlotStep();
+    this.emitPerPidSlotMetrics = config.isEmitPerPidSlotMetrics();
     // Start un-latched: a freshly started, empty broker has all slots free.
     this.freeSlotsEma = totalSlots;
 
@@ -188,7 +190,8 @@ public class SlotManager {
         + " drainLatchEnabled=" + drainLatchEnabled
         + " drainLatchEmaWindowSec=" + drainLatchWindowSec
         + " drainLatchDisengageFreeSlots=" + drainLatchDisengageFreeSlots
-        + " maxSlotStep=" + maxSlotStep);
+        + " maxSlotStep=" + maxSlotStep
+        + " emitPerPidSlotMetrics=" + emitPerPidSlotMetrics);
   }
 
   /**
@@ -537,7 +540,7 @@ public class SlotManager {
    * registered.
    */
   private void registerProducerMetrics(String pid, String topic, ProducerSlotState state) {
-    if (registry == null) {
+    if (registry == null || !emitPerPidSlotMetrics) {
       return;
     }
     String emaKey = encodeMetricKey(EMA_METRIC_NAME, pid, topic);
@@ -662,6 +665,63 @@ public class SlotManager {
   }
 
   /**
+   * Drop <i>all</i> accounting state for a producer across every topic it
+   * holds, releasing any occupied slots back to the free pool and deregistering
+   * its metrics and connection/IP registry entries.
+   * <p>
+   * Intended to be called when the producer's connection closes (see
+   * {@code PacketSwitchingHandler#releaseChannelProducers}). Producer state is
+   * otherwise only reclaimed by the {@code idleProducerTimeoutMs} branch of
+   * {@link #tick()}, so without this a fleet of producers that restarts (each
+   * restart yields a fresh client-generated UUID) leaves the abandoned UUIDs'
+   * state -- map entries plus, when enabled, per-(pid, topic) gauges -- resident
+   * for the full idle window, stacked on top of the new generation's state.
+   * That is the step-up in RSS observed on a producer restart.
+   * <p>
+   * Concurrency mirrors {@link #releaseProducerSlots(String, String, int)} and
+   * {@link #dropTopic(String)}: callable from any thread (here, a Netty event
+   * loop), reusing {@link #decrementSlots} for the atomic
+   * {@code totalOccupiedSlots} update. A {@link #recordWrite} that races in
+   * after this returns simply recreates a fresh zero-slot, zero-EMA entry that
+   * occupies no capacity and is reclaimed by the next idle pass -- the same
+   * benign re-create {@link #dropTopic} tolerates.
+   *
+   * @param pid the producer identifier. No-op if the producer is not tracked.
+   */
+  public void removeProducer(String pid) {
+    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
+    if (topicMap == null) {
+      // Not tracked in the slot map (already cleaned, or only ever registered
+      // connections). Still drop auxiliary registry entries so nothing leaks.
+      producerConnections.remove(pid);
+      producerIps.remove(pid);
+      return;
+    }
+    int slotsReleased = 0;
+    for (Map.Entry<String, ProducerSlotState> e : topicMap.entrySet()) {
+      String topic = e.getKey();
+      ProducerSlotState state = e.getValue();
+      if (state.currentSlots > 0) {
+        slotsReleased += decrementSlots(pid, topic, topicMap, state, state.currentSlots);
+      } else {
+        removeProducerTopic(pid, topic, topicMap);
+      }
+      evictionCooldownUntilMs.remove(cooldownKey(pid, topic));
+    }
+    // removeProducerTopic drops the connection/IP registry entries when the
+    // topicMap empties out, but a concurrent recordWrite may have re-added an
+    // entry; remove them explicitly as a backstop so a disconnected producer
+    // never lingers in those maps.
+    producerConnections.remove(pid);
+    producerIps.remove(pid);
+    if (slotsReleased > 0) {
+      logger.info("Removed producer on disconnect: pid=" + pid
+          + " slotsReleased=" + slotsReleased
+          + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots);
+    }
+  }
+
+  /**
    * Total slots held by a producer across all topics.
    * Direct read from the live structure — no allocation.
    *
@@ -725,8 +785,20 @@ public class SlotManager {
    * @param connections the set of broker IPs this producer is connected to (may be empty)
    */
   public void recordProducerConnections(String pid, Set<String> connections) {
+    Map<String, Integer> existing = producerConnections.get(pid);
     if (connections == null || connections.isEmpty()) {
+      // Already empty: skip the write entirely.
+      if (existing != null && existing.isEmpty()) {
+        return;
+      }
       producerConnections.put(pid, Collections.emptyMap());
+      return;
+    }
+    // A producer's connection set is stable across the vast majority of writes,
+    // so on the steady-state hot path the stored equal-weight snapshot already
+    // matches. Detect that without allocating and skip both the LinkedHashMap
+    // build and the ConcurrentHashMap write.
+    if (existing != null && isEqualWeightSnapshotOf(existing, connections)) {
       return;
     }
     Map<String, Integer> slots = new LinkedHashMap<>(connections.size());
@@ -734,6 +806,26 @@ public class SlotManager {
       slots.put(conn, 1);
     }
     producerConnections.put(pid, slots);
+  }
+
+  /**
+   * Whether {@code existing} is exactly the equal-weight (every value
+   * {@code == 1}) snapshot of {@code connections}, i.e. what the
+   * {@code Set<String>} overload would have stored. Lets the hot path avoid
+   * re-allocating and re-storing an identical snapshot.
+   */
+  private static boolean isEqualWeightSnapshotOf(Map<String, Integer> existing,
+                                                 Set<String> connections) {
+    if (existing.size() != connections.size()) {
+      return false;
+    }
+    for (String conn : connections) {
+      Integer v = existing.get(conn);
+      if (v == null || v != 1) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -756,8 +848,16 @@ public class SlotManager {
    * @param connectionSlots broker IP to producer's slot count there (may be empty)
    */
   public void recordProducerConnections(String pid, Map<String, Integer> connectionSlots) {
-    producerConnections.put(pid,
-        connectionSlots == null ? Collections.emptyMap() : connectionSlots);
+    Map<String, Integer> incoming =
+        connectionSlots == null ? Collections.emptyMap() : connectionSlots;
+    // Skip the ConcurrentHashMap write when the stored snapshot is already
+    // equal -- the connection set/slot view rarely changes between writes, so
+    // the steady-state hot path collapses to a single get + Map.equals.
+    Map<String, Integer> existing = producerConnections.get(pid);
+    if (existing != null && existing.equals(incoming)) {
+      return;
+    }
+    producerConnections.put(pid, incoming);
   }
 
   /**

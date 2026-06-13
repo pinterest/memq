@@ -26,6 +26,10 @@ import org.junit.Test;
 
 import com.pinterest.memq.core.config.SlotAccountingConfig;
 
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+
 public class TestSlotManager {
 
   private static final int MB = 1024 * 1024;
@@ -386,6 +390,7 @@ public class TestSlotManager {
     // convention -- the test pins it to catch accidental drift.
     SlotAccountingConfig config = fastConfig();
     config.setTickIntervalMs(1000);
+    config.setEmitPerPidSlotMetrics(true);
     MetricRegistry slotRegistry = new MetricRegistry();
     SlotManager sm = new SlotManager(config, 32, slotRegistry);
 
@@ -412,6 +417,7 @@ public class TestSlotManager {
     // only its own producer's state.
     SlotAccountingConfig config = fastConfig();
     config.setTickIntervalMs(1000);
+    config.setEmitPerPidSlotMetrics(true);
     MetricRegistry slotRegistry = new MetricRegistry();
     SlotManager sm = new SlotManager(config, 32, slotRegistry);
 
@@ -444,6 +450,7 @@ public class TestSlotManager {
     SlotAccountingConfig config = fastConfig();
     config.setTickIntervalMs(1000);
     config.setIdleProducerTimeoutMs(200);
+    config.setEmitPerPidSlotMetrics(true);
     MetricRegistry slotRegistry = new MetricRegistry();
     SlotManager sm = new SlotManager(config, 32, slotRegistry);
 
@@ -549,6 +556,7 @@ public class TestSlotManager {
     // topic assignments over its lifetime.
     SlotAccountingConfig config = fastConfig();
     config.setTickIntervalMs(1000);
+    config.setEmitPerPidSlotMetrics(true);
     MetricRegistry slotRegistry = new MetricRegistry();
     SlotManager sm = new SlotManager(config, 32, slotRegistry);
 
@@ -612,5 +620,89 @@ public class TestSlotManager {
 
     assertEquals("dropTopic must purge the zero-slot entry too",
         0, sm.getProducerCount());
+  }
+
+  @Test
+  public void testRemoveProducerReleasesAllStateAcrossTopics() {
+    // removeProducer (the connection-close path) must release every topic's
+    // slots back to the free pool and drop the producer from every map, so a
+    // disconnected producer's accounting does not linger until the idle sweep.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    SlotManager sm = new SlotManager(config, 32);
+
+    sm.recordWrite("uuid-A", "topicA", 15 * MB);
+    sm.recordWrite("uuid-A", "topicB", 25 * MB);
+    sm.recordWrite("uuid-B", "topicA", 15 * MB);
+    sm.recordProducerConnections("uuid-A", Collections.singleton("10.0.0.7"));
+    sm.tick();
+
+    int occupiedBefore = sm.getOccupiedSlots();
+    assertTrue("uuid-A should hold slots after acquisition",
+        sm.getTotalProducerSlots("uuid-A") > 0);
+    int uuidASlots = sm.getTotalProducerSlots("uuid-A");
+
+    sm.removeProducer("uuid-A");
+
+    assertEquals("all of uuid-A's slots must return to the free pool",
+        occupiedBefore - uuidASlots, sm.getOccupiedSlots());
+    assertEquals(0, sm.getTotalProducerSlots("uuid-A"));
+    assertFalse("uuid-A must be dropped from the producer map",
+        sm.producerHasSlots("uuid-A"));
+    assertFalse("uuid-A must be dropped from the connection registry",
+        sm.getProducerConnections().containsKey("uuid-A"));
+    // Sibling producer on the shared topic is untouched.
+    assertTrue("uuid-B must be unaffected", sm.producerHasSlots("uuid-B"));
+    assertTrue(sm.getTotalProducerSlots("uuid-B") > 0);
+  }
+
+  @Test
+  public void testRemoveUnknownProducerIsNoop() {
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    SlotManager sm = new SlotManager(config, 32);
+
+    sm.recordWrite("producer-1", TOPIC, 15 * MB);
+    sm.tick();
+    int occupiedBefore = sm.getOccupiedSlots();
+
+    sm.removeProducer("never-connected");
+
+    assertEquals(occupiedBefore, sm.getOccupiedSlots());
+    assertTrue(sm.producerHasSlots("producer-1"));
+  }
+
+  @Test
+  public void testRecordProducerConnectionsSkipsRewriteWhenUnchanged() {
+    // The hot-path optimization must not change observable state: an unchanged
+    // connection snapshot is a no-op, a changed one is stored.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    SlotManager sm = new SlotManager(config, 32);
+
+    Map<String, Integer> conns = new HashMap<>();
+    conns.put("10.0.0.1", 3);
+    conns.put("10.0.0.2", 2);
+    sm.recordProducerConnections("uuid-A", conns);
+    assertEquals(conns, sm.getProducerConnections().get("uuid-A"));
+
+    // Re-recording an equal (but distinct instance) map is a no-op that keeps
+    // the prior reference; contents must still match.
+    Map<String, Integer> equalConns = new HashMap<>(conns);
+    sm.recordProducerConnections("uuid-A", equalConns);
+    assertEquals(conns, sm.getProducerConnections().get("uuid-A"));
+
+    // A changed snapshot replaces the stored one.
+    Map<String, Integer> changed = new HashMap<>();
+    changed.put("10.0.0.1", 5);
+    sm.recordProducerConnections("uuid-A", changed);
+    assertEquals(changed, sm.getProducerConnections().get("uuid-A"));
+
+    // Equal-weight Set overload: re-recording the same set is a no-op.
+    sm.recordProducerConnections("uuid-B", Collections.singleton("10.0.0.9"));
+    Map<String, Integer> stored = sm.getProducerConnections().get("uuid-B");
+    assertEquals(Integer.valueOf(1), stored.get("10.0.0.9"));
+    sm.recordProducerConnections("uuid-B", Collections.singleton("10.0.0.9"));
+    assertEquals(stored, sm.getProducerConnections().get("uuid-B"));
   }
 }
