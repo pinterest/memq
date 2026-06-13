@@ -32,6 +32,7 @@ import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.TopicMetadata;
 
 import com.codahale.metrics.Counter;
+import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.NoopMetricRegistry;
@@ -124,6 +125,16 @@ public class MemqProducer<K, V> implements Closeable {
     writeMessageCounter = metricRegistry.counter("producer.write.message");
     writeMessageSizeHistogram = metricRegistry.histogram("producer.write.message.size");
     writeTimer = metricRegistry.timer("producer.write.time");
+    // Per-producer connection counts, tagged with this producer's id via the
+    // OpenTSDBReporter "|key=value" inline-tag convention. Cardinality is one
+    // series per producer process (the pid is stable for the client's life).
+    // Two views: physical channels (live TCP connections) and owned endpoints
+    // (brokers where this producer holds slots -- the slot/eviction view).
+    String pidTag = "|pid=" + client.getProducerId();
+    metricRegistry.gauge("producer.connections.channels" + pidTag,
+        () -> (Gauge<Integer>) () -> client.getActiveChannelCount());
+    metricRegistry.gauge("producer.connections.endpoints" + pidTag,
+        () -> (Gauge<Integer>) () -> client.getOwnedEndpointCount());
   }
 
   private void initializeTopicConnection(List<Endpoint> bootstrapEndpoints, String topic) throws Exception {

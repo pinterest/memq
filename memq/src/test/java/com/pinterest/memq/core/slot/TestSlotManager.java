@@ -705,4 +705,59 @@ public class TestSlotManager {
     sm.recordProducerConnections("uuid-B", Collections.singleton("10.0.0.9"));
     assertEquals(stored, sm.getProducerConnections().get("uuid-B"));
   }
+
+  @Test
+  public void testTopicAggregateGaugesEmittedWithoutPidTagWhenPerPidDisabled() {
+    // Default (emitPerPidSlotMetrics=false): the pid-less per-topic rollup must
+    // still be registered and equal the sum across producers, while the per-pid
+    // gauges must be absent.
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    assertFalse("guard: this test asserts behavior with per-pid emission off",
+        config.isEmitPerPidSlotMetrics());
+    MetricRegistry slotRegistry = new MetricRegistry();
+    SlotManager sm = new SlotManager(config, 32, slotRegistry);
+
+    sm.recordWrite("uuid-A", TOPIC, 15 * MB);
+    sm.recordWrite("uuid-B", TOPIC, 25 * MB);
+    sm.tick();
+
+    Gauge<?> emaAgg = slotRegistry.getGauges().get("producer.ema|topic=" + TOPIC);
+    Gauge<?> slotsAgg = slotRegistry.getGauges().get("producer.slots|topic=" + TOPIC);
+    assertNotNull("topic-aggregate ema gauge must register even when per-pid is off", emaAgg);
+    assertNotNull("topic-aggregate slots gauge must register even when per-pid is off", slotsAgg);
+
+    double expectedEma = sm.getProducerEmaRate("uuid-A", TOPIC)
+        + sm.getProducerEmaRate("uuid-B", TOPIC);
+    int expectedSlots = sm.getProducerSlots("uuid-A", TOPIC)
+        + sm.getProducerSlots("uuid-B", TOPIC);
+    assertEquals("aggregate ema must be the sum across producers",
+        expectedEma, ((Number) emaAgg.getValue()).doubleValue(), 1e-9);
+    assertEquals("aggregate slots must be the sum across producers",
+        expectedSlots, ((Number) slotsAgg.getValue()).intValue());
+
+    // No per-pid gauges while the flag is off.
+    assertFalse(slotRegistry.getGauges().containsKey("producer.ema|pid=uuid-A|topic=" + TOPIC));
+    assertFalse(slotRegistry.getGauges().containsKey("producer.ema|pid=uuid-B|topic=" + TOPIC));
+  }
+
+  @Test
+  public void testTopicAggregateGaugesDeregisteredOnDropTopic() {
+    SlotAccountingConfig config = fastConfig();
+    config.setTickIntervalMs(1000);
+    MetricRegistry slotRegistry = new MetricRegistry();
+    SlotManager sm = new SlotManager(config, 32, slotRegistry);
+
+    sm.recordWrite("uuid-A", TOPIC, 15 * MB);
+    sm.tick();
+    assertTrue(slotRegistry.getGauges().containsKey("producer.ema|topic=" + TOPIC));
+    assertTrue(slotRegistry.getGauges().containsKey("producer.slots|topic=" + TOPIC));
+
+    sm.dropTopic(TOPIC);
+
+    assertFalse("aggregate ema gauge must be removed on dropTopic",
+        slotRegistry.getGauges().containsKey("producer.ema|topic=" + TOPIC));
+    assertFalse("aggregate slots gauge must be removed on dropTopic",
+        slotRegistry.getGauges().containsKey("producer.slots|topic=" + TOPIC));
+  }
 }

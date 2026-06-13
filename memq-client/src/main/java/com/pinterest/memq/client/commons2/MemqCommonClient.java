@@ -1054,6 +1054,25 @@ public class MemqCommonClient implements Closeable {
   }
 
   /**
+   * Number of live TCP channels this client holds to brokers (physical
+   * connection count). Counts only active pooled channels. May briefly exceed
+   * the owned-endpoint count during bootstrap or right after a broker drop,
+   * since a channel can be open to a broker where no slots are yet owned.
+   */
+  public int getActiveChannelCount() {
+    return networkClient.getActiveChannelCount();
+  }
+
+  /**
+   * Number of broker endpoints on which this producer currently owns at least
+   * one slot -- the connection set reported to brokers and the quantity the
+   * broker-side eviction caps via {@code maxConnectionsPerProducer}.
+   */
+  public int getOwnedEndpointCount() {
+    return slotsOwned.size();
+  }
+
+  /**
    * Whether the client has observed any v4-only signal from a broker (eviction
    * directive or non-zero slot ownership). Once true, the legacy
    * {@code numWriteEndpoints} fan-out gates are no-ops and routing is governed

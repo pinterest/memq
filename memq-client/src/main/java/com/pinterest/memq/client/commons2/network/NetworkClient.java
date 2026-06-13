@@ -338,6 +338,22 @@ public class NetworkClient implements Closeable {
     return responseHandler.getInflightRequestCount();
   }
 
+  /**
+   * Number of currently-open (active) pooled channels, i.e. live TCP
+   * connections this client holds to brokers. Stale pool entries whose channel
+   * has gone inactive (broker died, not yet re-acquired) are excluded, so this
+   * reflects physical connections rather than the raw pool size.
+   */
+  public int getActiveChannelCount() {
+    int count = 0;
+    for (ChannelFuture cf : channelPool.values()) {
+      if (cf.channel() != null && cf.channel().isActive()) {
+        count++;
+      }
+    }
+    return count;
+  }
+
   @VisibleForTesting
   protected ChannelFuture getConnectFuture() {
     return lastConnectFuture;

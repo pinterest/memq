@@ -138,6 +138,16 @@ public class SlotManager {
   private final Set<String> registeredEmaKeys = ConcurrentHashMap.newKeySet();
   private final Set<String> registeredSlotsKeys = ConcurrentHashMap.newKeySet();
 
+  /**
+   * Topics for which the always-on per-topic aggregate gauges
+   * ({@code producer.ema|topic=...} / {@code producer.slots|topic=...}) have
+   * been registered, so {@link #tick()} only registers each once. Unlike the
+   * per-(pid, topic) gauges, these carry no {@code pid} tag, so their
+   * cardinality is bounded by the topic count and they are emitted regardless
+   * of {@code emitPerPidSlotMetrics}.
+   */
+  private final Set<String> registeredAggTopics = ConcurrentHashMap.newKeySet();
+
   private ScheduledExecutorService tickExecutor;
 
   public SlotManager(SlotAccountingConfig config, int totalSlots) {
@@ -258,6 +268,8 @@ public class SlotManager {
           // Re-registering each tick would be a no-op for codahale but adds
           // unnecessary CHM contention.
           registerProducerMetrics(pid, topic, state);
+          // Always-on, pid-less per-topic rollup (see registerTopicAggregateMetrics).
+          registerTopicAggregateMetrics(topic);
 
           int expectedSlots = (int) ceil(state.emaRateMbps / slotSizeMbps);
           int currentSlots = state.currentSlots;
@@ -534,6 +546,15 @@ public class SlotManager {
   }
 
   /**
+   * Registry key for the pid-less per-topic aggregate gauge: emits the same
+   * metric name as the per-producer gauge but tagged only with {@code topic}.
+   * Visible for test.
+   */
+  static String encodeTopicMetricKey(String metricName, String topic) {
+    return metricName + "|topic=" + topic;
+  }
+
+  /**
    * Register {@code producer.ema} and {@code producer.slots} gauges for
    * the (pid, topic) pair, once. No-op when no registry was supplied at
    * construction time (test-only path) or when the gauge is already
@@ -551,6 +572,65 @@ public class SlotManager {
     if (registeredSlotsKeys.add(slotsKey)) {
       registry.gauge(slotsKey, () -> (Gauge<Integer>) () -> state.currentSlots);
     }
+  }
+
+  /**
+   * Register the always-on, pid-less per-topic aggregate gauges
+   * {@code producer.ema|topic=<topic>} and {@code producer.slots|topic=<topic>}
+   * once per topic. Unlike {@link #registerProducerMetrics}, this is not gated
+   * by {@code emitPerPidSlotMetrics} -- it is the default-visible rollup so the
+   * {@code memq.slot.producer.ema} / {@code memq.slot.producer.slots} metrics
+   * keep flowing (with only a {@code topic} tag) when per-pid emission is off.
+   * <p>
+   * The gauges sum across all producers writing to the topic on this broker, so
+   * {@code producer.ema} is the topic's total ingress-rate EMA (Mbps) and
+   * {@code producer.slots} its total occupied slots. Values are computed on read
+   * (reporter cadence), which keeps the hot path and tick untouched.
+   */
+  private void registerTopicAggregateMetrics(String topic) {
+    if (registry == null) {
+      return;
+    }
+    if (registeredAggTopics.add(topic)) {
+      registry.gauge(encodeTopicMetricKey(EMA_METRIC_NAME, topic),
+          () -> (Gauge<Double>) () -> sumTopicEmaMbps(topic));
+      registry.gauge(encodeTopicMetricKey(SLOTS_METRIC_NAME, topic),
+          () -> (Gauge<Integer>) () -> sumTopicSlots(topic));
+    }
+  }
+
+  private void deregisterTopicAggregateMetrics(String topic) {
+    if (registry == null) {
+      return;
+    }
+    if (registeredAggTopics.remove(topic)) {
+      registry.remove(encodeTopicMetricKey(EMA_METRIC_NAME, topic));
+      registry.remove(encodeTopicMetricKey(SLOTS_METRIC_NAME, topic));
+    }
+  }
+
+  /** Sum of every producer's EMA rate (Mbps) for {@code topic} on this broker. */
+  private double sumTopicEmaMbps(String topic) {
+    double sum = 0.0;
+    for (ConcurrentHashMap<String, ProducerSlotState> topicMap : producers.values()) {
+      ProducerSlotState state = topicMap.get(topic);
+      if (state != null) {
+        sum += state.emaRateMbps;
+      }
+    }
+    return sum;
+  }
+
+  /** Sum of every producer's currently-held slots for {@code topic} on this broker. */
+  private int sumTopicSlots(String topic) {
+    int sum = 0;
+    for (ConcurrentHashMap<String, ProducerSlotState> topicMap : producers.values()) {
+      ProducerSlotState state = topicMap.get(topic);
+      if (state != null) {
+        sum += state.currentSlots;
+      }
+    }
+    return sum;
   }
 
   /**
@@ -622,6 +702,10 @@ public class SlotManager {
       evictionCooldownUntilMs.remove(cooldownKey(pid, topic));
       affected++;
     }
+    // The topic is decommissioned on this broker; drop its aggregate gauges so
+    // they don't keep emitting a frozen 0 forever (they re-register if the
+    // topic is ever reassigned and starts taking writes again).
+    deregisterTopicAggregateMetrics(topic);
     logger.info("dropTopic: cleared accounting for topic=" + topic
         + " affectedProducers=" + affected
         + " slotsReleased=" + slotsReleased
