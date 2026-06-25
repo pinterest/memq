@@ -126,6 +126,24 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
+  public void testZeroSlotEvictionDoesNotAddPhantomEndpoint() {
+    // A zero-slot directive (no load actually moved) must not insert the target
+    // into slotsOwned -- doing so would inflate the producer's endpoint count
+    // with a broker it never owns slots on or connects to. The source is still
+    // refreshed from the reported remaining count.
+    client.getSlotsOwned().put("10.0.0.1", 5);
+
+    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
+    WriteResponsePacket evictionResponse = new WriteResponsePacket("10.0.0.4", 0, 5);
+    client.handleWriteResponse(evictionResponse, sourceAddr);
+
+    assertFalse("zero-slot eviction must not add a phantom target endpoint",
+        client.getSlotsOwned().containsKey("10.0.0.4"));
+    assertEquals("source slot count is still refreshed from remaining",
+        5, (int) client.getSlotsOwned().getOrDefault("10.0.0.1", 0));
+  }
+
+  @Test
   public void testEvictionImmediatelyRegistersTargetAsWriteEndpoint() throws Exception {
     // Pre-eviction: producer is actively writing to 10.0.0.1 and 10.0.0.2
     setWriteEndpoints(client, new ArrayList<>(endpoints.subList(0, 2)));
