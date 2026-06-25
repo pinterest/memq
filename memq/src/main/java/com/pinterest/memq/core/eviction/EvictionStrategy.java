@@ -18,6 +18,8 @@ package com.pinterest.memq.core.eviction;
 import com.pinterest.memq.core.gossip.GossipState;
 import com.pinterest.memq.core.slot.SlotManager;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -57,4 +59,24 @@ public interface EvictionStrategy {
                           Map<String, GossipState> peerStates,
                           Map<String, Map<String, Integer>> producerConnections,
                           Map<String, Set<String>> topicToBrokerIps);
+
+  /**
+   * Evaluate a whole eviction cycle, returning zero or more directives. This
+   * is the entry point {@code EvictionManager} uses so a strategy can shed a
+   * per-cycle <i>budget</i> across several producers in one pass (e.g. when no
+   * single producer holds enough slots to cover the budget on its own).
+   * <p>
+   * The default implementation wraps {@link #evaluate} for backward
+   * compatibility, yielding at most one directive per cycle.
+   *
+   * @return the directives to apply this cycle (possibly empty, never null).
+   */
+  default List<EvictionResult> evaluateBatch(SlotManager slotManager,
+                                             Map<String, GossipState> peerStates,
+                                             Map<String, Map<String, Integer>> producerConnections,
+                                             Map<String, Set<String>> topicToBrokerIps) {
+    EvictionResult single = evaluate(slotManager, peerStates, producerConnections,
+        topicToBrokerIps);
+    return single == null ? Collections.emptyList() : Collections.singletonList(single);
+  }
 }

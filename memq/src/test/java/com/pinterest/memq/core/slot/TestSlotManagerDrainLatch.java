@@ -55,7 +55,11 @@ public class TestSlotManagerDrainLatch {
     // 1s window over a 1s tick -> ~0.37 decay per tick, so a few ticks move
     // the free-slots EMA appreciably.
     config.setDrainLatchEmaWindowSeconds(1.0);
-    config.setDrainLatchDisengageFreeSlots(2.0);
+    // totalSlots=4 in these tests: engage when smoothed free < 1 slot (25%),
+    // disengage at >= 2 slots (50%). Mirrors the legacy absolute thresholds
+    // (engage < 1, disengage 2) now expressed as percentages of totalSlots.
+    config.setDrainLatchEngagePercentage(25.0);
+    config.setDrainLatchDisengagePercentage(50.0);
     // These tests fill slots in a single tick; opt out of the per-tick step
     // clamp (covered by TestSlotManagerSlotStep) to keep that assumption.
     config.setMaxSlotStep(0);
@@ -152,6 +156,30 @@ public class TestSlotManagerDrainLatch {
       sm.tick();
     }
     assertFalse("latch should disengage once drained above the target",
+        sm.isDrainLatched());
+  }
+
+  @Test
+  public void testMisconfiguredEqualThresholdsStillDisengage() {
+    // disengage% == engage% would leave no hysteresis band; SlotManager must
+    // clamp disengage strictly above engage so the latch can still release
+    // after a genuine drain instead of chattering or sticking.
+    config.setDrainLatchEngagePercentage(50.0);   // 2 slots of 4
+    config.setDrainLatchDisengagePercentage(50.0); // clamped up to engage+1 = 3
+    SlotManager sm = create(4);
+
+    fillAllSlots(sm);
+    tickAtFullOccupancy(sm, 4);
+    assertTrue("latch should still engage with clamped thresholds",
+        sm.isDrainLatched());
+
+    sm.releaseProducerSlots("p1", TOPIC, 2);
+    sm.releaseProducerSlots("p2", TOPIC, 2);
+    assertEquals(4, sm.getFreeSlots());
+    for (int i = 0; i < 6; i++) {
+      sm.tick();
+    }
+    assertFalse("clamped disengage threshold must still release after draining",
         sm.isDrainLatched());
   }
 

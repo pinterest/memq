@@ -20,6 +20,7 @@ import com.pinterest.memq.core.gossip.GossipState;
 import com.pinterest.memq.core.slot.SlotManager;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -125,18 +126,20 @@ public class EvictionManager {
           + " localFreeSlots=" + slotManager.getFreeSlots()
           + "/" + slotManager.getTotalSlots()
           + " pendingEvictions=" + pendingEvictions.size());
-      EvictionResult result = strategy.evaluate(slotManager, peerStates,
+      List<EvictionResult> results = strategy.evaluateBatch(slotManager, peerStates,
           producerConnections, topicToBrokerIps);
-      if (result != null) {
-        EvictionResult prev = pendingEvictions.put(result.getPid(), result);
-        String producerIp = slotManager.getProducerIp(result.getPid());
-        String ipSuffix = producerIp == null ? "" : " producerIp=" + producerIp;
-        if (prev != null) {
-          logger.info("Eviction scheduled (overwrote prior pending): " + result + ipSuffix
-              + " replaced=" + prev + " (took " + (System.currentTimeMillis() - startMs) + "ms)");
-        } else {
-          logger.info("Eviction scheduled: " + result + ipSuffix
-              + " (took " + (System.currentTimeMillis() - startMs) + "ms)");
+      if (results != null && !results.isEmpty()) {
+        for (EvictionResult result : results) {
+          EvictionResult prev = pendingEvictions.put(result.getPid(), result);
+          String producerIp = slotManager.getProducerIp(result.getPid());
+          String ipSuffix = producerIp == null ? "" : " producerIp=" + producerIp;
+          if (prev != null) {
+            logger.info("Eviction scheduled (overwrote prior pending): " + result + ipSuffix
+                + " replaced=" + prev + " (took " + (System.currentTimeMillis() - startMs) + "ms)");
+          } else {
+            logger.info("Eviction scheduled: " + result + ipSuffix
+                + " (took " + (System.currentTimeMillis() - startMs) + "ms)");
+          }
         }
       } else {
         logger.info("Eviction tick produced no decision (took "

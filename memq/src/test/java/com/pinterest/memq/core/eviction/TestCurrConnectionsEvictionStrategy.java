@@ -1716,4 +1716,178 @@ public class TestCurrConnectionsEvictionStrategy {
         result);
   }
 
+  // ============================================================
+  // Configurable eviction step: budget, damping, multi-producer batch
+  // ============================================================
+
+  @Test
+  public void testDefaultBudgetShedsSingleSlot() throws Exception {
+    // Default config (evictionBudgetPercentage=0) must reproduce the legacy
+    // one-slot-per-cycle behavior regardless of how many slots the producer
+    // holds or how wide the gap.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "heavy", TOPIC, 320); // 32 slots -> local free 0
+    sm.recordProducerConnections("heavy",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 32);
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull(result);
+    assertEquals("heavy", result.getPid());
+    assertEquals("default budget sheds exactly one slot", 1, result.getNumSlotsToEvict());
+  }
+
+  @Test
+  public void testEvictionStepBoundedByBudget() throws Exception {
+    // budget binds: held (32) and damped half-gap (16) both exceed the
+    // 8-slot budget, so the move is capped at the budget.
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "heavy", TOPIC, 320); // 32 slots -> local free 0
+    sm.recordProducerConnections("heavy",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setEvictionBudgetPercentage(25.0); // 25% of 32 = 8
+    config.setEvictionDampingFactor(0.5);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 32);
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull(result);
+    assertEquals("heavy", result.getPid());
+    // min(budget=8, held=32, floor((32-0)*0.5)=16) = 8
+    assertEquals(8, result.getNumSlotsToEvict());
+  }
+
+  @Test
+  public void testEvictionStepBoundedByDampedHalfGap() throws Exception {
+    // damping binds: budget (16) and held (32) both exceed the damped
+    // half-gap, so the move is capped at floor((targetFree-localFree)*0.5).
+    SlotManager sm = createSlotManager(32);
+    acquireSlots(sm, "heavy", TOPIC, 320); // 32 slots -> local free 0
+    sm.recordProducerConnections("heavy",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(1);
+    config.setEvictionBudgetPercentage(50.0); // 16, won't bind
+    config.setEvictionDampingFactor(0.5);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 10);
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull(result);
+    // min(budget=16, held=32, floor((10-0)*0.5)=5) = 5
+    assertEquals(5, result.getNumSlotsToEvict());
+  }
+
+  @Test
+  public void testBudgetSpreadAcrossMultipleProducers() throws Exception {
+    // No single light producer can cover the budget on its own, so the cycle
+    // accumulates one slot from each of K=3 producers, each sent to a distinct
+    // target (per-target cooldown applies within the cycle).
+    SlotManager sm = createSlotManager(32);
+    sm.recordWrite("filler", TOPIC, 280 * MB); // 28 slots, v3 (no connections)
+    sm.recordWrite("p1", TOPIC, 10 * MB);       // 1 slot each
+    sm.recordWrite("p2", TOPIC, 10 * MB);
+    sm.recordWrite("p3", TOPIC, 10 * MB);
+    tickOnce(sm); // occupied 31 -> local free 1
+    sm.recordProducerConnections("p1",
+        new HashSet<>(Collections.singletonList("broker-a")));
+    sm.recordProducerConnections("p2",
+        new HashSet<>(Collections.singletonList("broker-b")));
+    sm.recordProducerConnections("p3",
+        new HashSet<>(Collections.singletonList("broker-c")));
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(3);
+    config.setTopNProducers(3);
+    config.setEvictionBudgetPercentage(50.0); // 16, won't bind
+    config.setMaxProducersPerCycle(3);
+    config.setEvictionDampingFactor(0.5);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.putAll(peerWithFreeSlots("broker-a", 30));
+    peers.putAll(peerWithFreeSlots("broker-b", 30));
+    peers.putAll(peerWithFreeSlots("broker-c", 30));
+
+    java.util.List<EvictionResult> results = strategy.evaluateBatch(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertEquals("batch should shed across K=3 producers", 3, results.size());
+    Set<String> pids = new HashSet<>();
+    Set<String> targets = new HashSet<>();
+    for (EvictionResult r : results) {
+      pids.add(r.getPid());
+      targets.add(r.getTargetBrokerIp());
+      assertEquals("each light producer sheds exactly one slot",
+          1, r.getNumSlotsToEvict());
+    }
+    assertEquals("distinct producers across the cycle", 3, pids.size());
+    assertEquals("distinct targets within the cycle (per-target cooldown)",
+        3, targets.size());
+  }
+
+  @Test
+  public void testMaxProducersPerCycleCapsBatch() throws Exception {
+    // Same topology as above but K=1 -- the batch must stop after a single
+    // producer even though budget and additional eligible producers remain.
+    SlotManager sm = createSlotManager(32);
+    sm.recordWrite("filler", TOPIC, 280 * MB);
+    sm.recordWrite("p1", TOPIC, 10 * MB);
+    sm.recordWrite("p2", TOPIC, 10 * MB);
+    sm.recordWrite("p3", TOPIC, 10 * MB);
+    tickOnce(sm);
+    sm.recordProducerConnections("p1",
+        new HashSet<>(Collections.singletonList("broker-a")));
+    sm.recordProducerConnections("p2",
+        new HashSet<>(Collections.singletonList("broker-b")));
+    sm.recordProducerConnections("p3",
+        new HashSet<>(Collections.singletonList("broker-c")));
+
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+    config.setEvictionPercentageThreshold(0.0);
+    config.setPendingEvictionCooldownSeconds(0.0);
+    config.setTopNTargets(3);
+    config.setTopNProducers(3);
+    config.setEvictionBudgetPercentage(50.0);
+    config.setMaxProducersPerCycle(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, config);
+
+    Map<String, GossipState> peers = new HashMap<>();
+    peers.putAll(peerWithFreeSlots("broker-a", 30));
+    peers.putAll(peerWithFreeSlots("broker-b", 30));
+    peers.putAll(peerWithFreeSlots("broker-c", 30));
+
+    java.util.List<EvictionResult> results = strategy.evaluateBatch(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertEquals("K=1 must cap the batch at a single producer", 1, results.size());
+  }
+
 }

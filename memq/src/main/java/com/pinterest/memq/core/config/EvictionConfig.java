@@ -28,6 +28,9 @@ public class EvictionConfig {
   private int topNTargets = 3;
   private int topNProducers = 3;
   private int maxConnectionsPerProducer = 3;
+  private double evictionBudgetPercentage = 0.0;
+  private int maxProducersPerCycle = 1;
+  private double evictionDampingFactor = 0.5;
 
   public boolean isEnabled() {
     return enabled;
@@ -158,6 +161,75 @@ public class EvictionConfig {
 
   public void setMaxConnectionsPerProducer(int maxConnectionsPerProducer) {
     this.maxConnectionsPerProducer = maxConnectionsPerProducer;
+  }
+
+  /**
+   * Per-eviction-cycle shed <i>budget</i>, expressed as a percentage of the
+   * broker's {@code totalSlots}. The strategy tries to shed up to this many
+   * slots each cycle, spread across at most {@link #getMaxProducersPerCycle()}
+   * producers, but always shedding at least one slot when an eviction is
+   * warranted.
+   * <p>
+   * Expressed as a percentage so the budget tracks real throughput
+   * independently of {@code slotSizeMbps}: a finer slot size (larger
+   * {@code totalSlots}) keeps the same Mbps-per-cycle shed rate without
+   * retuning. The effective budget is {@code max(1, round(totalSlots * pct /
+   * 100))}.
+   * <p>
+   * The default {@code 0.0} clamps to a 1-slot budget, exactly reproducing the
+   * historical single-slot-per-cycle eviction behavior.
+   *
+   * @return the configured per-cycle eviction budget, in percent of totalSlots.
+   */
+  public double getEvictionBudgetPercentage() {
+    return evictionBudgetPercentage;
+  }
+
+  public void setEvictionBudgetPercentage(double evictionBudgetPercentage) {
+    this.evictionBudgetPercentage = evictionBudgetPercentage;
+  }
+
+  /**
+   * Maximum number of distinct producers a single eviction cycle may target
+   * while filling {@link #getEvictionBudgetPercentage() the budget}. When no
+   * single producer holds enough slots to cover the budget, the strategy
+   * accumulates across several producers up to this cap, then short-circuits
+   * and accepts a smaller shed (the closed loop corrects the remainder on a
+   * later cycle).
+   * <p>
+   * Capped because each additional producer committed from the same (stale)
+   * gossip snapshot compounds uncertainty: the i-th directive is decided
+   * against state already invalidated by directives 1..i-1. The default
+   * {@code 1} reproduces the historical one-producer-per-cycle behavior.
+   *
+   * @return the per-cycle producer cap (K).
+   */
+  public int getMaxProducersPerCycle() {
+    return maxProducersPerCycle;
+  }
+
+  public void setMaxProducersPerCycle(int maxProducersPerCycle) {
+    this.maxProducersPerCycle = maxProducersPerCycle;
+  }
+
+  /**
+   * Damping factor applied to the per-target transfer: a single eviction never
+   * moves more than {@code dampingFactor * (targetFree - localFree)} slots to a
+   * given target. With the default {@code 0.5} this is the "half-the-gap" rule
+   * that guarantees an eviction can never overshoot equilibrium and flip the
+   * target into the new hot broker, keeping batched moves monotonically
+   * convergent. A move is still always at least one slot when an eviction is
+   * warranted, so damping only bounds oversized steps; it never blocks a
+   * needed single-slot eviction.
+   *
+   * @return the per-target damping factor in {@code (0, 1]}.
+   */
+  public double getEvictionDampingFactor() {
+    return evictionDampingFactor;
+  }
+
+  public void setEvictionDampingFactor(double evictionDampingFactor) {
+    this.evictionDampingFactor = evictionDampingFactor;
   }
 
 }
