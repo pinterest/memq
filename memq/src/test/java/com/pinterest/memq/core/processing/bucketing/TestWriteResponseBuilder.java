@@ -266,31 +266,6 @@ public class TestWriteResponseBuilder {
   }
 
   @Test
-  public void testZeroReleaseAtDeliverySkipsEvictionDirective() throws Exception {
-    // A directive decided while the producer held slots can be delivered after
-    // the producer has decayed to zero here. Releasing nothing must NOT ship a
-    // phantom directive (which would make the client add the target to its
-    // connection set for a transfer that never happened).
-    SlotManager sm = createSlotManager();
-    acquireSlots(sm, V4_PID, 50);
-    int slots = sm.getTotalProducerSlots(V4_PID);
-    assertTrue("test setup", slots > 0);
-    sm.releaseProducerSlots(V4_PID, TOPIC, slots); // drain to zero before delivery
-    assertEquals(0, sm.getTotalProducerSlots(V4_PID));
-
-    EvictionManager em = managerWithPendingEviction(sm,
-        new EvictionResult(V4_PID, "10.0.0.99", 1));
-
-    WriteResponsePacket resp = WriteResponseBuilder.build(
-        V4_PID, (short) 4, ResponseCodes.OK, em, sm);
-
-    assertFalse("zero-release eviction must not be delivered as a directive",
-        resp.hasEviction());
-    assertEquals("no slots remain to report", 0, resp.getNumSlotsOwned());
-    assertEquals(RequestType.PROTOCOL_VERSION, resp.getServerProtocolVersion());
-  }
-
-  @Test
   public void testV3ProducerNeverGetsEvictionEvenIfSomehowPending() throws Exception {
     SlotManager sm = createSlotManager();
     acquireSlots(sm, V4_PID, 50);

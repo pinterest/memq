@@ -864,15 +864,8 @@ public class MemqCommonClient implements Closeable {
       String targetIp = writeResp.getTargetBrokerIp();
       int slotsToEvict = writeResp.getNumSlotsToEvict();
 
-      // Apply the eviction to the source-of-truth slot map. Only credit the
-      // target when slots actually moved: a zero-slot directive (e.g. from an
-      // older broker that decided the eviction before the producer decayed to
-      // zero) must not insert a phantom endpoint into slotsOwned -- that would
-      // inflate the connection set with a broker we never own slots on or
-      // connect to. Newer brokers suppress zero-slot directives at the source.
-      if (slotsToEvict > 0) {
-        slotsOwned.merge(targetIp, slotsToEvict, Integer::sum);
-      }
+      // Apply the eviction to the source-of-truth slot map.
+      slotsOwned.merge(targetIp, slotsToEvict, Integer::sum);
       if (sourceIp != null) {
         if (remaining > 0) {
           slotsOwned.put(sourceIp, remaining);

@@ -83,22 +83,6 @@ public final class WriteResponseBuilder {
         }
         int remaining = sm.getTotalProducerSlots(producerId);
         String producerIp = sm.getProducerIp(producerId);
-        // A directive is decided when the producer holds slots, but delivered on
-        // its NEXT write response -- by which point the producer may have decayed
-        // to zero slots here, so nothing was actually released. Emitting a
-        // directive that moves zero slots would make the client add the target to
-        // its connection set (slotsOwned) for a transfer that never happened,
-        // inflating its endpoint count with a phantom it never connects to. Skip
-        // the directive entirely and fall through to a normal slot-ownership
-        // response; the next eviction cycle re-decides against fresh state.
-        if (released <= 0) {
-          logger.info("Eviction skipped at delivery (nothing to release) for producer="
-              + producerId + (producerIp == null ? "" : " producerIp=" + producerIp)
-              + " target=" + eviction.getTargetBrokerIp()
-              + " slotsRequested=" + toRelease
-              + " remainingSlotsForProducer=" + remaining);
-          return stamped(new WriteResponsePacket(null, 0, remaining));
-        }
         logger.info("Eviction delivered to producer=" + producerId
             + (producerIp == null ? "" : " producerIp=" + producerIp)
             + " target=" + eviction.getTargetBrokerIp()
