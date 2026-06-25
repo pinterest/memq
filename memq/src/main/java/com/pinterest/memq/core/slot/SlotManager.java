@@ -65,7 +65,6 @@ public class SlotManager {
 
   private final boolean drainLatchEnabled;
   private final double drainLatchEmaDecay;
-  private final double drainLatchEngageFreeSlots;
   private final double drainLatchDisengageFreeSlots;
   private final int maxSlotStep;
   private final boolean emitPerPidSlotMetrics;
@@ -186,20 +185,8 @@ public class SlotManager {
     this.drainLatchEnabled = config.isDrainLatchEnabled();
     double drainLatchWindowSec = config.getDrainLatchEmaWindowSeconds();
     this.drainLatchEmaDecay = exp(-tickIntervalSec / drainLatchWindowSec);
-    double engageFreeSlots = totalSlots * config.getDrainLatchEngagePercentage() / 100.0;
-    double disengageFreeSlots = totalSlots * config.getDrainLatchDisengagePercentage() / 100.0;
-    // The latch needs a hysteresis band: disengage must sit strictly above
-    // engage, otherwise the broker would re-arm the instant it disengages and
-    // chatter. Clamp up (and warn) on misconfiguration.
-    if (disengageFreeSlots <= engageFreeSlots) {
-      logger.warning("drainLatchDisengagePercentage ("
-          + config.getDrainLatchDisengagePercentage()
-          + ") <= drainLatchEngagePercentage (" + config.getDrainLatchEngagePercentage()
-          + "); clamping disengage above engage to preserve hysteresis");
-      disengageFreeSlots = engageFreeSlots + 1.0;
-    }
-    this.drainLatchEngageFreeSlots = engageFreeSlots;
-    this.drainLatchDisengageFreeSlots = disengageFreeSlots;
+    this.drainLatchDisengageFreeSlots =
+        Math.max(config.getDrainLatchDisengageFreeSlots(), totalSlots / 10.0);
     this.maxSlotStep = config.getMaxSlotStep();
     this.emitPerPidSlotMetrics = config.isEmitPerPidSlotMetrics();
     // Start un-latched: a freshly started, empty broker has all slots free.
@@ -212,7 +199,6 @@ public class SlotManager {
         + " postEvictionCooldownMs=" + postEvictionCooldownMs
         + " drainLatchEnabled=" + drainLatchEnabled
         + " drainLatchEmaWindowSec=" + drainLatchWindowSec
-        + " drainLatchEngageFreeSlots=" + drainLatchEngageFreeSlots
         + " drainLatchDisengageFreeSlots=" + drainLatchDisengageFreeSlots
         + " maxSlotStep=" + maxSlotStep
         + " emitPerPidSlotMetrics=" + emitPerPidSlotMetrics);
@@ -369,11 +355,10 @@ public class SlotManager {
             + String.format("%.2f", freeSlotsEma)
             + " >= disengageFreeSlots=" + drainLatchDisengageFreeSlots);
       }
-    } else if (freeSlotsEma < drainLatchEngageFreeSlots) {
+    } else if (freeSlotsEma < 1.0) {
       drainLatched = true;
       logger.info("Drain latch engaged: freeSlotsEma="
           + String.format("%.2f", freeSlotsEma)
-          + " < engageFreeSlots=" + drainLatchEngageFreeSlots
           + " (recent free slots near zero); freezing slot acquisition until"
           + " drained to freeSlots=" + drainLatchDisengageFreeSlots);
     }

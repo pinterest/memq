@@ -76,33 +76,15 @@ public class SlotAccountingConfig {
   private double drainLatchEmaWindowSeconds = 20.0;
 
   /**
-   * The drain latch <b>engages</b> once the smoothed free-slot count falls
-   * below this percentage of {@code totalSlots}. Expressed as a percentage so
-   * the engage point is independent of {@code slotSizeMbps}: shrinking the slot
-   * size (which multiplies {@code totalSlots}) does not silently make the latch
-   * engage later in real-throughput terms.
-   * <p>
-   * The default {@code 3.125} reproduces the legacy "engage when smoothed free
-   * slots &lt; 1" behavior at the historical {@code totalSlots = 32}
-   * (1 / 32 = 3.125%).
+   * The drain latch disengages (re-enables acquisition) once the smoothed
+   * free-slot count rises to at least this many slots. This is the drain-depth
+   * / hysteresis knob: how far the broker must drain before acquisition
+   * resumes. The effective value is {@code max(this, totalSlots / 10)} so it
+   * scales with broker capacity; set it above the typical eviction equilibrium
+   * to avoid stranding unfilled slots. Engage is fixed at a smoothed free-slot
+   * count below 1.
    */
-  private double drainLatchEngagePercentage = 4.0;
-
-  /**
-   * The drain latch <b>disengages</b> (re-enables acquisition) once the
-   * smoothed free-slot count rises to at least this percentage of
-   * {@code totalSlots}. This is the drain-depth / hysteresis knob: how far the
-   * broker must drain before acquisition resumes. Expressed as a percentage so
-   * it scales with broker capacity automatically (replacing the previous
-   * absolute slot count with its {@code max(this, totalSlots / 10)} floor).
-   * <p>
-   * The default {@code 12.5} reproduces the legacy default of 4 slots at the
-   * historical {@code totalSlots = 32} (4 / 32 = 12.5%). Must be strictly
-   * greater than {@link #drainLatchEngagePercentage}; the {@link
-   * com.pinterest.memq.core.slot.SlotManager} clamps it up if misconfigured so
-   * the latch always has a hysteresis band.
-   */
-  private double drainLatchDisengagePercentage = 12;
+  private double drainLatchDisengageFreeSlots = 4.0;
 
   /**
    * Maximum number of slots the broker will acquire or release for a single
@@ -229,20 +211,12 @@ public class SlotAccountingConfig {
     this.drainLatchEmaWindowSeconds = drainLatchEmaWindowSeconds;
   }
 
-  public double getDrainLatchEngagePercentage() {
-    return drainLatchEngagePercentage;
+  public double getDrainLatchDisengageFreeSlots() {
+    return drainLatchDisengageFreeSlots;
   }
 
-  public void setDrainLatchEngagePercentage(double drainLatchEngagePercentage) {
-    this.drainLatchEngagePercentage = drainLatchEngagePercentage;
-  }
-
-  public double getDrainLatchDisengagePercentage() {
-    return drainLatchDisengagePercentage;
-  }
-
-  public void setDrainLatchDisengagePercentage(double drainLatchDisengagePercentage) {
-    this.drainLatchDisengagePercentage = drainLatchDisengagePercentage;
+  public void setDrainLatchDisengageFreeSlots(double drainLatchDisengageFreeSlots) {
+    this.drainLatchDisengageFreeSlots = drainLatchDisengageFreeSlots;
   }
 
   public int getMaxSlotStep() {

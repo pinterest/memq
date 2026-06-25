@@ -67,30 +67,18 @@ public final class WriteResponseBuilder {
     if (em != null) {
       EvictionResult eviction = em.pollEviction(producerId);
       if (eviction != null && sm != null) {
-        // The directive's slot count is a TOTAL across the producer's topics,
-        // not per-topic. Release across topics but cap the running total at
-        // the requested count, then report what was ACTUALLY released as the
-        // directive count -- so the producer's target-side weight increment
-        // matches the load the broker truly shed (per-topic release would
-        // shed numSlotsToEvict * numTopics and desync client routing).
-        int toRelease = eviction.getNumSlotsToEvict();
-        int released = 0;
         for (String topic : sm.getProducerTopics(producerId)) {
-          if (released >= toRelease) {
-            break;
-          }
-          released += sm.releaseProducerSlots(producerId, topic, toRelease - released);
+          sm.releaseProducerSlots(producerId, topic, eviction.getNumSlotsToEvict());
         }
         int remaining = sm.getTotalProducerSlots(producerId);
         String producerIp = sm.getProducerIp(producerId);
         logger.info("Eviction delivered to producer=" + producerId
             + (producerIp == null ? "" : " producerIp=" + producerIp)
             + " target=" + eviction.getTargetBrokerIp()
-            + " slotsRequested=" + toRelease
-            + " slotsReleased=" + released
+            + " slotsToEvict=" + eviction.getNumSlotsToEvict()
             + " remainingSlotsForProducer=" + remaining);
         return stamped(new WriteResponsePacket(eviction.getTargetBrokerIp(),
-            released, remaining));
+            eviction.getNumSlotsToEvict(), remaining));
       }
     }
 
