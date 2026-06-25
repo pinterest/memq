@@ -84,7 +84,9 @@ public class TestSlotManagerDrainLatch {
   public void testLatchEngagesAfterSustainedFullOccupancy() {
     SlotManager sm = create(4);
     fillAllSlots(sm);
-    assertEquals(0, sm.getFreeSlots());
+    // The drain latch tracks routing-slot occupancy; two 2-slot producers
+    // fill all 4 routing slots (getFreeSlots() is now the aggregate EMA view).
+    assertEquals(4, sm.getOccupiedSlots());
 
     tickAtFullOccupancy(sm, 4);
 
@@ -104,7 +106,7 @@ public class TestSlotManagerDrainLatch {
     // reacquire. Occupancy drops to 3 of 4 (so isFrozen is driven purely by
     // the latch, not by full occupancy or the global cooldown).
     sm.releaseProducerSlots("p1", TOPIC, 1);
-    assertEquals(1, sm.getFreeSlots());
+    assertEquals(3, sm.getOccupiedSlots());
 
     // Both producers want more; the latch must keep the freed slot free.
     sm.recordWrite("p1", TOPIC, 25 * MB);
@@ -114,7 +116,7 @@ public class TestSlotManagerDrainLatch {
     assertTrue(sm.isDrainLatched());
     assertTrue("isFrozen is driven by the latch even below full occupancy",
         sm.isFrozen());
-    assertEquals("latch blocks reacquire of the freed slot", 1, sm.getFreeSlots());
+    assertEquals("latch blocks reacquire of the freed slot", 3, sm.getOccupiedSlots());
   }
 
   @Test
@@ -146,7 +148,7 @@ public class TestSlotManagerDrainLatch {
     // nothing reacquires; the free-slots EMA climbs past the threshold.
     sm.releaseProducerSlots("p1", TOPIC, 2);
     sm.releaseProducerSlots("p2", TOPIC, 2);
-    assertEquals(4, sm.getFreeSlots());
+    assertEquals(0, sm.getOccupiedSlots());
 
     for (int i = 0; i < 5; i++) {
       sm.tick();

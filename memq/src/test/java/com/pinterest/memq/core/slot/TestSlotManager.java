@@ -221,7 +221,9 @@ public class TestSlotManager {
     assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
     assertEquals(3, sm.getProducerSlots("producer-2", TOPIC));
     assertEquals(5, sm.getOccupiedSlots());
-    assertEquals(27, sm.getFreeSlots());
+    // getFreeSlots() is the aggregate EMA view: ceil((15+25)/10) = 4 occupied,
+    // not the routing-slot sum of 5 (per-producer ceil inflation removed).
+    assertEquals(28, sm.getFreeSlots());
   }
 
   @Test

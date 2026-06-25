@@ -346,8 +346,15 @@ public class SlotManager {
     if (!drainLatchEnabled) {
       return;
     }
+    // The drain latch guards against re-acquisition flap of *routing* slots
+    // under saturation, so it tracks the routing-slot free count
+    // (totalSlots - sum of per-producer slots) rather than the aggregate
+    // EMA-based getFreeSlots(): an eviction reduces routing slots immediately
+    // but does not lower the producer's EMA, so aggregate free would not move
+    // and the latch could never observe the saturation it exists to manage.
+    int routingFreeSlots = totalSlots - totalOccupiedSlots.get();
     freeSlotsEma = drainLatchEmaDecay * freeSlotsEma
-        + (1 - drainLatchEmaDecay) * getFreeSlots();
+        + (1 - drainLatchEmaDecay) * routingFreeSlots;
     if (drainLatched) {
       if (freeSlotsEma >= drainLatchDisengageFreeSlots) {
         drainLatched = false;
@@ -464,13 +471,47 @@ public class SlotManager {
     }
   }
 
+  /**
+   * Free capacity in slots, derived from the broker's <i>aggregate</i> EMA
+   * rate ({@code ceil(sum of producer EMAs / slotSizeMbps)}) rather than the
+   * sum of per-producer routing slots. This is the figure gossiped to peers
+   * and used by the eviction load comparison and drain latch.
+   * <p>
+   * Using {@code ceil(sum)} instead of {@code sum(ceil)} removes the
+   * per-producer rounding inflation: a broker hosting many small "mice"
+   * producers (each rounding up to a full slot) no longer reports false
+   * near-saturation. The aggregate over-counts by at most {@code <1} slot for
+   * the whole broker, versus up to {@code (numProducers - 1)} before. It is
+   * computed on demand over the live producer set so structural changes
+   * (eviction-to-zero, idle reclaim, {@link #dropTopic}) are reflected
+   * immediately, without waiting for the next {@link #tick()}.
+   * <p>
+   * Distinct from {@link #getOccupiedSlots()}, which still reports the
+   * per-producer routing-slot sum (used only for the acquisition room check
+   * and as a metric); the two are no longer strictly complementary.
+   */
   public int getFreeSlots() {
-    return totalSlots - totalOccupiedSlots.get();
+    return totalSlots - aggregateOccupiedSlots();
+  }
+
+  /**
+   * Aggregate capacity occupancy in slots: {@code ceil(sum of all producer
+   * EMA rates / slotSizeMbps)}, clamped to {@code [0, totalSlots]}.
+   */
+  private int aggregateOccupiedSlots() {
+    double totalEmaMbps = 0.0;
+    for (ConcurrentHashMap<String, ProducerSlotState> topicMap : producers.values()) {
+      for (ProducerSlotState state : topicMap.values()) {
+        totalEmaMbps += state.emaRateMbps;
+      }
+    }
+    int occ = (int) ceil(totalEmaMbps / slotSizeMbps);
+    return Math.max(0, Math.min(occ, totalSlots));
   }
 
   public boolean isFrozen() {
     return System.currentTimeMillis() - lastSlotChangeTimeMs < cooldownMs
-        || totalOccupiedSlots.get() >= totalSlots
+        || getFreeSlots() <= 0
         || drainLatched;
   }
 
