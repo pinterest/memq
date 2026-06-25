@@ -260,51 +260,6 @@ public class TestMemqCommonClient {
   }
 
   @Test
-  public void testGetLocalityEndpointsNoCrossAzFallback() throws Exception {
-    MemqCommonClient client = new MemqCommonClient("test", null, new Properties());
-    List<Endpoint> crossAz = Arrays.asList(
-        new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9093), "other1"),
-        new Endpoint(InetSocketAddress.createUnresolved(LOCALHOST_STRING, 9094), "other2"));
-
-    // Read / metadata path: cross-AZ fallback is allowed.
-    assertEquals(2, client.getLocalityEndpoints(crossAz, true).size());
-    // Write path: no AZ-local broker means an empty result (caller backlogs),
-    // never a cross-AZ fallback.
-    assertTrue("write path must not fall back cross-AZ",
-        client.getLocalityEndpoints(crossAz, false).isEmpty());
-
-    client.close();
-  }
-
-  @Test
-  public void testResetWriteEndpointsKeepsPriorWhenNoInAzBroker() throws Exception {
-    MemqCommonClient client = new MemqCommonClient("test", null, new Properties());
-    // Bootstrap establishes the AZ-local ("test") endpoint set.
-    client.initialize(Collections.singletonList(commonEndpoint));
-
-    // Topic write brokers are all cross-AZ (e.g. mid-deploy): keep the prior
-    // AZ-local set rather than adopting cross-AZ brokers.
-    List<Endpoint> crossAzWriteBrokers = Arrays.asList(
-        new Endpoint(InetSocketAddress.createUnresolved("10.0.0.9", 9092), "other-az-1"),
-        new Endpoint(InetSocketAddress.createUnresolved("10.0.0.10", 9092), "other-az-2"));
-    client.resetWriteEndpoints(crossAzWriteBrokers);
-
-    List<Endpoint> endpoints = client.getEndpointsToTry();
-    assertEquals("must keep the single prior AZ-local endpoint, not adopt cross-AZ",
-        1, endpoints.size());
-    assertEquals(commonEndpoint, endpoints.get(0));
-
-    // Once an in-AZ write broker reappears, only it (not the cross-AZ broker) is adopted.
-    Endpoint inAz = new Endpoint(InetSocketAddress.createUnresolved("10.0.0.11", 9092), "test");
-    client.resetWriteEndpoints(Arrays.asList(inAz, crossAzWriteBrokers.get(0)));
-    List<Endpoint> after = client.getEndpointsToTry();
-    assertEquals("only the AZ-local broker is adopted", 1, after.size());
-    assertEquals(inAz, after.get(0));
-
-    client.close();
-  }
-
-  @Test
   public void testGetTopicMetadata() throws Exception {
     Map<RequestType, BiConsumer<ChannelHandlerContext, RequestPacket>> map = new HashMap<>();
 
@@ -351,9 +306,7 @@ public class TestMemqCommonClient {
       Set<Broker> brokers = new HashSet<>();
       int currentCount = count.getAndIncrement();
       for (int i = 0; i <= currentCount; i++) {
-        // Brokers must be AZ-local ("test" matches the client locality): the
-        // producer write path no longer adopts cross-AZ brokers on reconnect.
-        brokers.add(new Broker("127.0.0." + (i + 1), (short) port, "n/a", "test", BrokerType.WRITE, Collections.singleton(topicAssignment)));
+        brokers.add(new Broker("127.0.0." + (i + 1), (short) port, "n/a", "n/a", BrokerType.WRITE, Collections.singleton(topicAssignment)));
       }
       ResponsePacket
           resp =

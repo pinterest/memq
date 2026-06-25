@@ -419,32 +419,6 @@ public class TestWeightedEndpointSelection {
   }
 
   @Test
-  public void testRoutingBoostIsProportionalToSlotsEvicted() throws Exception {
-    // A multi-slot eviction must boost routing weight by +N (the slots moved),
-    // not a flat +1, so the target picks up routing share proportional to what
-    // was shed -- otherwise large evictions converge slowly. TTL is unchanged.
-    setWriteEndpoints(client, new ArrayList<>(endpoints));
-    client.getSlotsOwned().put("10.0.0.1", 11);
-    client.getSlotsOwned().put("10.0.0.2", 1);
-    client.getSlotsOwned().put("10.0.0.3", 1);
-
-    long before = System.currentTimeMillis();
-    InetSocketAddress sourceAddr = InetSocketAddress.createUnresolved("10.0.0.1", 9092);
-    // Evict 3 slots from 10.0.0.1 -> 10.0.0.2.
-    client.handleWriteResponse(new WriteResponsePacket("10.0.0.2", 3, 8), sourceAddr);
-
-    // slotsOwned merge: 1 + 3 = 4; boost adds +3 (proportional) -> 7.
-    assertEquals("target gets slotsOwned (4 after +3 merge) + 3 boost",
-        7, client.effectiveWeight("10.0.0.2", before + 1));
-
-    // A single-slot eviction elsewhere still nudges by exactly +1.
-    client.handleWriteResponse(new WriteResponsePacket("10.0.0.3", 1, 10),
-        InetSocketAddress.createUnresolved("10.0.0.1", 9092));
-    assertEquals("single-slot eviction still boosts by +1 (slotsOwned 2 + 1)",
-        3, client.effectiveWeight("10.0.0.3", before + 1));
-  }
-
-  @Test
   public void testRoutingBoostExpiresAfterTtl() throws Exception {
     // Re-create the client with a tiny TTL so the boost can expire in test time.
     Properties props = new Properties();

@@ -141,10 +141,7 @@ public class MemqProducer<K, V> implements Closeable {
     TopicMetadata topicMetadata = client.getTopicMetadata(topic);
     Set<Broker> brokers = topicMetadata.getWriteBrokers();
     logger.debug("Fetched topic metadata, now reconnecting to one of the serving brokers:" + brokers);
-    // Write path: AZ-local only, no cross-AZ fallback. If the topic has no
-    // in-AZ write broker yet (e.g. mid-deploy), keep the bootstrap AZ-local set
-    // and backlog rather than spilling writes cross-AZ.
-    client.resetWriteEndpoints(MemqCommonClient.generateEndpointsFromBrokers(brokers));
+    client.resetEndpoints(MemqCommonClient.generateEndpointsFromBrokers(brokers));
   }
 
   /**

@@ -111,26 +111,14 @@ public class MemqCommonClient implements Closeable {
   private final ConcurrentHashMap<String, Integer> slotsOwned = new ConcurrentHashMap<>();
   /**
    * Per-broker wall-clock millis until which {@link #rebuildWeightedMap}
-   * adds a post-eviction boost to the broker's routing weight. Armed when the
-   * broker is the target of an eviction directive; cleared when the broker
+   * adds {@code +1} to the broker's routing weight. Armed when the broker
+   * is the target of an eviction directive; cleared when the broker
    * becomes the source of one (it just gave a slot away -- don't keep
    * over-routing to it). Lazily evaluated against {@code System
    * .currentTimeMillis()} -- entries past their TTL behave like zero.
    * See {@link #CONFIG_POST_EVICTION_ROUTING_BOOST_MS}.
    */
   private final ConcurrentHashMap<String, Long> routingBoostUntilMs =
-      new ConcurrentHashMap<>();
-  /**
-   * Per-broker boost <i>magnitude</i> (in slots), paired with
-   * {@link #routingBoostUntilMs}. Set to the directive's {@code numSlotsToEvict}
-   * when the boost is armed so the routing-weight bump is proportional to the
-   * load actually moved -- a single-slot eviction nudges by {@code +1}, an
-   * N-slot eviction by {@code +N}. This matches the optimistic credit added to
-   * {@link #slotsOwned} so the target stays elevated even after the broker's
-   * stale {@code numSlotsOwned} overwrites that credit on its next non-eviction
-   * response. The TTL ({@link #postEvictionRoutingBoostMs}) is unchanged.
-   */
-  private final ConcurrentHashMap<String, Integer> routingBoostSlots =
       new ConcurrentHashMap<>();
   private long postEvictionRoutingBoostMs = DEFAULT_POST_EVICTION_ROUTING_BOOST_MS;
   // Sticky: flips to true the first time we observe a v4-only signal from any
@@ -188,47 +176,6 @@ public class MemqCommonClient implements Closeable {
 
   public void resetEndpoints(List<Endpoint> endpoints) throws Exception {
     this.localityEndpoints = Collections.unmodifiableList(getLocalityEndpoints(endpoints));
-    validateEndpoints();
-  }
-
-  /**
-   * Producer/write-path endpoint reset that refuses to route writes cross-AZ.
-   * <p>
-   * Unlike {@link #resetEndpoints(List)} (used for the bootstrap serverset and
-   * the cross-AZ-tolerant read path), this filters {@code writeEndpoints} to
-   * the AZ-local subset with <b>no</b> cross-AZ fallback. If the topic's write
-   * brokers currently contain no AZ-local broker -- which happens transiently
-   * during broker deploys or governor reassignments -- we keep the previously
-   * resolved AZ-local endpoint set instead of adopting cross-AZ brokers. Writes
-   * then continue to AZ-local brokers (and backlog/backpressure via the
-   * producer's inflight buffer) until an in-AZ write broker reappears on the
-   * next metadata refresh. This preserves the slot/eviction accounting, which
-   * assumes AZ-local routing.
-   */
-  public synchronized void resetWriteEndpoints(List<Endpoint> writeEndpoints) throws Exception {
-    applyWriteLocalityEndpoints(writeEndpoints);
-  }
-
-  /**
-   * Apply AZ-local write endpoints with keep-prior semantics. Must be called
-   * while holding this client's monitor (callers: {@link #resetWriteEndpoints}
-   * and {@link #reconnect}). See {@link #resetWriteEndpoints(List)}.
-   */
-  private void applyWriteLocalityEndpoints(List<Endpoint> writeEndpoints) throws Exception {
-    List<Endpoint> inAz = getLocalityEndpoints(writeEndpoints, false);
-    if (inAz.isEmpty()) {
-      List<Endpoint> prior = this.localityEndpoints;
-      if (prior != null && !prior.isEmpty()) {
-        logger.warn("No AZ-local write broker available for locality=" + locality
-            + "; keeping prior " + prior.size() + " AZ-local endpoint(s) and backlogging"
-            + " until an in-AZ write broker reappears (no cross-AZ fallback).");
-        return;
-      }
-      throw new Exception("No AZ-local endpoints available for locality=" + locality
-          + " and no prior AZ-local endpoint set to fall back on; refusing to route writes"
-          + " cross-AZ.");
-    }
-    this.localityEndpoints = Collections.unmodifiableList(inAz);
     validateEndpoints();
   }
 
@@ -422,18 +369,15 @@ public class MemqCommonClient implements Closeable {
 
     TopicMetadata md = getTopicMetadata(topic, connectTimeout);
     networkClient.reset();
-    Set<Broker> brokers = isConsumer ? md.getReadBrokers() : md.getWriteBrokers();
-    List<Endpoint> endpoints = brokers.stream().map(Endpoint::fromBroker)
-        .collect(Collectors.toList());
+    Set<Broker> brokers = null;
     if (isConsumer) {
-      // Read path: no slot/eviction accounting, so cross-AZ fallback is allowed.
-      localityEndpoints = Collections.unmodifiableList(getLocalityEndpoints(endpoints, true));
-      validateEndpoints();
+      brokers = md.getReadBrokers();
     } else {
-      // Write path: never adopt cross-AZ brokers; keep the prior AZ-local set
-      // and backlog until an in-AZ write broker reappears.
-      applyWriteLocalityEndpoints(endpoints);
+      brokers = md.getWriteBrokers();
     }
+    localityEndpoints = Collections.unmodifiableList(
+        getLocalityEndpoints(brokers.stream().map(Endpoint::fromBroker).collect(Collectors.toList())));
+    validateEndpoints();
   }
 
   /**
@@ -494,7 +438,6 @@ public class MemqCommonClient implements Closeable {
 
     slotsOwned.remove(ip);
     routingBoostUntilMs.remove(ip);
-    routingBoostSlots.remove(ip);
     failureCounts.keySet().removeIf(
         e -> e.getAddress().getHostString().equals(ip));
 
@@ -652,27 +595,22 @@ public class MemqCommonClient implements Closeable {
 
   /**
    * Per-broker routing weight: the broker's acknowledged slot count (with the
-   * legacy floor of 1), plus the post-eviction boost while the broker is an
-   * eviction target. The boost is proportional to the slots moved by the
-   * directive ({@code +numSlotsToEvict}), not a flat {@code +1}.
+   * legacy floor of 1), plus the {@code +1} post-eviction boost while the
+   * broker is an eviction target.
    * <p>
    * Visible for test.
    */
   int effectiveWeight(String ip, long now) {
     int base = Math.max(slotsOwned.getOrDefault(ip, 1), 1);
-    return base + routingBoost(ip, now);
+    if (isRoutingBoostActive(ip, now)) {
+      return base + 1;
+    }
+    return base;
   }
 
-  /**
-   * Active post-eviction boost magnitude (in slots) for {@code ip}, or 0 if no
-   * boost is armed or it has expired. See {@link #routingBoostSlots}.
-   */
-  private int routingBoost(String ip, long now) {
+  private boolean isRoutingBoostActive(String ip, long now) {
     Long until = routingBoostUntilMs.get(ip);
-    if (until == null || until <= now) {
-      return 0;
-    }
-    return Math.max(0, routingBoostSlots.getOrDefault(ip, 1));
+    return until != null && until > now;
   }
 
   /**
@@ -686,13 +624,13 @@ public class MemqCommonClient implements Closeable {
     for (Endpoint ep : writes) {
       String ip = ep.getAddress().getHostString();
       int slots = Math.max(slotsOwned.getOrDefault(ip, 1), 1);
-      int boost = routingBoost(ip, now);
+      boolean boosted = isRoutingBoostActive(ip, now);
       int weight = effectiveWeight(ip, now);
       int pct = (int) Math.round(100.0 * weight / totalSlots);
       sig.append(ip).append('=').append(weight).append(',');
       if (pretty.length() > 0) pretty.append(", ");
       pretty.append(ip).append('(').append(slots).append(" slots");
-      if (boost > 0) pretty.append("+").append(boost).append(" boost");
+      if (boosted) pretty.append("+boost");
       pretty.append(", ").append(pct).append("%)");
     }
     String signature = sig.toString();
@@ -785,7 +723,6 @@ public class MemqCommonClient implements Closeable {
         synchronized (this) {
           slotsOwned.remove(ip);
           routingBoostUntilMs.remove(ip);
-          routingBoostSlots.remove(ip);
           reconcileWriteEndpoints();
         }
       } else {
@@ -798,38 +735,10 @@ public class MemqCommonClient implements Closeable {
   }
 
   protected List<Endpoint> getLocalityEndpoints(List<Endpoint> servers) {
-    return getLocalityEndpoints(servers, true);
-  }
-
-  /**
-   * Resolve the AZ-local subset of {@code servers}.
-   * <p>
-   * When no server matches this client's {@link #locality} the behaviour
-   * depends on {@code allowCrossAzFallback}:
-   * <ul>
-   *   <li>{@code true} (read / metadata-discovery path): fall back to the full
-   *       {@code servers} list so the client can still function cross-AZ.</li>
-   *   <li>{@code false} (producer write path): return an empty list. Spilling
-   *       writes cross-AZ silently breaks the slot/eviction accounting, which
-   *       assumes AZ-local routing -- so callers must instead treat an empty
-   *       result as a transient condition (keep the prior AZ-local set and let
-   *       requests backlog until in-AZ write brokers reappear). See
-   *       {@link #applyWriteLocalityEndpoints(List)}.</li>
-   * </ul>
-   */
-  protected List<Endpoint> getLocalityEndpoints(List<Endpoint> servers, boolean allowCrossAzFallback) {
     List<Endpoint> collect = servers.stream().filter(b -> locality.equals(b.getLocality()))
         .collect(Collectors.toList());
     if (collect.isEmpty()) {
-      if (!allowCrossAzFallback) {
-        logger.warn("No AZ-local endpoints available for locality=" + locality + " among "
-            + servers.size() + " broker(s); treating as transient (will retry) and NOT"
-            + " falling back to cross-AZ.");
-        return Collections.emptyList();
-      }
-      logger.warn("No AZ-local endpoints for locality=" + locality + " among " + servers.size()
-          + " broker(s); falling back to cross-AZ.");
-      collect = new ArrayList<>(servers);
+      collect = servers;
     }
     Collections.shuffle(collect);
     logger.info("Locality endpoints: " + collect);
@@ -982,17 +891,12 @@ public class MemqCommonClient implements Closeable {
       // Symmetric with the broker-side post-eviction acquisition cooldown.
       // Clear any boost on the source -- it just gave a slot away, so we
       // must not keep over-routing to it.
-      if (postEvictionRoutingBoostMs > 0 && targetIp != null && slotsToEvict > 0) {
+      if (postEvictionRoutingBoostMs > 0 && targetIp != null) {
         routingBoostUntilMs.put(targetIp,
             System.currentTimeMillis() + postEvictionRoutingBoostMs);
-        // Boost magnitude is proportional to the slots moved so an N-slot
-        // eviction nudges routing by +N (matching the optimistic slotsOwned
-        // credit), not a flat +1. The TTL is unchanged.
-        routingBoostSlots.put(targetIp, slotsToEvict);
       }
       if (sourceIp != null) {
         routingBoostUntilMs.remove(sourceIp);
-        routingBoostSlots.remove(sourceIp);
       }
 
       // Single reconciliation: derive writeEndpoints from slotsOwned (the source
