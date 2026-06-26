@@ -67,13 +67,13 @@ public class TestSlotManagerEviction {
     sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
     assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
-    int initialOccupied = sm.getOccupiedSlots();
+    int initialOccupied = sm.getTotalSlotOwnershipAcrossProducers();
 
     int released = sm.releaseProducerSlots("producer-1", TOPIC, 1);
 
     assertEquals(1, released);
     assertEquals(1, sm.getProducerSlots("producer-1", TOPIC));
-    assertEquals(initialOccupied - 1, sm.getOccupiedSlots());
+    assertEquals(initialOccupied - 1, sm.getTotalSlotOwnershipAcrossProducers());
   }
 
   @Test

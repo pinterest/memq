@@ -221,7 +221,7 @@ public class TestCurrConnectionsEvictionStrategy {
     acquireSlots(sm, "v3-producer", TOPIC, 150);
     int v3Slots = sm.getTotalProducerSlots("v3-producer");
     assertTrue(v3Slots > 0);
-    int occupiedBefore = sm.getOccupiedSlots();
+    int occupiedBefore = sm.getTotalSlotOwnershipAcrossProducers();
 
     CurrConnectionsEvictionStrategy strategy =
         new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
@@ -231,7 +231,7 @@ public class TestCurrConnectionsEvictionStrategy {
 
     assertNull("no eviction for v3-only cluster", result);
     assertEquals("v3 slots unchanged", v3Slots, sm.getTotalProducerSlots("v3-producer"));
-    assertEquals("occupied slots unchanged", occupiedBefore, sm.getOccupiedSlots());
+    assertEquals("occupied slots unchanged", occupiedBefore, sm.getTotalSlotOwnershipAcrossProducers());
   }
 
   @Test

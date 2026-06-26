@@ -276,8 +276,13 @@ public class MemqMain extends Application<MemqConfig> {
     slotManager.start();
     metricsRegistryMap.put("slot", slotRegistry);
     slotRegistry.gauge("total", () -> (Gauge<Integer>) slotManager::getTotalSlots);
-    slotRegistry.gauge("occupied", () -> (Gauge<Integer>) slotManager::getOccupiedSlots);
+    slotRegistry.gauge("occupied", () -> (Gauge<Integer>) slotManager::getSlotOccupancy);
     slotRegistry.gauge("free", () -> (Gauge<Integer>) slotManager::getFreeSlots);
+    // Routing-slot ownership summed across producers. Distinct from "occupied"
+    // (true capacity): "owned" - "occupied" is the sub-slot fragmentation from
+    // many small producers each rounding up to a full routing slot.
+    slotRegistry.gauge("owned",
+        () -> (Gauge<Integer>) slotManager::getTotalSlotOwnershipAcrossProducers);
     slotRegistry.gauge("frozen",
         () -> (Gauge<Integer>) () -> slotManager.isFrozen() ? 1 : 0);
     slotRegistry.gauge("drainLatched",

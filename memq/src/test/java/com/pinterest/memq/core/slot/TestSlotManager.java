@@ -61,7 +61,7 @@ public class TestSlotManager {
     SlotManager sm = new SlotManager(config, 32);
 
     assertEquals(32, sm.getTotalSlots());
-    assertEquals(0, sm.getOccupiedSlots());
+    assertEquals(0, sm.getTotalSlotOwnershipAcrossProducers());
     assertEquals(32, sm.getFreeSlots());
     assertFalse(sm.isFrozen());
     assertEquals(0, sm.getProducerCount());
@@ -91,7 +91,7 @@ public class TestSlotManager {
     sm.tick();
 
     assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
-    assertEquals(2, sm.getOccupiedSlots());
+    assertEquals(2, sm.getTotalSlotOwnershipAcrossProducers());
     assertEquals(30, sm.getFreeSlots());
   }
 
@@ -111,7 +111,7 @@ public class TestSlotManager {
     sm.tick();
 
     assertEquals(1, sm.getProducerSlots("producer-1", TOPIC));
-    assertEquals(1, sm.getOccupiedSlots());
+    assertEquals(1, sm.getTotalSlotOwnershipAcrossProducers());
   }
 
   @Test
@@ -204,7 +204,7 @@ public class TestSlotManager {
     sm.tick();
 
     assertTrue(sm.getProducerSlots("producer-1", TOPIC) <= 3);
-    assertTrue(sm.getOccupiedSlots() <= 3);
+    assertTrue(sm.getTotalSlotOwnershipAcrossProducers() <= 3);
     assertTrue(sm.getFreeSlots() >= 0);
   }
 
@@ -220,7 +220,7 @@ public class TestSlotManager {
 
     assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
     assertEquals(3, sm.getProducerSlots("producer-2", TOPIC));
-    assertEquals(5, sm.getOccupiedSlots());
+    assertEquals(5, sm.getTotalSlotOwnershipAcrossProducers());
     // getFreeSlots() is the aggregate EMA view: ceil((15+25)/10) = 4 occupied,
     // not the routing-slot sum of 5 (per-producer ceil inflation removed).
     assertEquals(28, sm.getFreeSlots());
@@ -254,7 +254,7 @@ public class TestSlotManager {
     sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
     assertEquals(2, sm.getProducerSlots("producer-1", TOPIC));
-    assertEquals(2, sm.getOccupiedSlots());
+    assertEquals(2, sm.getTotalSlotOwnershipAcrossProducers());
 
     // Wait for idle timeout
     Thread.sleep(300);
@@ -262,7 +262,7 @@ public class TestSlotManager {
 
     // Idle producer should be cleaned up and its slots released
     assertEquals(0, sm.getProducerCount());
-    assertEquals(0, sm.getOccupiedSlots());
+    assertEquals(0, sm.getTotalSlotOwnershipAcrossProducers());
     assertEquals(32, sm.getFreeSlots());
   }
 
@@ -368,7 +368,7 @@ public class TestSlotManager {
     sm.tick();
 
     assertEquals(0, sm.getProducerSlots("producer-1", TOPIC));
-    assertEquals(0, sm.getOccupiedSlots());
+    assertEquals(0, sm.getTotalSlotOwnershipAcrossProducers());
   }
 
   @Test
@@ -510,7 +510,7 @@ public class TestSlotManager {
 
     assertEquals(2, sm.getProducerSlots("10.0.0.1", "topicA"));
     assertEquals(3, sm.getProducerSlots("10.0.0.1", "topicB"));
-    assertEquals(5, sm.getOccupiedSlots());
+    assertEquals(5, sm.getTotalSlotOwnershipAcrossProducers());
     assertEquals(2, sm.getProducerCount());
   }
 
@@ -528,7 +528,7 @@ public class TestSlotManager {
     sm.recordWrite("producer-2", "topicA", 35 * MB);
     sm.tick();
 
-    int beforeOccupied = sm.getOccupiedSlots();
+    int beforeOccupied = sm.getTotalSlotOwnershipAcrossProducers();
     int producer1ASlots = sm.getProducerSlots("producer-1", "topicA");
     int producer2ASlots = sm.getProducerSlots("producer-2", "topicA");
     assertTrue("expected non-zero slots for producer-1/topicA", producer1ASlots > 0);
@@ -544,10 +544,13 @@ public class TestSlotManager {
         0, sm.getProducerSlots("producer-2", "topicA"));
     assertEquals("topicB on producer-1 must be untouched",
         producer1BSlots, sm.getProducerSlots("producer-1", "topicB"));
-    assertEquals("totalOccupiedSlots must reflect topicA release",
-        beforeOccupied - producer1ASlots - producer2ASlots, sm.getOccupiedSlots());
-    assertEquals("freeSlots must reflect topicA release",
-        32 - sm.getOccupiedSlots(), sm.getFreeSlots());
+    assertEquals("routing-slot ownership must reflect topicA release",
+        beforeOccupied - producer1ASlots - producer2ASlots, sm.getTotalSlotOwnershipAcrossProducers());
+    // Only producer-1/topicB (25 Mbps) survives the drop, so true capacity
+    // occupancy is ceil(25 / 10) = 3 and free capacity rises accordingly.
+    assertEquals("capacity occupancy reflects only the surviving topic",
+        3, sm.getSlotOccupancy());
+    assertEquals("free capacity reflects topicA release", 29, sm.getFreeSlots());
   }
 
   @Test
@@ -592,12 +595,12 @@ public class TestSlotManager {
     sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
 
-    int occupiedBefore = sm.getOccupiedSlots();
+    int occupiedBefore = sm.getTotalSlotOwnershipAcrossProducers();
     int producerSlotsBefore = sm.getProducerSlots("producer-1", TOPIC);
 
     sm.dropTopic("never-existed");
 
-    assertEquals(occupiedBefore, sm.getOccupiedSlots());
+    assertEquals(occupiedBefore, sm.getTotalSlotOwnershipAcrossProducers());
     assertEquals(producerSlotsBefore, sm.getProducerSlots("producer-1", TOPIC));
   }
 
@@ -639,7 +642,7 @@ public class TestSlotManager {
     sm.recordProducerConnections("uuid-A", Collections.singleton("10.0.0.7"));
     sm.tick();
 
-    int occupiedBefore = sm.getOccupiedSlots();
+    int occupiedBefore = sm.getTotalSlotOwnershipAcrossProducers();
     assertTrue("uuid-A should hold slots after acquisition",
         sm.getTotalProducerSlots("uuid-A") > 0);
     int uuidASlots = sm.getTotalProducerSlots("uuid-A");
@@ -647,7 +650,7 @@ public class TestSlotManager {
     sm.removeProducer("uuid-A");
 
     assertEquals("all of uuid-A's slots must return to the free pool",
-        occupiedBefore - uuidASlots, sm.getOccupiedSlots());
+        occupiedBefore - uuidASlots, sm.getTotalSlotOwnershipAcrossProducers());
     assertEquals(0, sm.getTotalProducerSlots("uuid-A"));
     assertFalse("uuid-A must be dropped from the producer map",
         sm.producerHasSlots("uuid-A"));
@@ -666,11 +669,11 @@ public class TestSlotManager {
 
     sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
-    int occupiedBefore = sm.getOccupiedSlots();
+    int occupiedBefore = sm.getTotalSlotOwnershipAcrossProducers();
 
     sm.removeProducer("never-connected");
 
-    assertEquals(occupiedBefore, sm.getOccupiedSlots());
+    assertEquals(occupiedBefore, sm.getTotalSlotOwnershipAcrossProducers());
     assertTrue(sm.producerHasSlots("producer-1"));
   }
 

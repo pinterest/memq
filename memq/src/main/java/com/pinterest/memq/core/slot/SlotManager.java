@@ -71,7 +71,16 @@ public class SlotManager {
 
   private final ConcurrentHashMap<String, ConcurrentHashMap<String, ProducerSlotState>> producers =
       new ConcurrentHashMap<>();
-  private final AtomicInteger totalOccupiedSlots = new AtomicInteger(0);
+  /**
+   * Running sum of per-producer routing slots ({@code sum of currentSlots})
+   * owned across all producers, maintained incrementally on every acquire and
+   * decrement. This is the routing-weight total exposed by
+   * {@link #getTotalSlotOwnershipAcrossProducers()} and used for the
+   * acquisition room check and the drain-latch flap guard. It is distinct from
+   * the broker's true capacity occupancy ({@link #getSlotOccupancy()}); the
+   * gap between them is sub-slot fragmentation.
+   */
+  private final AtomicInteger totalSlotOwnership = new AtomicInteger(0);
   private volatile long lastSlotChangeTimeMs = 0;
 
   /**
@@ -331,30 +340,33 @@ public class SlotManager {
   }
 
   /**
-   * Recompute the smoothed free-slot count and the latched drain state from
-   * end-of-tick occupancy. Running this once per tick (after all slot
-   * adjustments) means {@link #tryAcquireSlots} consumes the value computed
-   * from the previous tick, so the decision is stable within a tick.
+   * Recompute the smoothed free-capacity count and the latched drain state from
+   * end-of-tick {@link #getSlotOccupancy() capacity}. Running this once per tick
+   * (after all slot adjustments) means {@link #tryAcquireSlots} consumes the
+   * value computed from the previous tick, so the decision is stable within a
+   * tick.
    * <p>
-   * The smoothing window (see {@code drainLatchEmaWindowSeconds}) is longer
-   * than the eviction "flap" period, so the brief {@code free=1} spike that a
-   * single eviction manufactures cannot by itself disengage the latch. The
-   * latch engages once free slots have been near zero and disengages only
-   * after the broker has genuinely drained by {@code drainLatchDisengageFreeSlots}.
+   * The latch engages once free capacity has been near zero (genuine
+   * saturation) and disengages only after the broker has genuinely drained by
+   * {@code drainLatchDisengageFreeSlots} -- i.e. after producer EMA has fallen
+   * because the client shifted traffic away. The smoothing window (see
+   * {@code drainLatchEmaWindowSeconds}) keeps a brief one-tick dip in load from
+   * disengaging the latch prematurely.
    */
   private void updateDrainLatch() {
     if (!drainLatchEnabled) {
       return;
     }
-    // The drain latch guards against re-acquisition flap of *routing* slots
-    // under saturation, so it tracks the routing-slot free count
-    // (totalSlots - sum of per-producer slots) rather than the aggregate
-    // EMA-based getFreeSlots(): an eviction reduces routing slots immediately
-    // but does not lower the producer's EMA, so aggregate free would not move
-    // and the latch could never observe the saturation it exists to manage.
-    int routingFreeSlots = totalSlots - totalOccupiedSlots.get();
+    // The latch tracks true capacity (getFreeSlots(), the aggregate EMA view),
+    // not routing-slot ownership. It engages on genuine saturation and holds
+    // through an eviction -- an eviction frees a routing slot but does not lower
+    // the producer's EMA, so capacity does not move and the latch keeps
+    // acquisition frozen until load *actually* drains away (EMA falls as the
+    // client shifts traffic). That hold is precisely what prevents the
+    // backpressure re-acquisition flap, without disengaging on the bookkeeping
+    // free-up that an eviction manufactures.
     freeSlotsEma = drainLatchEmaDecay * freeSlotsEma
-        + (1 - drainLatchEmaDecay) * routingFreeSlots;
+        + (1 - drainLatchEmaDecay) * getFreeSlots();
     if (drainLatched) {
       if (freeSlotsEma >= drainLatchDisengageFreeSlots) {
         drainLatched = false;
@@ -404,23 +416,23 @@ public class SlotManager {
       // acquisition until the broker has genuinely drained (see updateDrainLatch).
       return false;
     }
-    int available = totalSlots - totalOccupiedSlots.get();
+    int available = totalSlots - totalSlotOwnership.get();
     int actual = Math.min(count, available);
     if (actual <= 0) {
       return false;
     }
     state.currentSlots += actual;
-    totalOccupiedSlots.addAndGet(actual);
+    totalSlotOwnership.addAndGet(actual);
     lastSlotChangeTimeMs = now;
     logger.info("+" + actual + " slot(s) for pid=" + pid + "/" + topic
         + " | total=" + state.currentSlots
-        + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots
+        + " | owned=" + totalSlotOwnership.get() + "/" + totalSlots
         + ipLogSuffix(pid));
     return true;
   }
 
   /**
-   * Single point for all slot decrements. Adjusts totalOccupiedSlots, sets
+   * Single point for all slot decrements. Adjusts totalSlotOwnership, sets
    * lastSlotChangeTimeMs, and removes the topic/producer entry when the
    * producer's slot count for that topic reaches 0.
    *
@@ -437,7 +449,7 @@ public class SlotManager {
       return 0;
     }
     state.currentSlots -= actual;
-    totalOccupiedSlots.addAndGet(-actual);
+    totalSlotOwnership.addAndGet(-actual);
     lastSlotChangeTimeMs = System.currentTimeMillis();
     if (state.currentSlots == 0) {
       removeProducerTopic(pid, topic, topicMap);
@@ -466,16 +478,24 @@ public class SlotManager {
     if (actual > 0) {
       logger.info("-" + actual + " slot(s) for pid=" + pid + "/" + topic
           + " | total=" + state.currentSlots
-          + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots
+          + " | owned=" + totalSlotOwnership.get() + "/" + totalSlots
           + ipLogSuffix(pid));
     }
   }
 
   /**
-   * Free capacity in slots, derived from the broker's <i>aggregate</i> EMA
-   * rate ({@code ceil(sum of producer EMAs / slotSizeMbps)}) rather than the
-   * sum of per-producer routing slots. This is the figure gossiped to peers
-   * and used by the eviction load comparison and drain latch.
+   * Free capacity in slots: {@code totalSlots - getSlotOccupancy()}. This is
+   * the figure gossiped to peers and used by the eviction load comparison and
+   * the drain latch. Defined purely in terms of {@link #getSlotOccupancy()} so
+   * the two can never disagree.
+   */
+  public int getFreeSlots() {
+    return totalSlots - getSlotOccupancy();
+  }
+
+  /**
+   * The broker's true capacity occupancy in slots: {@code ceil(sum of all
+   * producer EMA rates / slotSizeMbps)}, clamped to {@code [0, totalSlots]}.
    * <p>
    * Using {@code ceil(sum)} instead of {@code sum(ceil)} removes the
    * per-producer rounding inflation: a broker hosting many small "mice"
@@ -486,19 +506,12 @@ public class SlotManager {
    * (eviction-to-zero, idle reclaim, {@link #dropTopic}) are reflected
    * immediately, without waiting for the next {@link #tick()}.
    * <p>
-   * Distinct from {@link #getOccupiedSlots()}, which still reports the
-   * per-producer routing-slot sum (used only for the acquisition room check
-   * and as a metric); the two are no longer strictly complementary.
+   * This is the capacity view. It is deliberately distinct from
+   * {@link #getTotalSlotOwnershipAcrossProducers()}, which sums per-producer
+   * <i>routing</i> slots; the gap between the two is the fragmentation induced
+   * by sub-slot producers.
    */
-  public int getFreeSlots() {
-    return totalSlots - aggregateOccupiedSlots();
-  }
-
-  /**
-   * Aggregate capacity occupancy in slots: {@code ceil(sum of all producer
-   * EMA rates / slotSizeMbps)}, clamped to {@code [0, totalSlots]}.
-   */
-  private int aggregateOccupiedSlots() {
+  public int getSlotOccupancy() {
     double totalEmaMbps = 0.0;
     for (ConcurrentHashMap<String, ProducerSlotState> topicMap : producers.values()) {
       for (ProducerSlotState state : topicMap.values()) {
@@ -539,8 +552,16 @@ public class SlotManager {
     return totalSlots;
   }
 
-  public int getOccupiedSlots() {
-    return totalOccupiedSlots.get();
+  /**
+   * Sum of per-producer <i>routing</i> slots ({@code sum of ceil(EMA_i /
+   * slotSizeMbps)}) currently owned across all producers. This is the
+   * routing-weight view used for the acquisition room check, the drain-latch
+   * flap guard, and the {@code slot.owned} metric. Distinct from
+   * {@link #getSlotOccupancy()} (true capacity); the difference is sub-slot
+   * fragmentation.
+   */
+  public int getTotalSlotOwnershipAcrossProducers() {
+    return totalSlotOwnership.get();
   }
 
   public int getProducerCount() {
@@ -717,7 +738,7 @@ public class SlotManager {
    * Concurrency follows the same contract as
    * {@link #releaseProducerSlots(String, String, int)}: callable from any
    * thread, uses the existing {@link #decrementSlots} for atomic
-   * {@code totalOccupiedSlots} and {@code lastSlotChangeTimeMs} updates.
+   * {@code totalSlotOwnership} and {@code lastSlotChangeTimeMs} updates.
    *
    * @param topic the topic whose per-producer slot state and capacity should
    *        be released. No-op if no producer holds state for the topic.
@@ -782,7 +803,7 @@ public class SlotManager {
     if (actual > 0) {
       logger.info("Eviction: -" + actual + " slot(s) for pid=" + pid + "/" + topic
           + " | remaining=" + state.currentSlots
-          + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots
+          + " | owned=" + totalSlotOwnership.get() + "/" + totalSlots
           + " | cooldownUntilMs=" + cooldownUntil
           + ipLogSuffix(pid));
     }
@@ -806,7 +827,7 @@ public class SlotManager {
    * Concurrency mirrors {@link #releaseProducerSlots(String, String, int)} and
    * {@link #dropTopic(String)}: callable from any thread (here, a Netty event
    * loop), reusing {@link #decrementSlots} for the atomic
-   * {@code totalOccupiedSlots} update. A {@link #recordWrite} that races in
+   * {@code totalSlotOwnership} update. A {@link #recordWrite} that races in
    * after this returns simply recreates a fresh zero-slot, zero-EMA entry that
    * occupies no capacity and is reclaimed by the next idle pass -- the same
    * benign re-create {@link #dropTopic} tolerates.
@@ -842,7 +863,7 @@ public class SlotManager {
     if (slotsReleased > 0) {
       logger.info("Removed producer on disconnect: pid=" + pid
           + " slotsReleased=" + slotsReleased
-          + " | occupied=" + totalOccupiedSlots.get() + "/" + totalSlots);
+          + " | owned=" + totalSlotOwnership.get() + "/" + totalSlots);
     }
   }
 

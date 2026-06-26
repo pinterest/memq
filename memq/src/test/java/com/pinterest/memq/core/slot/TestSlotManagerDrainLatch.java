@@ -65,17 +65,21 @@ public class TestSlotManagerDrainLatch {
     return new SlotManager(config, totalSlots);
   }
 
-  /** Two producers x 2 slots each fills a 4-slot broker. */
+  /**
+   * Two producers at 20 Mbps each = 40 Mbps, saturating a 4-slot/40-Mbps
+   * broker's true capacity (getFreeSlots() == 0). Each also owns 2 routing
+   * slots.
+   */
   private void fillAllSlots(SlotManager sm) {
-    sm.recordWrite("p1", TOPIC, 15 * MB);
-    sm.recordWrite("p2", TOPIC, 15 * MB);
+    sm.recordWrite("p1", TOPIC, 20 * MB);
+    sm.recordWrite("p2", TOPIC, 20 * MB);
     sm.tick();
   }
 
   private void tickAtFullOccupancy(SlotManager sm, int times) {
     for (int i = 0; i < times; i++) {
-      sm.recordWrite("p1", TOPIC, 15 * MB);
-      sm.recordWrite("p2", TOPIC, 15 * MB);
+      sm.recordWrite("p1", TOPIC, 20 * MB);
+      sm.recordWrite("p2", TOPIC, 20 * MB);
       sm.tick();
     }
   }
@@ -84,13 +88,12 @@ public class TestSlotManagerDrainLatch {
   public void testLatchEngagesAfterSustainedFullOccupancy() {
     SlotManager sm = create(4);
     fillAllSlots(sm);
-    // The drain latch tracks routing-slot occupancy; two 2-slot producers
-    // fill all 4 routing slots (getFreeSlots() is now the aggregate EMA view).
-    assertEquals(4, sm.getOccupiedSlots());
+    // The latch tracks true capacity: 40 Mbps fills the 40-Mbps broker.
+    assertEquals(0, sm.getFreeSlots());
 
     tickAtFullOccupancy(sm, 4);
 
-    assertTrue("latch should engage after sustained full occupancy",
+    assertTrue("latch should engage after sustained full capacity",
         sm.isDrainLatched());
     assertTrue("isFrozen reflects the latch", sm.isFrozen());
   }
@@ -102,21 +105,23 @@ public class TestSlotManagerDrainLatch {
     tickAtFullOccupancy(sm, 4);
     assertTrue(sm.isDrainLatched());
 
-    // Free one slot. Cooldown is disabled, so only the latch can block the
-    // reacquire. Occupancy drops to 3 of 4 (so isFrozen is driven purely by
-    // the latch, not by full occupancy or the global cooldown).
+    // An eviction frees a routing slot (ownership 4 -> 3) but does not lower
+    // the producer's EMA, so the broker is still at full capacity. Routing room
+    // is now available, so only the latch -- not the room check or cooldown --
+    // can block a reacquire.
     sm.releaseProducerSlots("p1", TOPIC, 1);
-    assertEquals(3, sm.getOccupiedSlots());
+    assertEquals(3, sm.getTotalSlotOwnershipAcrossProducers());
 
-    // Both producers want more; the latch must keep the freed slot free.
+    // p1 wants the slot back; the latch must block the reacquire despite the
+    // open routing room.
     sm.recordWrite("p1", TOPIC, 25 * MB);
-    sm.recordWrite("p2", TOPIC, 25 * MB);
+    sm.recordWrite("p2", TOPIC, 20 * MB);
     sm.tick();
 
     assertTrue(sm.isDrainLatched());
-    assertTrue("isFrozen is driven by the latch even below full occupancy",
-        sm.isFrozen());
-    assertEquals("latch blocks reacquire of the freed slot", 3, sm.getOccupiedSlots());
+    assertTrue("isFrozen is driven by the latch", sm.isFrozen());
+    assertEquals("latch blocks reacquire of the freed routing slot",
+        1, sm.getProducerSlots("p1", TOPIC));
   }
 
   @Test
@@ -126,14 +131,14 @@ public class TestSlotManagerDrainLatch {
     tickAtFullOccupancy(sm, 4);
     assertTrue(sm.isDrainLatched());
 
-    // A single eviction creates free=1 for one tick. The smoothed free-slots
-    // EMA stays below the disengage threshold (2), so the latch holds.
-    sm.releaseProducerSlots("p1", TOPIC, 1);
-    sm.recordWrite("p1", TOPIC, 25 * MB);
-    sm.recordWrite("p2", TOPIC, 25 * MB);
+    // One tick of reduced load briefly frees capacity (free jumps to 2), but
+    // the smoothed free-slots EMA stays below the disengage threshold (2), so
+    // the latch holds.
+    sm.recordWrite("p1", TOPIC, 10 * MB);
+    sm.recordWrite("p2", TOPIC, 10 * MB);
     sm.tick();
 
-    assertTrue("a transient free=1 spike must not disengage the latch",
+    assertTrue("a transient one-tick capacity spike must not disengage the latch",
         sm.isDrainLatched());
   }
 
@@ -144,16 +149,14 @@ public class TestSlotManagerDrainLatch {
     tickAtFullOccupancy(sm, 4);
     assertTrue(sm.isDrainLatched());
 
-    // Drain the broker well above the disengage target and stop writing so
-    // nothing reacquires; the free-slots EMA climbs past the threshold.
-    sm.releaseProducerSlots("p1", TOPIC, 2);
-    sm.releaseProducerSlots("p2", TOPIC, 2);
-    assertEquals(0, sm.getOccupiedSlots());
-
+    // Load genuinely drains away: the producers go quiet, their EMA decays
+    // toward zero, capacity frees up and the free-slots EMA climbs past the
+    // disengage threshold.
     for (int i = 0; i < 5; i++) {
       sm.tick();
     }
-    assertFalse("latch should disengage once drained above the target",
+    assertEquals(4, sm.getFreeSlots());
+    assertFalse("latch should disengage once load has genuinely drained",
         sm.isDrainLatched());
   }
 
@@ -166,14 +169,14 @@ public class TestSlotManagerDrainLatch {
 
     assertFalse("latch must never engage when disabled", sm.isDrainLatched());
 
-    // Without the latch (and cooldown disabled), a freed slot is reacquired
-    // immediately.
+    // Without the latch (and cooldown disabled), a freed routing slot is
+    // reacquired immediately.
     sm.releaseProducerSlots("p1", TOPIC, 1);
-    assertEquals(1, sm.getFreeSlots());
+    assertEquals(3, sm.getTotalSlotOwnershipAcrossProducers());
     sm.recordWrite("p1", TOPIC, 25 * MB);
-    sm.recordWrite("p2", TOPIC, 25 * MB);
+    sm.recordWrite("p2", TOPIC, 20 * MB);
     sm.tick();
-    assertEquals("without the latch the freed slot is reacquired",
-        0, sm.getFreeSlots());
+    assertEquals("without the latch the freed routing slot is reacquired",
+        4, sm.getTotalSlotOwnershipAcrossProducers());
   }
 }
