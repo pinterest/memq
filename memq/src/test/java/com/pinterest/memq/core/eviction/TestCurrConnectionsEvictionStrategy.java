@@ -262,30 +262,30 @@ public class TestCurrConnectionsEvictionStrategy {
   }
 
   @Test
-  public void testSkipsZeroSlotProducerAndEvictsRealHolder() throws Exception {
-    // Regression: producerHasSlots() is containsKey(), and recordWrite()
-    // re-creates a zero-slot ProducerSlotState on every write. A producer that
-    // was evicted to 0 but keeps writing under backpressure therefore still
-    // looks like an eviction candidate. If it is also the one connected to the
-    // target (the preferred pick), eviction burns the tick on a no-op release
-    // that frees nothing, while the producer actually holding the slots is
-    // never evicted -- so localFreeSlots stays pinned at 0.
+  public void testSkipsIdleProducerAndEvictsRealLoadHolder() throws Exception {
+    // Eligibility is by load (EMA), not routing-slot ownership or map presence.
+    // recordWrite() re-creates a ProducerSlotState on every write, so a never-
+    // ticked producer still satisfies producerHasSlots() (containsKey) while
+    // carrying no measured load. Selecting it would burn the tick on a no-op
+    // move that sheds nothing. Only the producer actually driving traffic
+    // (EMA > 0) should be evicted.
     SlotManager sm = createSlotManager(20);
 
-    // Real holder: acquires slots, but is NOT connected to the target broker
-    // (so it can only be chosen via the fallback path).
+    // Real load holder: writes and ticks, so it has measured EMA. NOT connected
+    // to the target broker (so it can only be chosen via the fallback path).
     acquireSlots(sm, "holder", TOPIC, 150);
-    assertTrue("holder should own slots", sm.getTotalProducerSlots("holder") > 0);
+    assertTrue("holder should carry load", sm.getTotalProducerEmaRate("holder") > 0);
     sm.recordProducerConnections("holder",
         new HashSet<>(Collections.singletonList("broker-3")));
 
-    // Slotless producer: has a (re-created) state entry but zero slots, and IS
-    // connected to the target -- i.e. the producer that the old "prefer
-    // connected" logic would wrongly select.
-    sm.recordWrite("slotless", TOPIC, 15 * MB); // no tick -> never acquires
-    assertTrue("slotless has a state entry", sm.producerHasSlots("slotless"));
-    assertEquals("slotless holds no slots", 0, sm.getTotalProducerSlots("slotless"));
-    sm.recordProducerConnections("slotless",
+    // Idle producer: has a (re-created) state entry but was never ticked, so its
+    // EMA is zero. It IS connected to the target -- i.e. the producer the old
+    // "prefer connected" logic would wrongly select.
+    sm.recordWrite("idle", TOPIC, 15 * MB); // no tick -> EMA stays 0
+    assertTrue("idle has a state entry", sm.producerHasSlots("idle"));
+    assertEquals("idle carries no measured load", 0.0,
+        sm.getTotalProducerEmaRate("idle"), 0.0);
+    sm.recordProducerConnections("idle",
         new HashSet<>(Collections.singletonList("broker-2")));
 
     CurrConnectionsEvictionStrategy strategy =
@@ -298,12 +298,51 @@ public class TestCurrConnectionsEvictionStrategy {
       EvictionResult result = strategy.evaluate(sm, peers,
           sm.getProducerConnections(), allPeersServeTopic(peers));
       if (result != null) {
-        assertEquals("must never evict the zero-slot producer",
+        assertEquals("must never evict the idle (zero-EMA) producer",
             "holder", result.getPid());
         evictedHolder = true;
       }
     }
-    assertTrue("eviction should target the real slot holder", evictedHolder);
+    assertTrue("eviction should target the real load holder", evictedHolder);
+  }
+
+  @Test
+  public void testEvictsHighEmaProducerWithZeroOwnedSlots() throws Exception {
+    // Core of the EMA-aware selector: a producer can saturate this broker (high
+    // EMA) yet own zero routing slots -- the drain latch freezes acquisition
+    // while eviction releases ownership, but the producer keeps writing under
+    // backpressure so its EMA stays high. The selector must still evict it,
+    // because moving its traffic is what actually sheds the broker's load; the
+    // broker-side slot release is a no-op but the client reweight is not.
+    SlotManager sm = createSlotManager(20);
+
+    // Engage the latch first, then write+tick: acquisition is frozen so the
+    // producer's owned slots stay at 0 while its EMA builds from the writes --
+    // exactly the drain-latched state the selector must handle.
+    setDrainLatched(sm, true);
+    sm.recordWrite("hot", TOPIC, 120 * MB);
+    tickOnce(sm);
+    assertEquals("hot owns no routing slots (acquisition frozen by latch)",
+        0, sm.getTotalProducerSlots("hot"));
+    assertTrue("hot still carries measured load", sm.getTotalProducerEmaRate("hot") > 0);
+    sm.recordProducerConnections("hot",
+        new HashSet<>(Collections.singletonList("broker-3")));
+
+    // tickOnce ran updateDrainLatch, which may have disengaged the latch; re-arm
+    // it so evaluate() runs in drain mode (the realistic saturated scenario).
+    setDrainLatched(sm, true);
+
+    evictionConfig.setTopNProducers(1);
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 15);
+    EvictionResult result = strategy.evaluate(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertNotNull("a high-EMA producer must be evictable even with zero owned slots",
+        result);
+    assertEquals("hot", result.getPid());
   }
 
   @Test

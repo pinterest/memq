@@ -591,6 +591,30 @@ public class SlotManager {
   }
 
   /**
+   * Total smoothed throughput (Mbps) this producer is driving across all of its
+   * topics on this broker. This is the load-based counterpart to
+   * {@link #getTotalProducerSlots(String)}: it reflects what the producer is
+   * actually sending even when it owns no routing slots (e.g. the drain latch
+   * froze acquisition while it keeps writing under backpressure). Used by the
+   * eviction strategy to pick the producers genuinely carrying the broker's
+   * load.
+   *
+   * @param pid the producer identifier
+   * @return summed EMA rate in Mbps; {@code 0.0} if the producer is not tracked
+   */
+  public double getTotalProducerEmaRate(String pid) {
+    ConcurrentHashMap<String, ProducerSlotState> topicMap = producers.get(pid);
+    if (topicMap == null) {
+      return 0.0;
+    }
+    double sum = 0.0;
+    for (ProducerSlotState state : topicMap.values()) {
+      sum += state.emaRateMbps;
+    }
+    return sum;
+  }
+
+  /**
    * Build the codahale registry key for a (pid, topic) gauge using the
    * inline-tag convention recognised by
    * {@link com.pinterest.memq.commons.mon.OpenTSDBReporter}: the segment

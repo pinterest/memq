@@ -315,20 +315,28 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
   }
 
   /**
-   * Pick a producer to evict to {@code targetIp}.
+   * Pick a producer to evict to {@code targetIp}. Selection is by <i>load</i>
+   * (EMA), while connection-cap enforcement stays keyed on routing-slot
+   * ownership -- a deliberate hybrid (see below).
    * <ul>
-   *   <li>Eligibility: v4 producer with {@code > 0} source slots that writes to
-   *       a topic the target broker serves.</li>
+   *   <li>Eligibility: v4 producer carrying measurable load ({@code EMA > 0})
+   *       that writes to a topic the target broker serves. Load is measured by
+   *       EMA, not routing-slot ownership, so a producer saturating this broker
+   *       is evictable even when the drain latch has frozen it out of owning any
+   *       slots -- moving its traffic is what actually sheds the broker's load.</li>
    *   <li>Routine mode ({@code !drainMode}): drop any producer whose eviction
    *       would force a client connection drop. The producer must already be
    *       below the {@code maxConnectionsPerProducer} cap, or the target must
-   *       already be in its connection set, or the eviction must naturally
-   *       drop the source connection ({@code sourceSlots == 1}).</li>
+   *       already be in its connection set, or the eviction must naturally drop
+   *       the source connection ({@code sourceSlots == 1}). This cap check is
+   *       about connection topology, so it stays keyed on routing-slot
+   *       ownership.</li>
    *   <li>Drain mode: keep cap-violating candidates -- the broker is
    *       saturated and forcing a connection drop is the price of relief.</li>
-   *   <li>Sort: ascending source-slots in routine (prefer graceful swaps),
-   *       descending in drain (prefer impactful shifts). Connected-to-target
-   *       is the tiebreaker at equal slot count so swap-free moves win.</li>
+   *   <li>Sort: ascending EMA in routine (prefer graceful, low-load swaps),
+   *       descending in drain (prefer impactful, high-load shifts).
+   *       Connected-to-target is the tiebreaker at equal load so swap-free
+   *       moves win.</li>
    *   <li>Pick uniformly at random from the top-{@code topNProducers}, so the
    *       same producer is not deterministically targeted every tick.</li>
    * </ul>
@@ -349,14 +357,16 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       Map<String, Integer> conns = entry.getValue() != null
           ? entry.getValue()
           : Collections.emptyMap();
-      // Require real slot ownership, not just map presence. recordWrite
-      // re-creates a zero-slot ProducerSlotState on every write, so a producer
-      // that was evicted to 0 but keeps writing under backpressure still
-      // satisfies producerHasSlots() (which is containsKey). Selecting it would
-      // burn this tick's single eviction on a no-op release that frees nothing,
-      // while the producer actually holding the slots is never evicted.
-      int slots = slotManager.getTotalProducerSlots(pid);
-      if (slots <= 0) {
+      // Eligibility is by load (EMA), not routing-slot ownership. A producer
+      // saturating this broker can own 0 slots: the drain latch freezes
+      // acquisition while eviction releases ownership, yet its EMA stays high
+      // because it keeps writing under backpressure. Keying on ownership would
+      // make exactly those producers invisible, so a drain-latched broker hits
+      // "no eligible producer" while still hot. The broker-side slot release on
+      // eviction may then be a no-op, but the client reweight it triggers is
+      // what actually moves the load.
+      double emaMbps = slotManager.getTotalProducerEmaRate(pid);
+      if (emaMbps <= 0.0) {
         continue;
       }
       if (!writesToServedTopic(slotManager.getProducerTopics(pid), targetServedTopics)) {
@@ -368,25 +378,27 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
       // source connection. Picking it here would force the client to drop one
       // of its existing connections, which is exactly the disruption the
       // routine path is trying to avoid. Drain mode allows this disruption.
+      // Cap enforcement is about connection topology, so it stays keyed on
+      // routing-slot ownership -- read only here, on the routine path.
       if (!drainMode
           && maxConns > 0
           && conns.size() >= maxConns
           && !connectedToTarget
-          && slots > 1) {
+          && slotManager.getTotalProducerSlots(pid) > 1) {
         continue;
       }
-      eligible.add(new ProducerCandidate(pid, slots, connectedToTarget));
+      eligible.add(new ProducerCandidate(pid, emaMbps, connectedToTarget));
     }
     if (eligible.isEmpty()) {
       return null;
     }
 
-    // Primary sort: ascending by slots in routine (lightest first -> graceful
-    // swaps), descending in drain (heaviest first -> impactful shifts).
-    // Tiebreaker: connected-to-target before unconnected at equal slot count.
+    // Primary sort: ascending by EMA in routine (lightest load first -> graceful
+    // swaps), descending in drain (heaviest load first -> impactful shifts).
+    // Tiebreaker: connected-to-target before unconnected at equal load.
     Comparator<ProducerCandidate> primary = drainMode
-        ? (a, b) -> Integer.compare(b.slots, a.slots)
-        : (a, b) -> Integer.compare(a.slots, b.slots);
+        ? (a, b) -> Double.compare(b.emaMbps, a.emaMbps)
+        : (a, b) -> Double.compare(a.emaMbps, b.emaMbps);
     Comparator<ProducerCandidate> tiebreaker =
         (a, b) -> Boolean.compare(b.connectedToTarget, a.connectedToTarget);
     eligible.sort(primary.thenComparing(tiebreaker));
@@ -394,7 +406,7 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
     int topN = Math.min(Math.max(1, config.getTopNProducers()), eligible.size());
     ProducerCandidate chosen = eligible.get(ThreadLocalRandom.current().nextInt(topN));
     logger.info("[" + brokerId + "] picking producer: pid=" + chosen.pid
-        + " slots=" + chosen.slots
+        + " emaMbps=" + String.format("%.2f", chosen.emaMbps)
         + " connectedToTarget=" + chosen.connectedToTarget
         + " mode=" + (drainMode ? "drain" : "routine")
         + " topN=" + topN
@@ -608,12 +620,12 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
 
   private static final class ProducerCandidate {
     final String pid;
-    final int slots;
+    final double emaMbps;
     final boolean connectedToTarget;
 
-    ProducerCandidate(String pid, int slots, boolean connectedToTarget) {
+    ProducerCandidate(String pid, double emaMbps, boolean connectedToTarget) {
       this.pid = pid;
-      this.slots = slots;
+      this.emaMbps = emaMbps;
       this.connectedToTarget = connectedToTarget;
     }
   }
