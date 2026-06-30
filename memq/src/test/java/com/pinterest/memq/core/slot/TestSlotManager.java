@@ -179,7 +179,12 @@ public class TestSlotManager {
   }
 
   @Test
-  public void testFreezeAfterRecentSlotChange() {
+  public void testNotFrozenAfterSlotChangeWithFreeCapacity() {
+    // The gossiped freeze flag means "do not send me load" -- it reflects only
+    // genuine saturation or drain-latch, NOT the slot-change cooldown. A healthy
+    // broker that just acquired a slot but still has free capacity must remain
+    // an eligible eviction target; otherwise organic slot churn (many small
+    // producers) would keep free brokers permanently frozen and block drain.
     SlotAccountingConfig config = fastConfig();
     config.setTickIntervalMs(1000);
     config.setCooldownSeconds(60.0);
@@ -190,7 +195,9 @@ public class TestSlotManager {
     sm.recordWrite("producer-1", TOPIC, 15 * MB);
     sm.tick();
 
-    assertTrue("Should be frozen after slot change (cooldown active)", sm.isFrozen());
+    assertTrue("slot change should have occurred", sm.getFreeSlots() < 32);
+    assertFalse("a recent slot change must not freeze a broker with free capacity",
+        sm.isFrozen());
   }
 
   @Test

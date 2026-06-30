@@ -522,10 +522,24 @@ public class SlotManager {
     return Math.max(0, Math.min(occ, totalSlots));
   }
 
+  /**
+   * Whether this broker should be treated as unavailable to receive load. This
+   * is the flag gossiped to peers and used by the eviction strategy to exclude
+   * targets, so it means exactly "do not send me load": the broker is either
+   * genuinely saturated ({@code getFreeSlots() <= 0}) or actively shedding
+   * ({@code drainLatched}).
+   * <p>
+   * It deliberately does <i>not</i> include the slot-change cooldown
+   * ({@code lastSlotChangeTimeMs}). That cooldown is a purely local acquisition
+   * rate-limit enforced in {@link #tryAcquireSlots}; it says nothing about
+   * whether the broker can accept more load. Folding it in here caused healthy,
+   * free brokers to advertise themselves as frozen on every organic slot change
+   * -- which, with many small producers churning slots continuously, kept them
+   * frozen almost permanently and blocked drain-latched peers from shedding to
+   * them (the receive -> acquire -> freeze -> block-next-eviction loop).
+   */
   public boolean isFrozen() {
-    return System.currentTimeMillis() - lastSlotChangeTimeMs < cooldownMs
-        || getFreeSlots() <= 0
-        || drainLatched;
+    return getFreeSlots() <= 0 || drainLatched;
   }
 
   /**
