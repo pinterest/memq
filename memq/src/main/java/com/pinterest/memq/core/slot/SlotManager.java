@@ -536,7 +536,7 @@ public class SlotManager {
    * free brokers to advertise themselves as frozen on every organic slot change
    * -- which, with many small producers churning slots continuously, kept them
    * frozen almost permanently and blocked drain-latched peers from shedding to
-   * them (the receive -> acquire -> freeze -> block-next-eviction loop).
+   * them (the receive, acquire, freeze, block-next-eviction loop).
    */
   public boolean isFrozen() {
     return getFreeSlots() <= 0 || drainLatched;
