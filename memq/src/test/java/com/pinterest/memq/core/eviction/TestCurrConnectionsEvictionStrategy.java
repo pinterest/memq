@@ -35,6 +35,7 @@ import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -416,6 +417,95 @@ public class TestCurrConnectionsEvictionStrategy {
     assertNotNull(result);
     assertEquals("drain mode picks the heaviest producer to shift real load",
         "heavy", result.getPid());
+  }
+
+  // -----------------------------------------------------------------------
+  // Drain-mode batch eviction (evaluateBatch)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Seed {@code count} equal-load producers on a 40-slot broker, each writing
+   * {@code mbEach} and connected to a distinct dummy broker, then tick once so
+   * they carry EMA. Returns the strategy ready to evaluate.
+   */
+  private void seedProducers(SlotManager sm, int count, int mbEach) throws Exception {
+    for (int i = 0; i < count; i++) {
+      sm.recordWrite("p" + i, TOPIC, mbEach * MB);
+    }
+    tickOnce(sm);
+    for (int i = 0; i < count; i++) {
+      sm.recordProducerConnections("p" + i,
+          new HashSet<>(Collections.singletonList("peer-" + i)));
+    }
+  }
+
+  @Test
+  public void testDrainBatchCapsAtHalfGap() throws Exception {
+    // 10 eligible producers, but the free-slot gap only warrants shifting half:
+    // localFree=4, targetFree=10 -> halfGap = round((10-4)/2) = 3. The batch
+    // must cap at 3 even though more producers are eligible.
+    SlotManager sm = createSlotManager(40);
+    seedProducers(sm, 10, 36); // sum EMA=360 -> occupancy=36 -> localFree=4
+    assertEquals(4, sm.getFreeSlots());
+    setDrainLatched(sm, true);
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 10);
+
+    List<EvictionResult> batch = strategy.evaluateBatch(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertEquals("batch should cap at half the free-slot gap", 3, batch.size());
+    assertDistinctPidsToTarget(batch, "broker-2");
+  }
+
+  @Test
+  public void testDrainBatchBestEffortWhenFewerProducersThanHalfGap() throws Exception {
+    // Large gap (localFree=2, targetFree=30 -> halfGap=14) but only 4 eligible
+    // producers. Best-effort: evict all 4, don't fabricate more.
+    SlotManager sm = createSlotManager(40);
+    seedProducers(sm, 4, 95); // sum EMA=380 -> occupancy=38 -> localFree=2
+    assertEquals(2, sm.getFreeSlots());
+    setDrainLatched(sm, true);
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 30);
+
+    List<EvictionResult> batch = strategy.evaluateBatch(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertEquals("best-effort: evict every eligible producer when short of half-gap",
+        4, batch.size());
+    assertDistinctPidsToTarget(batch, "broker-2");
+  }
+
+  @Test
+  public void testEvaluateBatchReturnsSingleInRoutineMode() throws Exception {
+    // Not drain-latched: evaluateBatch must behave exactly like evaluate --
+    // at most one (gentle, lightest-first) eviction per cycle.
+    SlotManager sm = createSlotManager(40);
+    seedProducers(sm, 10, 36);
+    // routine mode: leave the drain latch disengaged.
+
+    CurrConnectionsEvictionStrategy strategy =
+        new CurrConnectionsEvictionStrategy(BROKER_LOCAL, evictionConfig);
+    Map<String, GossipState> peers = peerWithFreeSlots("broker-2", 10);
+
+    List<EvictionResult> batch = strategy.evaluateBatch(sm, peers,
+        sm.getProducerConnections(), allPeersServeTopic(peers));
+
+    assertTrue("routine mode must not batch (<= 1 eviction)", batch.size() <= 1);
+  }
+
+  private static void assertDistinctPidsToTarget(List<EvictionResult> batch, String target) {
+    Set<String> pids = new HashSet<>();
+    for (EvictionResult r : batch) {
+      assertEquals("all batch evictions go to the chosen target", target,
+          r.getTargetBrokerIp());
+      assertTrue("no producer appears twice in a batch", pids.add(r.getPid()));
+    }
   }
 
   @Test

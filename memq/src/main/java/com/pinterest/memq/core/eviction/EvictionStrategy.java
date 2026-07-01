@@ -18,6 +18,8 @@ package com.pinterest.memq.core.eviction;
 import com.pinterest.memq.core.gossip.GossipState;
 import com.pinterest.memq.core.slot.SlotManager;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -57,4 +59,29 @@ public interface EvictionStrategy {
                           Map<String, GossipState> peerStates,
                           Map<String, Map<String, Integer>> producerConnections,
                           Map<String, Set<String>> topicToBrokerIps);
+
+  /**
+   * Evaluate one or more evictions for this cycle. The default is the
+   * single-decision behavior: zero or one eviction, matching {@link #evaluate}.
+   * <p>
+   * Implementations may override this to return a batch of evictions in a
+   * single cycle -- e.g. a saturated (drain-latched) broker shedding enough
+   * load at once to close a large imbalance, instead of one producer per cycle
+   * (which converges in {@code O(num_producers)} cycles). Each returned result
+   * is an independent pending eviction keyed by its producer id.
+   *
+   * @param slotManager this broker's slot manager
+   * @param peerStates gossip state from peer brokers (brokerId to GossipState)
+   * @param producerConnections per-producer connection view (see {@link #evaluate})
+   * @param topicToBrokerIps topic to set of broker IPs that serve writes for it
+   * @return the evictions to schedule this cycle; empty if none are warranted
+   */
+  default List<EvictionResult> evaluateBatch(SlotManager slotManager,
+                                             Map<String, GossipState> peerStates,
+                                             Map<String, Map<String, Integer>> producerConnections,
+                                             Map<String, Set<String>> topicToBrokerIps) {
+    EvictionResult result = evaluate(slotManager, peerStates, producerConnections,
+        topicToBrokerIps);
+    return result == null ? Collections.emptyList() : Collections.singletonList(result);
+  }
 }

@@ -315,6 +315,109 @@ public class CurrConnectionsEvictionStrategy implements EvictionStrategy {
   }
 
   /**
+   * Drain-mode batch eviction. In routine mode this is the plain single
+   * decision from {@link #evaluate} (gentle, lightest-first rebalancing is
+   * intentionally left one-at-a-time). When the broker is drain-latched, a
+   * single eviction per cycle converges in {@code O(num_producers)} cycles --
+   * e.g. shifting ~half of 50 producers at one per 2-minute cycle takes ~50
+   * minutes. Instead, reuse {@code evaluate} to pick the target and the primary
+   * (heaviest-EMA) producer, then fill toward <b>half the free-slot gap</b> to
+   * that target with the next-heaviest eligible producers.
+   * <p>
+   * Half the gap converges to the midpoint (one moved slot closes the free-slot
+   * gap by two, so {@code (targetFree - localFree) / 2} equalizes) without
+   * flipping roles. The fill is best-effort: eligibility is unchanged from
+   * {@code evaluate}/{@code pickProducer}, so if too few producers qualify we
+   * simply move as many as we can and let subsequent cycles finish. The
+   * existing eviction deadband in {@code evaluate} guarantees this only runs
+   * when the gap is genuinely out of tolerance, and the primary decision always
+   * moves at least one slot, so drain still terminates into the deadband.
+   */
+  @Override
+  public List<EvictionResult> evaluateBatch(SlotManager slotManager,
+                                            Map<String, GossipState> peerStates,
+                                            Map<String, Map<String, Integer>> producerConnections,
+                                            Map<String, Set<String>> topicToBrokerIps) {
+    EvictionResult primary = evaluate(slotManager, peerStates, producerConnections,
+        topicToBrokerIps);
+    if (primary == null || !slotManager.isDrainLatched()) {
+      return primary == null ? Collections.emptyList() : Collections.singletonList(primary);
+    }
+
+    String target = primary.getTargetBrokerIp();
+    GossipState targetState = peerStates.get(target);
+    if (targetState == null) {
+      return Collections.singletonList(primary);
+    }
+    int localFree = slotManager.getFreeSlots();
+    int targetFree = targetState.getMessage().getFreeSlots();
+    // Half the free-slot gap == the midpoint move. round() keeps it symmetric;
+    // it is >= 1 here because evaluate only returns a decision when the gap
+    // exceeds the deadband, i.e. targetFree - localFree is already > 0.
+    int halfGap = Math.max(1, Math.round((targetFree - localFree) / 2.0f));
+    int additionalNeeded = halfGap - primary.getNumSlotsToEvict();
+    if (additionalNeeded <= 0) {
+      return Collections.singletonList(primary);
+    }
+
+    Set<String> targetServedTopics = invert(topicToBrokerIps)
+        .getOrDefault(target, Collections.emptySet());
+    Set<String> exclude = new HashSet<>();
+    exclude.add(primary.getPid());
+    List<String> extras = pickAdditionalProducers(slotManager, producerConnections,
+        targetServedTopics, exclude, additionalNeeded);
+
+    List<EvictionResult> batch = new ArrayList<>(1 + extras.size());
+    batch.add(primary);
+    for (String pid : extras) {
+      batch.add(new EvictionResult(pid, target, 1));
+    }
+    logger.info("[" + brokerId + "] drain batch eviction: target=" + target
+        + " halfGap=" + halfGap + " requested=" + additionalNeeded
+        + " filled=" + extras.size() + " (best-effort)"
+        + " batchSize=" + batch.size()
+        + " localFree=" + localFree + " targetFree=" + targetFree);
+    return batch;
+  }
+
+  /**
+   * Select up to {@code count} additional producers to batch-evict to a
+   * drain-mode target, heaviest EMA first. Eligibility mirrors the drain branch
+   * of {@link #pickProducer}: measurable load ({@code EMA > 0}) and writes to a
+   * topic the target serves. The connection-cap skip is deliberately not
+   * applied -- it is a routine-mode constraint that drain mode relaxes.
+   */
+  private List<String> pickAdditionalProducers(SlotManager slotManager,
+                                               Map<String, Map<String, Integer>> producerConnections,
+                                               Set<String> targetServedTopics,
+                                               Set<String> exclude,
+                                               int count) {
+    if (count <= 0 || targetServedTopics.isEmpty()) {
+      return Collections.emptyList();
+    }
+    List<ProducerCandidate> eligible = new ArrayList<>();
+    for (String pid : producerConnections.keySet()) {
+      if (exclude.contains(pid)) {
+        continue;
+      }
+      double emaMbps = slotManager.getTotalProducerEmaRate(pid);
+      if (emaMbps <= 0.0) {
+        continue;
+      }
+      if (!writesToServedTopic(slotManager.getProducerTopics(pid), targetServedTopics)) {
+        continue;
+      }
+      eligible.add(new ProducerCandidate(pid, emaMbps, false));
+    }
+    eligible.sort((a, b) -> Double.compare(b.emaMbps, a.emaMbps));
+    List<String> out = new ArrayList<>(Math.min(count, eligible.size()));
+    for (int i = 0; i < eligible.size() && out.size() < count; i++) {
+      out.add(eligible.get(i).pid);
+    }
+    return out;
+  }
+
+  /**
    * Pick a producer to evict to {@code targetIp}. Selection is by <i>load</i>
    * (EMA), while connection-cap enforcement stays keyed on routing-slot
    * ownership -- a deliberate hybrid (see below).
