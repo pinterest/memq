@@ -41,6 +41,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * This class manages Request creation upon write requests.
  */
 public class RequestManager implements Closeable {
+  // Instance-bound gauges: their suppliers close over this manager's semaphores,
+  // so they must be deregistered on close() to let a recreated instance re-bind
+  // these names on a shared MetricRegistry (gauge() is get-or-create).
+  private static final String GAUGE_REQUESTS_INFLIGHT = "requests.inflight";
+  private static final String GAUGE_REQUESTS_MEMORY_INFLIGHT = "requests.memory.inflight";
+
   private final ScheduledExecutorService scheduler;
   private final ExecutorService dispatcher;
   private final MemqCommonClient client;
@@ -112,8 +118,8 @@ public class RequestManager implements Closeable {
 
   private void initializeMetrics() {
     requestCounter = metricRegistry.counter("requests.created");
-    metricRegistry.gauge("requests.inflight", () -> () -> maxInflightRequests - requestCountPermits.availablePermits());
-    metricRegistry.gauge("requests.memory.inflight", () -> () -> maxInflightRequestsMemoryBytes - inflightMemoryPermits.availablePermits());
+    metricRegistry.gauge(GAUGE_REQUESTS_INFLIGHT, () -> () -> maxInflightRequests - requestCountPermits.availablePermits());
+    metricRegistry.gauge(GAUGE_REQUESTS_MEMORY_INFLIGHT, () -> () -> maxInflightRequestsMemoryBytes - inflightMemoryPermits.availablePermits());
   }
 
   public Future<MemqWriteResult> write(RawRecord record) throws IOException, MemoryAllocationException {
@@ -248,6 +254,13 @@ public class RequestManager implements Closeable {
   @Override
   public void close() throws IOException {
     flush();
+    // Deregister instance-bound gauges so a recreated RequestManager can re-bind
+    // them on a shared MetricRegistry. The cumulative "requests.created" counter
+    // is intentionally left registered to preserve series continuity.
+    if (metricRegistry != null) {
+      metricRegistry.remove(GAUGE_REQUESTS_INFLIGHT);
+      metricRegistry.remove(GAUGE_REQUESTS_MEMORY_INFLIGHT);
+    }
     scheduler.shutdown();
     dispatcher.shutdown();
   }
