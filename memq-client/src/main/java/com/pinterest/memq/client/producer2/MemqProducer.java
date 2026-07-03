@@ -54,10 +54,15 @@ public class MemqProducer<K, V> implements Closeable {
   protected static final Map<String, MemqProducer<?, ?>> clientMap = new HashMap<>();
   private static final Logger logger = LoggerFactory.getLogger(MemqProducer.class);
 
-  // Instance-bound gauges: their suppliers close over this producer's client, so
-  // they must be deregistered on close(). Otherwise a recreated producer sharing
-  // the same MetricRegistry cannot re-bind these names (MetricRegistry.gauge is
-  // get-or-create) and the metrics stay pinned to the dead client.
+  // Instance-bound gauges: their suppliers close over this producer's client.
+  // When a producer is recreated on a shared MetricRegistry (the common case,
+  // since the registry is memoized per topic and outlives individual clients),
+  // the name must be rebound to the new, live client. MetricRegistry.gauge is
+  // get-or-create, so we remove-then-register at construction to guarantee the
+  // newest instance always wins. We deliberately do NOT remove these on close():
+  // a delayed close() of a retired instance could otherwise delete the gauge a
+  // live replacement already registered, and since initializeMetrics() runs only
+  // once per instance the metric would never come back.
   private static final String GAUGE_CONNECTIONS_CHANNELS = "producer.connections.channels";
   private static final String GAUGE_CONNECTIONS_ENDPOINTS = "producer.connections.endpoints";
 
@@ -137,8 +142,12 @@ public class MemqProducer<K, V> implements Closeable {
     // series per producer process (the pid is stable for the client's life).
     // Two views: physical channels (live TCP connections) and owned endpoints
     // (brokers where this producer holds slots -- the slot/eviction view).
+    // Remove-then-register so a producer recreated on a shared registry rebinds
+    // the gauge to its live client instead of no-op'ing against a stale one.
+    metricRegistry.remove(GAUGE_CONNECTIONS_CHANNELS);
     metricRegistry.gauge(GAUGE_CONNECTIONS_CHANNELS,
         () -> (Gauge<Integer>) () -> client.getActiveChannelCount());
+    metricRegistry.remove(GAUGE_CONNECTIONS_ENDPOINTS);
     metricRegistry.gauge(GAUGE_CONNECTIONS_ENDPOINTS,
         () -> (Gauge<Integer>) () -> client.getOwnedEndpointCount());
   }
@@ -226,16 +235,11 @@ public class MemqProducer<K, V> implements Closeable {
 
   @Override
   public void close() throws IOException {
-    // Deregister instance-bound gauges before the client goes away so a producer
-    // recreated on the same shared MetricRegistry can re-bind these names to its
-    // live client. Cumulative metrics (counters/histogram/timer) are left in
-    // place on purpose: they are instance-independent and keeping them preserves
-    // series continuity across recreates.
-    if (metricRegistry != null) {
-      metricRegistry.remove(GAUGE_CONNECTIONS_CHANNELS);
-      metricRegistry.remove(GAUGE_CONNECTIONS_ENDPOINTS);
-    }
-
+    // Note: instance-bound gauges are intentionally NOT removed here. They are
+    // rebound at construction via remove-then-register, which is safe against
+    // recreate ordering. Removing on close would risk deleting a gauge a live
+    // replacement already registered (e.g. when the old client self-closes at
+    // the network layer before this close() runs), permanently losing the metric.
     if (requestManager != null) {
       requestManager.close();
     }

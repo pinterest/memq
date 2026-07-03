@@ -43,6 +43,7 @@ import com.pinterest.memq.commons.protocol.TopicMetadataResponsePacket;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
 import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.commons.protocol.Broker.BrokerType;
+import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
 import com.google.common.collect.ImmutableSet;
 
@@ -100,6 +101,75 @@ public class TestMemqProducer extends TestMemqProducerBase {
     MemqProducer<byte[], byte[]> producer4 = builder2.memoize().build();
     assertNotEquals(producer2, producer4);
 
+    mockServer.stop();
+  }
+
+  /**
+   * Regression test for the connection gauges disappearing after a broker deploy.
+   *
+   * <p>The registry is memoized per topic and outlives individual clients, so when
+   * a producer is recreated (e.g. its client self-closes during a broker deploy) a
+   * brand-new instance registers gauges on the same registry. Because
+   * {@code MetricRegistry.gauge} is get-or-create, the fix is to remove-then-register
+   * at construction so the newest, live instance always owns the gauge, and to NOT
+   * remove on close (a retired instance closing after the replacement registered
+   * would otherwise delete the live gauge, permanently losing the metric).
+   */
+  @Test
+  public void testConnectionGaugesRebindToLiveClientOnRecreate() throws Exception {
+    AtomicInteger writeCount = new AtomicInteger();
+    MockMemqServer mockServer = newSimpleTestServer(writeCount);
+    mockServer.start();
+
+    // A single shared registry, mirroring how the registry is memoized per topic
+    // in production and reused across producer recreations.
+    MetricRegistry shared = new MetricRegistry();
+    Properties networkProperties = new Properties();
+    MemqProducer.Builder<byte[], byte[]> builderTmpl = new MemqProducer.Builder<>();
+    builderTmpl.cluster("prototype").topic("test").bootstrapServers(LOCALHOST_STRING + ":" + port)
+        .keySerializer(new ByteArraySerializer()).valueSerializer(new ByteArraySerializer())
+        .networkProperties(networkProperties).metricRegistry(shared);
+
+    // First producer registers the connection gauges on the shared registry.
+    MemqProducer<byte[], byte[]> producer1 = new MemqProducer.Builder<>(builderTmpl).build();
+    Future<MemqWriteResult> r1 = producer1.write(null, "a".getBytes());
+    producer1.flush();
+    r1.get();
+
+    assertNotNull(shared.getGauges().get("producer.connections.channels"));
+    assertNotNull(shared.getGauges().get("producer.connections.endpoints"));
+
+    // Simulate a broker-deploy recreation: a brand-new producer instance is built
+    // on the SAME shared registry while the old instance is still around.
+    MemqProducer<byte[], byte[]> producer2 = new MemqProducer.Builder<>(builderTmpl).build();
+    Future<MemqWriteResult> r2 = producer2.write(null, "b".getBytes());
+    producer2.flush();
+    r2.get();
+
+    Gauge<?> channelsGauge = shared.getGauges().get("producer.connections.channels");
+    Gauge<?> endpointsGauge = shared.getGauges().get("producer.connections.endpoints");
+    assertNotNull(channelsGauge);
+    assertNotNull(endpointsGauge);
+
+    // Retire the old instance AFTER the replacement has registered. This is the
+    // exact ordering that used to delete the gauge (remove-on-close) and leave the
+    // live producer with no metric.
+    producer1.close();
+
+    // Regression guard: the gauges must still be present after the retired
+    // producer closes.
+    assertNotNull("channels gauge must survive the retired producer's close()",
+        shared.getGauges().get("producer.connections.channels"));
+    assertNotNull("endpoints gauge must survive the retired producer's close()",
+        shared.getGauges().get("producer.connections.endpoints"));
+
+    // ...and the channels gauge must reflect the live producer2 (which still has an
+    // active channel), not the now-closed producer1 whose client reports 0. A gauge
+    // still bound to producer1 would read 0 here.
+    assertTrue("channels gauge must track the live client, not the closed one",
+        ((Integer) channelsGauge.getValue()) >= 1);
+
+    producer2.close();
     mockServer.stop();
   }
 

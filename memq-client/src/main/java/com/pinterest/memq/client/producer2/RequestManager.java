@@ -41,9 +41,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * This class manages Request creation upon write requests.
  */
 public class RequestManager implements Closeable {
-  // Instance-bound gauges: their suppliers close over this manager's semaphores,
-  // so they must be deregistered on close() to let a recreated instance re-bind
-  // these names on a shared MetricRegistry (gauge() is get-or-create).
+  // Instance-bound gauges: their suppliers close over this manager's semaphores.
+  // Rebound at construction via remove-then-register so a recreated instance on a
+  // shared MetricRegistry wins (gauge() is get-or-create). Not removed on close()
+  // to avoid deleting a gauge a live replacement already registered.
   private static final String GAUGE_REQUESTS_INFLIGHT = "requests.inflight";
   private static final String GAUGE_REQUESTS_MEMORY_INFLIGHT = "requests.memory.inflight";
 
@@ -118,7 +119,9 @@ public class RequestManager implements Closeable {
 
   private void initializeMetrics() {
     requestCounter = metricRegistry.counter("requests.created");
+    metricRegistry.remove(GAUGE_REQUESTS_INFLIGHT);
     metricRegistry.gauge(GAUGE_REQUESTS_INFLIGHT, () -> () -> maxInflightRequests - requestCountPermits.availablePermits());
+    metricRegistry.remove(GAUGE_REQUESTS_MEMORY_INFLIGHT);
     metricRegistry.gauge(GAUGE_REQUESTS_MEMORY_INFLIGHT, () -> () -> maxInflightRequestsMemoryBytes - inflightMemoryPermits.availablePermits());
   }
 
@@ -254,13 +257,8 @@ public class RequestManager implements Closeable {
   @Override
   public void close() throws IOException {
     flush();
-    // Deregister instance-bound gauges so a recreated RequestManager can re-bind
-    // them on a shared MetricRegistry. The cumulative "requests.created" counter
-    // is intentionally left registered to preserve series continuity.
-    if (metricRegistry != null) {
-      metricRegistry.remove(GAUGE_REQUESTS_INFLIGHT);
-      metricRegistry.remove(GAUGE_REQUESTS_MEMORY_INFLIGHT);
-    }
+    // Instance-bound gauges are intentionally NOT removed here; they are rebound
+    // at construction via remove-then-register. See initializeMetrics().
     scheduler.shutdown();
     dispatcher.shutdown();
   }
