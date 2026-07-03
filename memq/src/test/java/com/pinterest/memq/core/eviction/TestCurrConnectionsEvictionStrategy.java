@@ -138,7 +138,7 @@ public class TestCurrConnectionsEvictionStrategy {
                                       Map<String, GossipState> peers,
                                       EvictionConfig config) {
     Map<String, Set<String>> topicMap = allPeersServeTopic(peers);
-    return new EvictionManager(strategy, sm, () -> peers, () -> topicMap, config);
+    return new EvictionManager(strategy, sm, () -> peers, () -> topicMap, null, config);
   }
 
   // -----------------------------------------------------------------------
@@ -1044,7 +1044,7 @@ public class TestCurrConnectionsEvictionStrategy {
     Map<String, Set<String>> topicMap = allPeersServeTopics(peers, "topicA", "topicB");
 
     EvictionManager manager = new EvictionManager(strategy, sm, () -> peers,
-        () -> topicMap, config);
+        () -> topicMap, null, config);
     manager.runEviction();
 
     // At most 1 pending eviction per run, targeting one specific UUID

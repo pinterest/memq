@@ -222,6 +222,22 @@ public class MemqManager implements Managed {
     return processorMap;
   }
 
+  /**
+   * Live set of topic names for which per-topic balancing is opted in
+   * ({@code TopicConfig.enableBalancing == true}). Sourced from the live
+   * {@code topicMap} so runtime topic-config updates are reflected. Used by
+   * the eviction subsystem to gate which producers are eligible for balancing.
+   */
+  public Set<String> getBalancingEnabledTopics() {
+    Set<String> out = new HashSet<>();
+    for (Entry<String, TopicAssignment> e : topicMap.entrySet()) {
+      if (e.getValue().isEnableBalancing()) {
+        out.add(e.getKey());
+      }
+    }
+    return out;
+  }
+
   public Set<TopicAssignment> getTopicAssignment() {
     return new HashSet<>(topicMap.values());
   }

@@ -27,8 +27,10 @@ import com.pinterest.memq.core.slot.SlotManager;
 import org.junit.Test;
 
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 public class TestEvictionManager {
 
@@ -138,6 +140,60 @@ public class TestEvictionManager {
     manager.stop();
 
     assertTrue("Expected at least 2 eviction runs, got " + callCount[0], callCount[0] >= 2);
+  }
+
+  /**
+   * Only producers writing to a topic with balancing opted in are eligible,
+   * and the enabled-topic set is read live every tick -- so toggling it at
+   * runtime activates/deactivates a topic's producers without a restart.
+   */
+  @Test
+  public void testPerTopicBalancingFilterIsLiveEachTick() {
+    EvictionConfig config = new EvictionConfig();
+    config.setEnabled(true);
+
+    SlotManager sm = createSlotManager();
+    // Register two producers, each on a distinct topic, both connected.
+    sm.recordWrite("p-a", "topicA", 1000);
+    sm.recordWrite("p-b", "topicB", 1000);
+    sm.recordProducerConnections("p-a",
+        new HashSet<>(Collections.singletonList("broker-2")));
+    sm.recordProducerConnections("p-b",
+        new HashSet<>(Collections.singletonList("broker-2")));
+
+    // Capture the producer set the strategy actually sees each tick.
+    final Set<String> seenPids = new HashSet<>();
+    EvictionStrategy capturingStrategy = (s, peers, conns, topics) -> {
+      seenPids.clear();
+      seenPids.addAll(conns.keySet());
+      return null;
+    };
+
+    // Mutable enabled-topic set, read live by the manager on each tick.
+    final Set<String> enabledTopics = new HashSet<>();
+    enabledTopics.add("topicA");
+
+    Supplier<Map<String, GossipState>> peersSupplier = Collections::emptyMap;
+    Supplier<Map<String, Set<String>>> topicToBrokerIps = Collections::emptyMap;
+    Supplier<Set<String>> enabledTopicsSupplier = () -> enabledTopics;
+    EvictionManager manager = new EvictionManager(capturingStrategy, sm,
+        peersSupplier, topicToBrokerIps, enabledTopicsSupplier, config);
+
+    // Only topicA opted in -> only p-a is eligible.
+    manager.runEviction();
+    assertEquals(Collections.singleton("p-a"), seenPids);
+
+    // Flip enablement at runtime (no restart): topicB on, topicA off.
+    enabledTopics.clear();
+    enabledTopics.add("topicB");
+    manager.runEviction();
+    assertEquals(Collections.singleton("p-b"), seenPids);
+
+    // No topic opted in -> no producers eligible.
+    enabledTopics.clear();
+    manager.runEviction();
+    assertTrue("no producers should be eligible when no topic opts in",
+        seenPids.isEmpty());
   }
 
   private static void assertTrue(String msg, boolean condition) {

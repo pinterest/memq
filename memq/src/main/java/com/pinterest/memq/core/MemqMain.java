@@ -170,8 +170,14 @@ public class MemqMain extends Application<MemqConfig> {
       }
       return out;
     };
+    // Per-topic balancing opt-in, read live each tick from the manager's topic
+    // map so toggling TopicConfig.enableBalancing takes effect without a
+    // restart. Combined with the broker-wide EvictionConfig.enabled gate above,
+    // balancing is active for a topic iff (enabled && enableBalancing).
+    java.util.function.Supplier<Set<String>> balancingEnabledTopics =
+        memqManager::getBalancingEnabledTopics;
     EvictionManager evictionManager = new EvictionManager(strategy, slotManager,
-        gossipServer::getPeerStates, topicToBrokerIps, evictionConfig);
+        gossipServer::getPeerStates, topicToBrokerIps, balancingEnabledTopics, evictionConfig);
     memqManager.setEvictionManager(evictionManager);
     evictionManager.start();
 

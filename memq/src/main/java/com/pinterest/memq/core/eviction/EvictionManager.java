@@ -20,6 +20,7 @@ import com.pinterest.memq.core.gossip.GossipState;
 import com.pinterest.memq.core.slot.SlotManager;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,6 +46,7 @@ public class EvictionManager {
   private final SlotManager slotManager;
   private final Supplier<Map<String, GossipState>> peerStatesSupplier;
   private final Supplier<Map<String, Set<String>>> topicToBrokerIpsSupplier;
+  private final Supplier<Set<String>> balancingEnabledTopicsSupplier;
   private final EvictionConfig config;
   private final ConcurrentHashMap<String, EvictionResult> pendingEvictions = new ConcurrentHashMap<>();
 
@@ -60,22 +62,31 @@ public class EvictionManager {
    *        constrain eviction targets to brokers that actually serve the
    *        evicted producer's topics. Pass {@link Collections#emptyMap}
    *        to disable topic-aware filtering (e.g. in tests).
+   * @param balancingEnabledTopicsSupplier supplies the set of topic names for
+   *        which per-topic balancing is opted in ({@code TopicConfig.enableBalancing}).
+   *        Only producers writing to at least one such topic are eligible for
+   *        eviction. Read live on every tick so runtime topic-config changes
+   *        take effect without a restart. Pass {@code null} to disable
+   *        per-topic filtering entirely (all producers eligible), e.g. in tests.
    * @param config eviction configuration (interval, thresholds, top-N sizes).
    */
   public EvictionManager(EvictionStrategy strategy,
                          SlotManager slotManager,
                          Supplier<Map<String, GossipState>> peerStatesSupplier,
                          Supplier<Map<String, Set<String>>> topicToBrokerIpsSupplier,
+                         Supplier<Set<String>> balancingEnabledTopicsSupplier,
                          EvictionConfig config) {
     this.strategy = strategy;
     this.slotManager = slotManager;
     this.peerStatesSupplier = peerStatesSupplier;
     this.topicToBrokerIpsSupplier = topicToBrokerIpsSupplier;
+    this.balancingEnabledTopicsSupplier = balancingEnabledTopicsSupplier;
     this.config = config;
   }
 
   /**
-   * Convenience constructor for tests with no topic affinity.
+   * Convenience constructor for tests with no topic affinity and no per-topic
+   * balancing filter (all producers eligible).
    *
    * @param strategy the eviction strategy to apply each tick.
    * @param slotManager the local broker's slot manager.
@@ -86,7 +97,7 @@ public class EvictionManager {
                          SlotManager slotManager,
                          Supplier<Map<String, GossipState>> peerStatesSupplier,
                          EvictionConfig config) {
-    this(strategy, slotManager, peerStatesSupplier, Collections::emptyMap, config);
+    this(strategy, slotManager, peerStatesSupplier, Collections::emptyMap, null, config);
   }
 
   public void start() {
@@ -120,14 +131,22 @@ public class EvictionManager {
       Map<String, GossipState> peerStates = peerStatesSupplier.get();
       Map<String, Map<String, Integer>> producerConnections = slotManager.getProducerConnections();
       Map<String, Set<String>> topicToBrokerIps = topicToBrokerIpsSupplier.get();
+      // Per-topic balancing gate: only producers writing to a topic that has
+      // opted in (TopicConfig.enableBalancing) are eligible. Read live each
+      // tick so toggling enableBalancing takes effect without a restart. A
+      // null supplier disables filtering (tests); the broker-wide
+      // EvictionConfig.enabled gate is applied upstream at manager creation.
+      Map<String, Map<String, Integer>> eligibleConnections =
+          filterBalancingEnabled(producerConnections);
       logger.info("Eviction tick: peers=" + peerStates.size()
           + " v4Producers=" + producerConnections.size()
+          + " balancingEligible=" + eligibleConnections.size()
           + " topics=" + topicToBrokerIps.size()
           + " localFreeSlots=" + slotManager.getFreeSlots()
           + "/" + slotManager.getTotalSlots()
           + " pendingEvictions=" + pendingEvictions.size());
       List<EvictionResult> results = strategy.evaluateBatch(slotManager, peerStates,
-          producerConnections, topicToBrokerIps);
+          eligibleConnections, topicToBrokerIps);
       if (!results.isEmpty()) {
         for (EvictionResult result : results) {
           EvictionResult prev = pendingEvictions.put(result.getPid(), result);
@@ -150,6 +169,35 @@ public class EvictionManager {
     } catch (Exception e) {
       logger.log(Level.WARNING, "Error in eviction run", e);
     }
+  }
+
+  /**
+   * Restrict the producer-connection view to producers eligible for balancing:
+   * those writing to at least one topic with {@code enableBalancing == true}.
+   * The enabled-topic set is read live from the supplier each call, so
+   * toggling a topic's {@code enableBalancing} activates/deactivates its
+   * producers on the next tick without a broker restart. A {@code null}
+   * supplier means "no per-topic filter" and returns the input unchanged.
+   */
+  private Map<String, Map<String, Integer>> filterBalancingEnabled(
+      Map<String, Map<String, Integer>> producerConnections) {
+    if (balancingEnabledTopicsSupplier == null) {
+      return producerConnections;
+    }
+    Set<String> enabledTopics = balancingEnabledTopicsSupplier.get();
+    if (enabledTopics == null || enabledTopics.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    Map<String, Map<String, Integer>> eligible = new HashMap<>();
+    for (Map.Entry<String, Map<String, Integer>> entry : producerConnections.entrySet()) {
+      for (String topic : slotManager.getProducerTopics(entry.getKey())) {
+        if (enabledTopics.contains(topic)) {
+          eligible.put(entry.getKey(), entry.getValue());
+          break;
+        }
+      }
+    }
+    return eligible;
   }
 
   /**
