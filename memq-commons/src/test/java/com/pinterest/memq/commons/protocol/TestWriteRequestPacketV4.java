@@ -42,8 +42,8 @@ public class TestWriteRequestPacketV4 {
 
   @Test
   public void testV4RoundTrip() {
-    // v4 wire carries the connection set but no per-entry slot counts.
-    // The decoder reconstructs equal-weight 1s for each entry.
+    // The v4+ wire carries the connection set with each entry's per-target
+    // slot count preserved verbatim.
     ByteBuf payload = Unpooled.wrappedBuffer("hello world".getBytes());
     WriteRequestPacket original = new WriteRequestPacket(false, "testTopic".getBytes(),
         true, 12345, payload.duplicate());
@@ -67,9 +67,9 @@ public class TestWriteRequestPacketV4 {
     assertNotNull(decoded.getCurrentConnectionSlots());
     Map<String, Integer> decodedSlots = decoded.getCurrentConnectionSlots();
     assertEquals(3, decodedSlots.size());
-    // v4 wire drops slot counts -> decoded values are equal-weight 1s.
-    assertEquals(Integer.valueOf(1), decodedSlots.get("10.0.0.1"));
-    assertEquals(Integer.valueOf(1), decodedSlots.get("10.0.0.2"));
+    // Slot counts are preserved verbatim on the wire.
+    assertEquals(Integer.valueOf(7), decodedSlots.get("10.0.0.1"));
+    assertEquals(Integer.valueOf(3), decodedSlots.get("10.0.0.2"));
     assertEquals(Integer.valueOf(1), decodedSlots.get("10.0.0.3"));
 
     assertEquals(payload.readableBytes(), decoded.getDataLength());

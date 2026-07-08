@@ -63,6 +63,22 @@ public class SlotManager {
   private final long idleProducerTimeoutMs;
   private final long postEvictionCooldownMs;
 
+  /**
+   * Drain-latch <b>engage</b> threshold, in free-slot units: the smoothed
+   * free-capacity EMA must fall below this (capacity essentially exhausted)
+   * before the latch engages.
+   */
+  private static final double DRAIN_LATCH_ENGAGE_FREE_SLOTS = 1.0;
+
+  /**
+   * Divisor applied to {@code totalSlots} to derive the floor for the
+   * drain-latch <b>disengage</b> threshold ({@code totalSlots / 10.0}, i.e.
+   * 10% of capacity). The latch will not disengage until the broker recovers
+   * at least this much smoothed free capacity, even when the configured
+   * absolute threshold is lower.
+   */
+  private static final double DRAIN_LATCH_DISENGAGE_FLOOR_DIVISOR = 10.0;
+
   private final boolean drainLatchEnabled;
   private final double drainLatchEmaDecay;
   private final double drainLatchDisengageFreeSlots;
@@ -114,9 +130,9 @@ public class SlotManager {
    *       use {@code containsKey}, equivalent to the previous
    *       {@code Set.contains}.</li>
    *   <li>The values are the per-target slot ownership snapshot reported on
-   *       the most recent write. v5 producers report real slot counts; v4
-   *       producers (or pre-bootstrap) report {@code 1} for every entry
-   *       (equal weighting fallback). The eviction strategy reads these to
+   *       the most recent write. v4+ producers report real slot counts;
+   *       pre-bootstrap (or connection-set-only callers) report {@code 1} for
+   *       every entry (equal weighting). The eviction strategy reads these to
    *       choose consolidation targets where the producer already has
    *       substantial slot share (anti-ping-pong), with target free-slot
    *       count as a tiebreaker.</li>
@@ -195,7 +211,8 @@ public class SlotManager {
     double drainLatchWindowSec = config.getDrainLatchEmaWindowSeconds();
     this.drainLatchEmaDecay = exp(-tickIntervalSec / drainLatchWindowSec);
     this.drainLatchDisengageFreeSlots =
-        Math.max(config.getDrainLatchDisengageFreeSlots(), totalSlots / 10.0);
+        Math.max(config.getDrainLatchDisengageFreeSlots(),
+            totalSlots / DRAIN_LATCH_DISENGAGE_FLOOR_DIVISOR);
     this.maxSlotStep = config.getMaxSlotStep();
     this.emitPerPidSlotMetrics = config.isEmitPerPidSlotMetrics();
     // Start un-latched: a freshly started, empty broker has all slots free.
@@ -374,7 +391,7 @@ public class SlotManager {
             + String.format("%.2f", freeSlotsEma)
             + " >= disengageFreeSlots=" + drainLatchDisengageFreeSlots);
       }
-    } else if (freeSlotsEma < 1.0) {
+    } else if (freeSlotsEma < DRAIN_LATCH_ENGAGE_FREE_SLOTS) {
       drainLatched = true;
       logger.info("Drain latch engaged: freeSlotsEma="
           + String.format("%.2f", freeSlotsEma)
@@ -962,8 +979,8 @@ public class SlotManager {
 
   /**
    * Record which brokers a producer is currently connected to, treating
-   * every entry as equal weight. Convenience overload for v4 producers
-   * (which don't report per-target slot counts) and for tests.
+   * every entry as equal weight. Convenience overload for callers that only
+   * have the connection set (no per-target slot counts) and for tests.
    *
    * @param pid the producer identifier
    * @param connections the set of broker IPs this producer is connected to (may be empty)
@@ -1014,9 +1031,9 @@ public class SlotManager {
 
   /**
    * Record which brokers a producer is currently connected to, with
-   * per-target slot counts. Called on the write request hot path for v5
-   * producers; v4 producers go through the {@code Set<String>} overload
-   * above with equal-weight fallback.
+   * per-target slot counts. Called on the write request hot path for v4+
+   * producers; the {@code Set<String>} overload above is the equal-weight
+   * convenience path for callers that only have the connection set.
    * <p>
    * This map doubles as the <b>v4+ producer registry</b>: only producers
    * present here are eligible for eviction. v3 producers never call this
@@ -1083,10 +1100,10 @@ public class SlotManager {
    * Used by EvictionManager to pass to the eviction strategy.
    * <p>
    * Outer map: producer id to inner map.<br>
-   * Inner map: broker IP to producer's slot count on that broker. For v5
+   * Inner map: broker IP to producer's slot count on that broker. For v4+
    * producers these counts are the producer's reported slot ownership;
-   * for v4 producers every entry holds the equal-weight placeholder
-   * {@code 1}. Use {@code .keySet()} when only the connection set is
+   * connection-set-only callers store the equal-weight placeholder {@code 1}
+   * for every entry. Use {@code .keySet()} when only the connection set is
    * needed.
    *
    * @return unmodifiable map of producer IDs to their per-broker slot counts

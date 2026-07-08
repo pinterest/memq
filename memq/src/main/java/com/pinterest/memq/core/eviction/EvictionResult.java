@@ -15,6 +15,15 @@
  */
 package com.pinterest.memq.core.eviction;
 
+/**
+ * Immutable eviction directive: move {@code numSlotsToEvict} slot(s) of the
+ * producer identified by {@code pid} to the target broker.
+ * <p>
+ * {@code pid} is the producer id key used throughout the eviction path -- a
+ * UUID for v4+ producers (the only producers that are eviction candidates).
+ * {@code targetBrokerIp} is the target broker's gossip key (an IP in
+ * production); the field name is retained for wire/API compatibility.
+ */
 public class EvictionResult {
 
   private final String pid;

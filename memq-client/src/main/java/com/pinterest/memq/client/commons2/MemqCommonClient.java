@@ -67,6 +67,13 @@ public class MemqCommonClient implements Closeable {
   private static final Logger logger = LoggerFactory.getLogger(MemqCommonClient.class);
   private static final int MAX_SEND_RETRIES = 3;
 
+  /**
+   * Fallback broker port used when a port cannot be inferred from any known
+   * endpoint (see {@link #inferDefaultPort()}) and when parsing serverset
+   * entries that carry only an IP.
+   */
+  private static final int DEFAULT_BROKER_PORT = 9092;
+
   public static final String CONFIG_NUM_WRITE_ENDPOINTS = "numWriteEndpoints"; // number of endpoints for writes
 
   /**
@@ -760,7 +767,8 @@ public class MemqCommonClient implements Closeable {
     Gson gson = new Gson();
     List<String> lines = Files.readAllLines(new File(serversetFile).toPath());
     return lines.stream().map(l -> gson.fromJson(l, JsonObject.class)).filter(g -> g.size() > 0)
-        .map(g -> new Endpoint(InetSocketAddress.createUnresolved(g.get("ip").getAsString(), 9092),
+        .map(g -> new Endpoint(
+            InetSocketAddress.createUnresolved(g.get("ip").getAsString(), DEFAULT_BROKER_PORT),
             g.get("az").getAsString()))
         .collect(Collectors.toList());
   }
@@ -828,11 +836,31 @@ public class MemqCommonClient implements Closeable {
           + " v4Active(before)=" + v4Active);
     }
 
-    // EXPLICIT v4 detection: the broker self-declares its protocol version
-    // on every WriteResponsePacket it produces. We never infer v4 from slot
-    // counts (those are 0 until the producer accumulates enough traffic).
-    // Once flipped, v4Active is sticky for the lifetime of the client.
-    if (serverVersion >= 4) {
+    maybeActivateV4(writeResp, sourceAddress, serverVersion, remaining, n);
+
+    if (writeResp.hasEviction()) {
+      applyEviction(writeResp, sourceAddress, sourceIp, remaining);
+      return;
+    }
+
+    // Non-eviction response.
+    if (sourceIp == null) {
+      return;
+    }
+    applyNonEvictionSlotUpdate(sourceIp, remaining);
+  }
+
+  /**
+   * EXPLICIT v4 detection: the broker self-declares its protocol version on
+   * every WriteResponsePacket it produces. We never infer v4 from slot counts
+   * (those are 0 until the producer accumulates enough traffic). Once flipped,
+   * {@code v4Active} is sticky for the lifetime of the client. If we have seen
+   * enough responses without a v4 declaration, fire a one-shot "stuck on v3"
+   * warning so it can be triaged.
+   */
+  private void maybeActivateV4(WriteResponsePacket writeResp, InetSocketAddress sourceAddress,
+                               short serverVersion, int remaining, long n) {
+    if (serverVersion >= RequestType.V4) {
       if (!v4Active) {
         logger.info("v4 broker protocol detected; weighted endpoint selection now active."
             + " firstSignalSource=" + sourceAddress
@@ -859,61 +887,71 @@ public class MemqCommonClient implements Closeable {
           + " hasEviction=" + writeResp.hasEviction()
           + " numSlotsOwned=" + remaining);
     }
+  }
 
-    if (writeResp.hasEviction()) {
-      String targetIp = writeResp.getTargetBrokerIp();
-      int slotsToEvict = writeResp.getNumSlotsToEvict();
+  /**
+   * Eviction path of {@link #handleWriteResponse}: the broker is shedding this
+   * producer to {@code targetBrokerIp}. Apply the transfer to the
+   * source-of-truth slot map, arm the post-eviction routing boost on the target
+   * (and clear it on the source), reconcile the derived write endpoints, and
+   * log.
+   */
+  private void applyEviction(WriteResponsePacket writeResp, InetSocketAddress sourceAddress,
+                             String sourceIp, int remaining) {
+    String targetIp = writeResp.getTargetBrokerIp();
+    int slotsToEvict = writeResp.getNumSlotsToEvict();
 
-      // Apply the eviction to the source-of-truth slot map.
-      slotsOwned.merge(targetIp, slotsToEvict, Integer::sum);
-      if (sourceIp != null) {
-        if (remaining > 0) {
-          slotsOwned.put(sourceIp, remaining);
-        } else {
-          slotsOwned.remove(sourceIp);
-        }
+    // Apply the eviction to the source-of-truth slot map.
+    slotsOwned.merge(targetIp, slotsToEvict, Integer::sum);
+    if (sourceIp != null) {
+      if (remaining > 0) {
+        slotsOwned.put(sourceIp, remaining);
+      } else {
+        slotsOwned.remove(sourceIp);
       }
-
-      // Post-eviction routing boost.
-      // Arm the +1 routing-weight boost on the target so the producer
-      // over-routes there long enough for the target's broker-side EMA
-      // to decisively cross the next ceil(EMA/slotSize) boundary and
-      // acquire the slot for real (instead of the producer's optimistic
-      // increment getting silently overwritten by the target broker's
-      // stale numSlotsOwned on the next non-eviction response).
-      // Symmetric with the broker-side post-eviction acquisition cooldown.
-      // Clear any boost on the source -- it just gave a slot away, so we
-      // must not keep over-routing to it.
-      if (postEvictionRoutingBoostMs > 0 && targetIp != null) {
-        routingBoostUntilMs.put(targetIp,
-            System.currentTimeMillis() + postEvictionRoutingBoostMs);
-      }
-      if (sourceIp != null) {
-        routingBoostUntilMs.remove(sourceIp);
-      }
-
-      // Single reconciliation: derive writeEndpoints from slotsOwned (the source
-      // of truth) and rebuild the weighted map. The dropped/drained source falls
-      // out of writeEndpoints automatically; the target is added immediately.
-      reconcileWriteEndpoints();
-
-      logger.info("Eviction received: source=" + sourceAddress + " target=" + targetIp
-          + " slotsToEvict=" + slotsToEvict + " remaining=" + remaining
-          + " slotsOwned=" + slotsOwned);
-      return;
     }
 
-    // Non-eviction response.
-    if (sourceIp == null) {
-      return;
+    // Post-eviction routing boost.
+    // Arm the +1 routing-weight boost on the target so the producer
+    // over-routes there long enough for the target's broker-side EMA
+    // to decisively cross the next ceil(EMA/slotSize) boundary and
+    // acquire the slot for real (instead of the producer's optimistic
+    // increment getting silently overwritten by the target broker's
+    // stale numSlotsOwned on the next non-eviction response).
+    // Symmetric with the broker-side post-eviction acquisition cooldown.
+    // Clear any boost on the source -- it just gave a slot away, so we
+    // must not keep over-routing to it.
+    if (postEvictionRoutingBoostMs > 0 && targetIp != null) {
+      routingBoostUntilMs.put(targetIp,
+          System.currentTimeMillis() + postEvictionRoutingBoostMs);
+    }
+    if (sourceIp != null) {
+      routingBoostUntilMs.remove(sourceIp);
     }
 
+    // Single reconciliation: derive writeEndpoints from slotsOwned (the source
+    // of truth) and rebuild the weighted map. The dropped/drained source falls
+    // out of writeEndpoints automatically; the target is added immediately.
+    reconcileWriteEndpoints();
+
+    logger.info("Eviction received: source=" + sourceAddress + " target=" + targetIp
+        + " slotsToEvict=" + slotsToEvict + " remaining=" + remaining
+        + " slotsOwned=" + slotsOwned);
+  }
+
+  /**
+   * Non-eviction path of {@link #handleWriteResponse}: the broker reports this
+   * producer's current slot ownership. Before {@code v4Active}, only
+   * already-known brokers are refreshed so the weighted set is never grown --
+   * nor {@code writeEndpoints} derived -- from a still-empty slot map. Once
+   * {@code v4Active}, {@code slotsOwned} is the source of truth: the responding
+   * broker is tracked (seeded at a floor of 1 when it reports 0) and reconciled
+   * so it participates in weighted routing. The broker's eviction strategy is
+   * authoritative on connection-cap enforcement, so the client adds any broker
+   * it actually wrote to.
+   */
+  private void applyNonEvictionSlotUpdate(String sourceIp, int remaining) {
     if (!v4Active) {
-      // Legacy / pre-activation window: routing is governed by round-robin over
-      // writeEndpoints (managed by maybeRegisterWriteEndpoint). Only refresh
-      // slot data for brokers we already know so we never grow the weighted set
-      // -- and never derive writeEndpoints from the (still empty) slot map --
-      // before a v4 broker has been observed.
       if ((slotsOwned.containsKey(sourceIp) || writeEndpointsContains(sourceIp))
           && remaining > 0) {
         slotsOwned.put(sourceIp, remaining);
@@ -922,11 +960,6 @@ public class MemqCommonClient implements Closeable {
       return;
     }
 
-    // v4 non-eviction response: slotsOwned is the source of truth. The
-    // responding broker is one we wrote to, so track it (seeding at a floor of
-    // 1 when it reports 0) and reconcile so it participates in weighted
-    // routing. The broker's eviction strategy is authoritative on connection
-    // cap enforcement, so the client adds any broker it actually wrote to.
     boolean isKnown = slotsOwned.containsKey(sourceIp);
     boolean added = false;
     if (remaining > 0) {
@@ -1021,7 +1054,7 @@ public class MemqCommonClient implements Closeable {
     if (writes != null && !writes.isEmpty()) {
       return writes.get(0).getAddress().getPort();
     }
-    return 9092;
+    return DEFAULT_BROKER_PORT;
   }
 
   public String getProducerId() {
@@ -1030,15 +1063,13 @@ public class MemqCommonClient implements Closeable {
 
   /**
    * Snapshot of {@code slotsOwned} sent on every v4+ write request so the
-   * broker can register this producer's connection set and (on v5) its
-   * per-broker slot distribution.
+   * broker can register this producer's connection set and its per-broker slot
+   * distribution.
    * <p>
-   * The map's key set is the producer's connection set; the values are
-   * the producer's slot ownership snapshot per broker. On v5 the broker
-   * uses these counts to choose consolidation targets where the
-   * producer already has substantial slot share (anti-ping-pong) and to
-   * break ties in regular target selection. On v4 the values are
-   * dropped on the wire and the broker reconstructs equal-weight 1s.
+   * The map's key set is the producer's connection set; the values are the
+   * producer's slot ownership snapshot per broker. The broker uses these counts
+   * to choose consolidation targets where the producer already has substantial
+   * slot share (anti-ping-pong) and to break ties in regular target selection.
    *
    * @return a snapshot map of broker IP to slot count owned there.
    */

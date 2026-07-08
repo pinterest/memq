@@ -49,17 +49,27 @@ public enum RequestType {
   /**
    * Wire protocol version.
    * <p>
-   * <b>v5:</b> v4 fields plus a per-target slot-ownership map sent alongside
-   * the connection list in {@link WriteRequestPacket}. The broker uses the
-   * map to make connection-count consolidation decisions in
-   * {@code CurrConnectionsEvictionStrategy}. A v5 broker still accepts v4
-   * write requests (it interprets the missing slot info as equal weight),
-   * so brokers must be upgraded before producers.
+   * <b>v4+ (current):</b> write requests carry a producer-id and a connection
+   * list in which every entry carries the producer's per-target slot count;
+   * write responses carry the eviction directive fields. The broker uses the
+   * slot counts for connection-count consolidation decisions in
+   * {@code CurrConnectionsEvictionStrategy}, so brokers must be upgraded before
+   * producers. The connection-list format is identical for versions 4 and 5 --
+   * the earlier split (where v4 omitted the per-entry slot counts) has been
+   * consolidated, so a single {@code >= V4} gate governs the whole format.
    * <p>
-   * <b>v4:</b> producer-id and connection list added to write requests for
-   * eviction-aware routing.
+   * <b>v3 (legacy):</b> no producer-id or connection list; routing falls back
+   * to client-side round-robin.
    */
   public static final short PROTOCOL_VERSION = 5;
+
+  /**
+   * First protocol version that carries a producer-id and a connection list
+   * (with per-target slot counts) on write requests, and the eviction
+   * directive fields on write responses. This is the single modern wire
+   * format; anything below it is legacy v3.
+   */
+  public static final short V4 = 4;
 
   public static RequestType extractPacketType(ByteBuf inBuffer) throws IOException {
     int requestTypeCode = (int) inBuffer.readByte();

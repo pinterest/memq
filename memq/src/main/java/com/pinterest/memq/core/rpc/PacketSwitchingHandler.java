@@ -29,6 +29,7 @@ import com.codahale.metrics.Counter;
 import com.codahale.metrics.MetricRegistry;
 import com.pinterest.memq.commons.protocol.ReadRequestPacket;
 import com.pinterest.memq.commons.protocol.RequestPacket;
+import com.pinterest.memq.commons.protocol.RequestType;
 import com.pinterest.memq.commons.protocol.ResponseCodes;
 import com.pinterest.memq.commons.protocol.ResponsePacket;
 import com.pinterest.memq.commons.protocol.TopicMetadata;
@@ -186,7 +187,7 @@ public class PacketSwitchingHandler {
       // The presence of a v4+ producerId is itself the signal that this is a
       // v4+ producer (a unique client UUID). v3 clients send none, so we fall
       // back to the remote IP.
-      boolean hasExplicitProducerId = requestPacket.getProtocolVersion() >= 4
+      boolean hasExplicitProducerId = requestPacket.getProtocolVersion() >= RequestType.V4
           && writePacket.getProducerId() != null
           && !writePacket.getProducerId().isEmpty();
       String producerId = hasExplicitProducerId ? writePacket.getProducerId() : remoteIp;
@@ -201,11 +202,10 @@ public class PacketSwitchingHandler {
           // map is empty (bootstrap: producer hasn't received any slot
           // ownership info from any broker yet).
           //
-          // v5 producers report per-target slot counts; v4 producers carry
-          // only the connection set and the packet codec already populated
-          // the map with equal-weight 1s on decode. The eviction strategy
-          // treats equal-weight maps as ranking targets purely by free
-          // slots, identical to legacy behavior.
+          // Producers report their per-target slot counts in the connection
+          // set (populated by the packet codec on decode). When the map is
+          // all-equal-weight, the eviction strategy ranks those targets purely
+          // by free slots, identical to legacy behavior.
           Map<String, Integer> connectionSlots = writePacket.getCurrentConnectionSlots();
           sm.recordProducerConnections(producerId,
               connectionSlots == null ? Collections.<String, Integer>emptyMap() : connectionSlots);

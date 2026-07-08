@@ -33,7 +33,7 @@ import java.util.Set;
  * <b>Protocol version contract:</b> Implementations MUST only target v4+
  * producers for eviction, because v3 producers cannot interpret eviction
  * responses. The {@code producerConnections} map serves as the v4+ registry:
- * only producers that have sent a v4 or v5 write request will appear in it.
+ * only producers that have sent a v4+ write request will appear in it.
  * <p>
  * <b>Topic affinity contract:</b> Implementations MUST only evict a
  * producer to a broker that serves at least one of the producer's topics.
@@ -49,9 +49,8 @@ public interface EvictionStrategy {
    * @param peerStates gossip state from peer brokers (brokerId to GossipState)
    * @param producerConnections per-producer connection view: producer id to
    *        (broker IP to slot count). The key set of the inner map is the
-   *        connection set; the values are the producer's slot ownership
-   *        snapshot on each broker (v5 wire format) or equal-weight
-   *        {@code 1}s for legacy v4 producers.
+   *        connection set; the values are the producer's per-target slot
+   *        ownership snapshot on each broker.
    * @param topicToBrokerIps topic to set of broker IPs that serve writes for it
    * @return an EvictionResult if eviction is warranted, or null if no eviction
    */

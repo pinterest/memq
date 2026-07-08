@@ -45,7 +45,7 @@ public class WriteResponsePacket implements Packet {
 
   @Override
   public void readFields(ByteBuf buf, short protocolVersion) {
-    if (protocolVersion >= 4) {
+    if (protocolVersion >= RequestType.V4) {
       targetBrokerIp = ProtocolUtils.readStringWithTwoByteEncoding(buf);
       if (targetBrokerIp != null && targetBrokerIp.isEmpty()) {
         targetBrokerIp = null;
@@ -63,7 +63,7 @@ public class WriteResponsePacket implements Packet {
 
   @Override
   public void write(ByteBuf buf, short protocolVersion) {
-    if (protocolVersion >= 4) {
+    if (protocolVersion >= RequestType.V4) {
       ProtocolUtils.writeStringWithTwoByteEncoding(buf, targetBrokerIp);
       buf.writeInt(numSlotsToEvict);
       buf.writeInt(numSlotsOwned);
@@ -73,7 +73,7 @@ public class WriteResponsePacket implements Packet {
 
   @Override
   public int getSize(short protocolVersion) {
-    if (protocolVersion >= 4) {
+    if (protocolVersion >= RequestType.V4) {
       return ProtocolUtils.getStringSerializedSizeWithTwoByteEncoding(targetBrokerIp)
           + Integer.BYTES + Integer.BYTES + Short.BYTES;
     }

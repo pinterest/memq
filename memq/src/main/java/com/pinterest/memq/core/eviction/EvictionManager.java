@@ -35,8 +35,10 @@ import java.util.logging.Logger;
 
 /**
  * Periodically runs an {@link EvictionStrategy} and stores at most one
- * pending {@link EvictionResult} per producer IP. The response path
- * atomically polls and removes pending evictions via {@link #pollEviction}.
+ * pending {@link EvictionResult} per producer id (a UUID for v4+ producers;
+ * {@code producerConnections} and thus every {@link EvictionResult#getPid()}
+ * are populated only from v4+ write requests). The response path atomically
+ * polls and removes pending evictions via {@link #pollEviction}.
  */
 public class EvictionManager {
 
@@ -203,15 +205,15 @@ public class EvictionManager {
   /**
    * Atomically retrieve and remove a pending eviction for the given producer.
    *
-   * @param producerIp the producer identifier (UUID for v4, IP for v3)
+   * @param pid the producer id key (a UUID for v4+ producers)
    * @return the pending EvictionResult, or null if none exists
    */
-  public EvictionResult pollEviction(String producerIp) {
-    return pendingEvictions.remove(producerIp);
+  public EvictionResult pollEviction(String pid) {
+    return pendingEvictions.remove(pid);
   }
 
-  public EvictionResult peekEviction(String producerIp) {
-    return pendingEvictions.get(producerIp);
+  public EvictionResult peekEviction(String pid) {
+    return pendingEvictions.get(pid);
   }
 
   public int getPendingCount() {
