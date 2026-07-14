@@ -16,6 +16,8 @@
 package com.pinterest.memq.core.processing.bucketing;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -188,7 +190,7 @@ public class TestBucketingTopicProcessor {
         WriteRequestPacket payload = new WriteRequestPacket(true, "test".getBytes(), false, 0, buf);
         RequestPacket packet = new RequestPacket(RequestType.PROTOCOL_VERSION,
             ThreadLocalRandom.current().nextLong(), RequestType.WRITE, payload);
-        processor.write(packet, payload, getTestContext());
+        processor.write(packet, payload, getTestContext(), null);
         bytesWritten += bytes.length;
         Thread.sleep(500);
       }
@@ -266,7 +268,7 @@ public class TestBucketingTopicProcessor {
         RequestPacket packet = new RequestPacket(RequestType.PROTOCOL_VERSION,
             ThreadLocalRandom.current().nextLong(), RequestType.WRITE, payload);
 
-        processor.write(packet, payload, getTestContext());
+        processor.write(packet, payload, getTestContext(), null);
         bytesWritten += payloadBytes.readableBytes();
         Thread.sleep(200);
       }
@@ -334,7 +336,7 @@ public class TestBucketingTopicProcessor {
         WriteRequestPacket payload = new WriteRequestPacket(true, "test".getBytes(), false, 0, buf);
         RequestPacket packet = new RequestPacket(RequestType.PROTOCOL_VERSION,
             ThreadLocalRandom.current().nextLong(), RequestType.WRITE, payload);
-        processor.write(packet, payload, getTestContext());
+        processor.write(packet, payload, getTestContext(), null);
         bytesWritten += bytes.length;
       }
       processor.forceDispatch();
@@ -407,7 +409,7 @@ public class TestBucketingTopicProcessor {
             payloadBytes);
         RequestPacket packet = new RequestPacket(RequestType.PROTOCOL_VERSION,
             ThreadLocalRandom.current().nextLong(), RequestType.WRITE, payload);
-        processor.write(packet, payload, getTestContext());
+        processor.write(packet, payload, getTestContext(), null);
         bytesWritten += payloadBytes.readableBytes();
         Thread.sleep(500);
       }
@@ -421,6 +423,108 @@ public class TestBucketingTopicProcessor {
         + registry.counter("tp.message.invalid.header.exception").getCount();
     assertEquals(20L, invalidCount);
     assertEquals(bytesWritten, totalBytes.get());
+  }
+
+  /**
+   * Regression test for the {@code disableAcks=true} + v4 producer code path.
+   * <p>
+   * Historically, when a producer set {@code disableAcks=true} (the common
+   * Singer/high-throughput configuration), {@link BucketingTopicProcessor#write}
+   * short-circuited with {@code new WriteResponsePacket()} — an empty packet.
+   * This silently broke v4 routing on the producer because the producer relies
+   * on the response carrying its current slot count (and any pending eviction
+   * directive) to flip {@code v4Active=true} and switch to weighted endpoint
+   * selection. Without this, the {@code "v4 broker protocol detected"} client
+   * log never fired and the producer stayed on the legacy v3 path forever.
+   * <p>
+   * This test pins the fix: when {@code disableAcks=true}, a v4 write must
+   * still receive a {@link WriteResponsePacket} populated with the producer's
+   * current slot ownership.
+   */
+  @Test
+  public void testDisableAcksV4ResponseIncludesSlotInfo() throws Exception {
+    final String v4ProducerId = UUID.randomUUID().toString();
+
+    MetricRegistry registry = new MetricRegistry();
+    TopicConfig topicConfig = new TopicConfig();
+    topicConfig.setTopic("test");
+    topicConfig.setBatchMilliSeconds(100);
+    topicConfig.setBatchSizeMB(10);
+    topicConfig.setBufferSize(1024 * 1024);
+    topicConfig.setRingBufferSize(100);
+    StorageHandler outputHandler = new StorageHandler() {
+      @Override
+      public void writeOutput(int sizeInBytes, int checksum, List<Message> messages) {
+      }
+
+      @Override
+      public String getReadUrl() {
+        return null;
+      }
+    };
+    ScheduledExecutorService timerService = Executors.newScheduledThreadPool(1,
+        new DaemonThreadFactory());
+    BucketingTopicProcessor processor = new BucketingTopicProcessor(registry, topicConfig,
+        outputHandler, timerService, null);
+
+    com.pinterest.memq.core.config.SlotAccountingConfig slotConfig =
+        new com.pinterest.memq.core.config.SlotAccountingConfig();
+    slotConfig.setEnabled(true);
+    slotConfig.setSlotSizeMbps(10.0);
+    slotConfig.setSlotOverhead(0.0);
+    slotConfig.setAcquireThresholdSeconds(0.0);
+    slotConfig.setReleaseThresholdSeconds(0.0);
+    slotConfig.setCooldownSeconds(0.0);
+    slotConfig.setEmaWindowSeconds(0.001);
+    slotConfig.setTickIntervalMs(1000);
+    com.pinterest.memq.core.slot.SlotManager slotManager =
+        new com.pinterest.memq.core.slot.SlotManager(slotConfig, 100);
+
+    slotManager.recordWrite(v4ProducerId, "test", 50 * 1024 * 1024);
+    java.lang.reflect.Method tickMethod =
+        com.pinterest.memq.core.slot.SlotManager.class.getDeclaredMethod("tick");
+    tickMethod.setAccessible(true);
+    tickMethod.invoke(slotManager);
+    int expectedSlots = slotManager.getTotalProducerSlots(v4ProducerId);
+    assertTrue("test setup: producer must hold > 0 slots after one tick",
+        expectedSlots > 0);
+
+    processor.getBatchManager().setSlotManager(slotManager);
+
+    EmbeddedChannel ch = new EmbeddedChannel();
+    ch.pipeline().addLast(new ChannelDuplexHandler());
+    ChannelHandlerContext ctx = ch.pipeline().firstContext();
+
+    byte[] payloadBytes = "v4-disable-acks".getBytes();
+    ByteBuf buf = Unpooled.wrappedBuffer(payloadBytes);
+    WriteRequestPacket payload = new WriteRequestPacket(
+        true, "test".getBytes(), false, 0, buf);
+    RequestPacket packet = new RequestPacket(RequestType.PROTOCOL_VERSION,
+        ThreadLocalRandom.current().nextLong(), RequestType.WRITE, payload);
+
+    try {
+      processor.write(packet, payload, ctx, v4ProducerId);
+    } finally {
+      processor.stopAndAwait();
+    }
+
+    Object outbound = ch.readOutbound();
+    assertNotNull("v4 disableAcks=true write must produce an outbound response", outbound);
+    assertTrue("expected ResponsePacket, got " + outbound.getClass(),
+        outbound instanceof com.pinterest.memq.commons.protocol.ResponsePacket);
+    com.pinterest.memq.commons.protocol.ResponsePacket response =
+        (com.pinterest.memq.commons.protocol.ResponsePacket) outbound;
+    assertTrue("expected WriteResponsePacket payload, got "
+            + response.getPacket().getClass(),
+        response.getPacket() instanceof com.pinterest.memq.commons.protocol.WriteResponsePacket);
+    com.pinterest.memq.commons.protocol.WriteResponsePacket writeResp =
+        (com.pinterest.memq.commons.protocol.WriteResponsePacket) response.getPacket();
+
+    // The bug: this used to be 0 because the disableAcks branch returned
+    // `new WriteResponsePacket()`. v4Active on the producer would never flip.
+    assertEquals("v4 producer with disableAcks=true must still receive its "
+            + "slot count so v4Active flips on the client",
+        expectedSlots, writeResp.getNumSlotsOwned());
   }
 
   private ChannelHandlerContext getTestContext() {

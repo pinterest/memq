@@ -74,6 +74,12 @@ public class MemqConfig extends Configuration {
   
   private ClusteringConfig clusteringConfig = null;
   
+  private GossipConfig gossipConfig = null;
+  
+  private SlotAccountingConfig slotAccountingConfig = null;
+
+  private EvictionConfig evictionConfig = null;
+  
   private String topicCacheFile = "/tmp/.memq_topic_cache";
 
   private Map<String, Object> additionalConfigs = new HashMap<>();
@@ -268,6 +274,30 @@ public class MemqConfig extends Configuration {
     this.brokerType = brokerType;
   }
 
+  public GossipConfig getGossipConfig() {
+    return gossipConfig;
+  }
+
+  public void setGossipConfig(GossipConfig gossipConfig) {
+    this.gossipConfig = gossipConfig;
+  }
+
+  public SlotAccountingConfig getSlotAccountingConfig() {
+    return slotAccountingConfig;
+  }
+
+  public void setSlotAccountingConfig(SlotAccountingConfig slotAccountingConfig) {
+    this.slotAccountingConfig = slotAccountingConfig;
+  }
+
+  public EvictionConfig getEvictionConfig() {
+    return evictionConfig;
+  }
+
+  public void setEvictionConfig(EvictionConfig evictionConfig) {
+    this.evictionConfig = evictionConfig;
+  }
+
   public Map<String, Object> getAdditionalConfigs() {
     return additionalConfigs;
   }
@@ -277,7 +307,7 @@ public class MemqConfig extends Configuration {
   }
 
   /**
-   * @param serverConnectionIdleTimeoutSec
+   * @param serverConnectionIdleTimeoutSec the idle timeout in seconds before a server connection is closed
    */
   public void setServerConnectionIdleTimeoutSec(int serverConnectionIdleTimeoutSec) {
     this.serverConnectionIdleTimeoutSec = serverConnectionIdleTimeoutSec;
@@ -291,7 +321,7 @@ public class MemqConfig extends Configuration {
   }
 
   /**
-   * @param serverConnectionIdleTimeoutDeltaSec
+   * @param serverConnectionIdleTimeoutDeltaSec the random jitter range added to the idle timeout
    */
   public void setServerConnectionIdleTimeoutDeltaSec(int serverConnectionIdleTimeoutDeltaSec) {
       this.serverConnectionIdleTimeoutDeltaSec = serverConnectionIdleTimeoutDeltaSec;

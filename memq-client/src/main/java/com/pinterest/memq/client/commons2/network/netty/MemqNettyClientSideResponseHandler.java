@@ -22,6 +22,8 @@ import com.pinterest.memq.commons.protocol.ResponsePacket;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+
+import java.net.InetSocketAddress;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,6 +42,7 @@ public class MemqNettyClientSideResponseHandler extends ChannelInboundHandlerAda
     try {
       ResponsePacket responsePacket = new ResponsePacket();
       responsePacket.readFields(buf, RequestType.PROTOCOL_VERSION);
+      responsePacket.setSourceAddress((InetSocketAddress) ctx.channel().remoteAddress());
       logger.debug("Response received " + responsePacket);
       if (responsePacket.getProtocolVersion() != RequestType.PROTOCOL_VERSION) {
         // might not be able to handle this request.

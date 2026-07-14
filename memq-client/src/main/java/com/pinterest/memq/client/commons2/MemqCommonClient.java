@@ -28,10 +28,12 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -40,6 +42,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -57,13 +60,48 @@ import com.pinterest.memq.commons.protocol.ResponsePacket;
 import com.pinterest.memq.commons.protocol.TopicMetadata;
 import com.pinterest.memq.commons.protocol.TopicMetadataRequestPacket;
 import com.pinterest.memq.commons.protocol.TopicMetadataResponsePacket;
+import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 
 public class MemqCommonClient implements Closeable {
 
   private static final Logger logger = LoggerFactory.getLogger(MemqCommonClient.class);
   private static final int MAX_SEND_RETRIES = 3;
 
+  /**
+   * Fallback broker port used when a port cannot be inferred from any known
+   * endpoint (see {@link #inferDefaultPort()}) and when parsing serverset
+   * entries that carry only an IP.
+   */
+  private static final int DEFAULT_BROKER_PORT = 9092;
+
   public static final String CONFIG_NUM_WRITE_ENDPOINTS = "numWriteEndpoints"; // number of endpoints for writes
+
+  /**
+   * Producer-side post-eviction routing boost: for this many milliseconds
+   * after an eviction directive named broker {@code T} as the target, the
+   * weighted endpoint map gives {@code T} an extra {@code +1} slot of
+   * routing weight on top of its acknowledged {@code slotsOwned} count.
+   * <p>
+   * The purpose is to push {@code T}'s broker-side EMA decisively past the
+   * next {@code ceil(EMA / slotSize)} boundary so its {@code SlotManager}
+   * actually <i>acquires</i> the slot the eviction transferred. Without
+   * the boost, the broker's EMA hovers exactly at the boundary and the
+   * acquisition is metastable -- the broker may never cross threshold and
+   * the producer's optimistic increment is then overwritten by the
+   * broker's stale {@code numSlotsOwned} on the next response, producing
+   * the eviction "flap" we see in production.
+   * <p>
+   * Symmetric in design with the broker-side post-eviction acquisition
+   * cooldown ({@code SlotAccountingConfig.postEvictionCooldownSeconds}):
+   * the broker holds the released slot empty for ~60s while the producer
+   * over-routes to the eviction target for ~60s. Within that window
+   * traffic genuinely shifts and the target broker acquires.
+   * <p>
+   * Set to {@code 0} to disable.
+   */
+  public static final String CONFIG_POST_EVICTION_ROUTING_BOOST_MS =
+      "postEvictionRoutingBoostMs";
+  public static final long DEFAULT_POST_EVICTION_ROUTING_BOOST_MS = 60_000L;
 
   private final NetworkClient networkClient;
   private long connectTimeout = 500;
@@ -75,6 +113,40 @@ public class MemqCommonClient implements Closeable {
   private Map<Endpoint, Integer> failureCounts;
   private final AtomicInteger writeRotateIdx = new AtomicInteger(0);
   private final AtomicInteger localityRotateIdx = new AtomicInteger(0);
+  private volatile TreeMap<Double, Endpoint> weightedEndpointMap;
+  private final String producerId = java.util.UUID.randomUUID().toString();
+  private final ConcurrentHashMap<String, Integer> slotsOwned = new ConcurrentHashMap<>();
+  /**
+   * Per-broker wall-clock millis until which {@link #rebuildWeightedMap}
+   * adds {@code +1} to the broker's routing weight. Armed when the broker
+   * is the target of an eviction directive; cleared when the broker
+   * becomes the source of one (it just gave a slot away -- don't keep
+   * over-routing to it). Lazily evaluated against {@code System
+   * .currentTimeMillis()} -- entries past their TTL behave like zero.
+   * See {@link #CONFIG_POST_EVICTION_ROUTING_BOOST_MS}.
+   */
+  private final ConcurrentHashMap<String, Long> routingBoostUntilMs =
+      new ConcurrentHashMap<>();
+  private long postEvictionRoutingBoostMs = DEFAULT_POST_EVICTION_ROUTING_BOOST_MS;
+  // Sticky: flips to true the first time we observe a v4-only signal from any
+  // broker (eviction directive or non-zero slot ownership). Once true, the
+  // legacy numWriteEndpoints gates become no-ops and weighted selection
+  // governs routing. Stays false forever when talking to v3 brokers, which
+  // keeps the legacy round-robin behavior fully intact for them.
+  private volatile boolean v4Active = false;
+
+  // State-change snapshot logger: only logs when the weight distribution
+  // signature actually changes. No time-based throttling — quiet on steady
+  // state, immediately visible on any change.
+  private volatile String lastLoggedWeightSignature = "";
+
+  // Diagnostics: counts every WriteResponsePacket processed. Used to log the
+  // first few responses verbatim (so it's obvious whether the broker is
+  // sending v4 fields), and to fire a one-shot warning if responses are
+  // flowing but v4Active never flipped (legacy v3 routing stuck on).
+  private final AtomicLong writeResponseCount = new AtomicLong();
+  private static final int LOG_FIRST_N_RESPONSES = 3;
+  private volatile boolean stuckOnV3Warned = false;
 
   protected MemqCommonClient(SSLConfig sslConfig, Properties networkProperties) {
     if (networkProperties != null) {
@@ -84,6 +156,10 @@ public class MemqCommonClient implements Closeable {
       }
       if (networkProperties.containsKey(CONFIG_NUM_WRITE_ENDPOINTS)) {
         this.numWriteEndpoints = Math.max(1, Integer.parseInt(networkProperties.getProperty(CONFIG_NUM_WRITE_ENDPOINTS)));
+      }
+      if (networkProperties.containsKey(CONFIG_POST_EVICTION_ROUTING_BOOST_MS)) {
+        this.postEvictionRoutingBoostMs = Math.max(0L, Long.parseLong(
+            networkProperties.getProperty(CONFIG_POST_EVICTION_ROUTING_BOOST_MS)));
       }
     }
     writeEndpoints = Collections.emptyList();
@@ -98,6 +174,11 @@ public class MemqCommonClient implements Closeable {
 
   public void initialize(List<Endpoint> endpoints) throws Exception {
     resetEndpoints(endpoints);
+    logger.info("MemqCommonClient bootstrap: producerId=" + producerId
+        + " locality=" + locality
+        + " numWriteEndpoints=" + numWriteEndpoints
+        + " localityEndpoints=" + localityEndpoints.size()
+        + " (v4Active=" + v4Active + " until first v4 broker response)");
   }
 
   public void resetEndpoints(List<Endpoint> endpoints) throws Exception {
@@ -261,6 +342,7 @@ public class MemqCommonClient implements Closeable {
     }
     TopicMetadataResponsePacket resp = ((TopicMetadataResponsePacket) responsePacket.getPacket());
     writeEndpoints = Collections.emptyList();
+    rebuildWeightedMap();
     return resp.getMetadata();
   }
 
@@ -305,6 +387,93 @@ public class MemqCommonClient implements Closeable {
     validateEndpoints();
   }
 
+  /**
+   * Surgically drop a single broker from every per-broker structure on this
+   * client and renormalize routing over the survivors. Intended for the
+   * {@code REDIRECT} path: a broker that no longer serves the producer's
+   * topic is identified by the source address of its response packet, and
+   * the client snips it out without the metadata refetch /
+   * {@link com.pinterest.memq.client.commons2.network.NetworkClient#reset()}
+   * heaviness of {@link #reconnect(String, boolean)}.
+   * <p>
+   * State affected (all keyed by IP / host string of {@code addr}):
+   * <ul>
+   *   <li>{@link #slotsOwned} — drops the entry; survivor weights are
+   *       preserved untouched.</li>
+   *   <li>{@link #routingBoostUntilMs} — drops the post-eviction boost;
+   *       irrelevant once the broker is gone.</li>
+   *   <li>{@link #failureCounts} — drops any deprioritization record.</li>
+   *   <li>{@link #writeEndpoints} — filtered.</li>
+   *   <li>{@link #localityEndpoints} — filtered.</li>
+   *   <li>{@link com.pinterest.memq.client.commons2.network.NetworkClient}
+   *       channel pool — {@code closeChannel(addr)} releases the connection
+   *       asynchronously.</li>
+   *   <li>{@link #weightedEndpointMap} — rebuilt from the post-removal
+   *       {@code writeEndpoints} and {@code slotsOwned}.</li>
+   * </ul>
+   * <p>
+   * Throws <i>without mutating any state</i> if the removal would leave
+   * {@link #localityEndpoints} empty. This pre-check is essential: the
+   * caller's fallback path is to invoke {@link #reconnect(String, boolean)},
+   * which itself needs at least one live endpoint in {@code localityEndpoints}
+   * to send the metadata request. If we mutated first then threw, the
+   * fallback would fail with "Client not initialized yet" because
+   * {@link #sendRequestPacketAndReturnResponseFuture} short-circuits on an
+   * empty {@code localityEndpoints}. By keeping state intact on the throw,
+   * the fallback reconnect can still reach the dying broker for metadata
+   * (which may yield a fresh broker set the dying broker still knows about).
+   * <p>
+   * {@code synchronized} matches {@link #reconnect(String, boolean)} so
+   * mutations to the endpoint lists and the weighted map are atomic with
+   * respect to other top-level routing-state mutations.
+   */
+  public synchronized void removeBroker(InetSocketAddress addr) throws Exception {
+    if (addr == null) {
+      return;
+    }
+    String ip = addr.getHostString();
+
+    // Pre-check: refuse to empty localityEndpoints. State stays untouched so
+    // the caller can fall back to reconnect() which still has the dying
+    // broker available for the metadata round-trip.
+    long localitySurvivors = localityEndpoints.stream()
+        .filter(e -> !e.getAddress().getHostString().equals(ip))
+        .count();
+    if (localitySurvivors == 0) {
+      throw new Exception("No endpoints available after removing " + ip);
+    }
+
+    slotsOwned.remove(ip);
+    routingBoostUntilMs.remove(ip);
+    failureCounts.keySet().removeIf(
+        e -> e.getAddress().getHostString().equals(ip));
+
+    List<Endpoint> currentWrites = this.writeEndpoints;
+    List<Endpoint> newWrites = new ArrayList<>(currentWrites.size());
+    for (Endpoint e : currentWrites) {
+      if (!e.getAddress().getHostString().equals(ip)) {
+        newWrites.add(e);
+      }
+    }
+    this.writeEndpoints = Collections.unmodifiableList(newWrites);
+
+    List<Endpoint> currentLocals = this.localityEndpoints;
+    List<Endpoint> newLocals = new ArrayList<>(currentLocals.size());
+    for (Endpoint e : currentLocals) {
+      if (!e.getAddress().getHostString().equals(ip)) {
+        newLocals.add(e);
+      }
+    }
+    this.localityEndpoints = Collections.unmodifiableList(newLocals);
+
+    networkClient.closeChannel(addr);
+    rebuildWeightedMap();
+    logger.info("Surgically removed broker " + ip
+        + " from routing state (writeEndpoints=" + writeEndpoints.size()
+        + ", localityEndpoints=" + localityEndpoints.size()
+        + ", slotsOwned=" + slotsOwned.size() + ")");
+  }
+
   protected List<Endpoint> randomizedEndpoints(List<Endpoint> servers) {
     List<Endpoint> shuffle = new ArrayList<>(servers);
     Collections.shuffle(shuffle);
@@ -342,13 +511,18 @@ public class MemqCommonClient implements Closeable {
    * @return the endpoints to try
    */
   protected List<Endpoint> getEndpointsToTry() {
-    // Snapshot current lists to avoid races and in-place mutation
+    // Weighted path (v4 with slot data) — entirely separate from legacy
+    TreeMap<Double, Endpoint> wm = this.weightedEndpointMap;
+    if (wm != null && !wm.isEmpty()) {
+      return selectWeightedEndpoint(wm);
+    }
+
+    // Legacy round-robin path (v3 / no slot data)
     List<Endpoint> writes = this.writeEndpoints;
     List<Endpoint> locals = this.localityEndpoints;
     List<Endpoint> endpointsToTry = new ArrayList<>(writes.size() + locals.size());
 
     if (writes.size() == numWriteEndpoints) {
-      // If the set of writeEndpoints is full, rotate the writeEndpoints by 1 and add the localityEndpoints that are not in the set of writeEndpoints to the end of the list
       int start = Math.floorMod(writeRotateIdx.getAndIncrement(), Math.max(1, writes.size()));
       for (int i = 0; i < writes.size(); i++) {
         endpointsToTry.add(writes.get((start + i) % writes.size()));
@@ -359,7 +533,6 @@ public class MemqCommonClient implements Closeable {
         }
       }
     } else {
-      // If the set of writeEndpoints is not full, rotate the localityEndpoints by 1
       int start = Math.floorMod(localityRotateIdx.getAndIncrement(), Math.max(1, locals.size()));
       for (int i = 0; i < locals.size(); i++) {
         endpointsToTry.add(locals.get((start + i) % locals.size()));
@@ -370,23 +543,145 @@ public class MemqCommonClient implements Closeable {
   }
 
   /**
-   * The provided endpoint had just succeeded, so register the endpoint as a write endpoint if it is not already in the set of write endpoints and if the set of write endpoints is not full.
-   * 
+   * Probabilistic endpoint selection using normalized cumulative weights (0.0 to 1.0).
+   * O(log n) lookup via TreeMap.higherEntry, then appends remaining endpoints as fallbacks.
+   */
+  private List<Endpoint> selectWeightedEndpoint(TreeMap<Double, Endpoint> wm) {
+    List<Endpoint> locals = this.localityEndpoints;
+    List<Endpoint> writes = this.writeEndpoints;
+
+    double rand = ThreadLocalRandom.current().nextDouble();
+    Endpoint chosen = wm.higherEntry(rand).getValue();
+
+    List<Endpoint> result = new ArrayList<>(writes.size() + locals.size());
+    result.add(chosen);
+    for (Endpoint ep : wm.values()) {
+      if (!ep.equals(chosen)) {
+        result.add(ep);
+      }
+    }
+    for (Endpoint ep : locals) {
+      if (!writes.contains(ep)) {
+        result.add(ep);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Rebuild the normalized weight map from slotsOwned + writeEndpoints.
+   * Keys are cumulative weights normalized to [0.0, 1.0], so the last key is always 1.0.
+   * Called whenever either data source changes. The map is set to null when
+   * weighted selection is not applicable (no slot data or no write endpoints).
+   * <p>
+   * Note: this is not gated on {@code numWriteEndpoints}. As soon as we have
+   * any slot data (i.e. v4 broker), weighted selection takes over so the
+   * legacy fan-out width knob no longer matters. v3 brokers never populate
+   * {@code slotsOwned}, so the legacy round-robin path keeps running for them.
+   */
+  void rebuildWeightedMap() {
+    List<Endpoint> writes = this.writeEndpoints;
+    if (slotsOwned.isEmpty() || writes.isEmpty()) {
+      this.weightedEndpointMap = null;
+      return;
+    }
+    long now = System.currentTimeMillis();
+    int totalSlots = 0;
+    for (Endpoint ep : writes) {
+      totalSlots += effectiveWeight(ep.getAddress().getHostString(), now);
+    }
+    TreeMap<Double, Endpoint> map = new TreeMap<>();
+    double cumulative = 0;
+    for (Endpoint ep : writes) {
+      cumulative += (double) effectiveWeight(ep.getAddress().getHostString(), now) / totalSlots;
+      map.put(cumulative, ep);
+    }
+    this.weightedEndpointMap = map;
+    maybeLogWeightSnapshot(writes, totalSlots, now);
+  }
+
+  /**
+   * Per-broker routing weight: the broker's acknowledged slot count (with the
+   * legacy floor of 1), plus the {@code +1} post-eviction boost while the
+   * broker is an eviction target.
+   * <p>
+   * Visible for test.
+   */
+  int effectiveWeight(String ip, long now) {
+    int base = Math.max(slotsOwned.getOrDefault(ip, 1), 1);
+    if (isRoutingBoostActive(ip, now)) {
+      return base + 1;
+    }
+    return base;
+  }
+
+  private boolean isRoutingBoostActive(String ip, long now) {
+    Long until = routingBoostUntilMs.get(ip);
+    return until != null && until > now;
+  }
+
+  /**
+   * Log the current write-endpoint weight distribution, but only when the
+   * signature has changed since the last log. Cheap to call on every response;
+   * stays silent on steady state.
+   */
+  private void maybeLogWeightSnapshot(List<Endpoint> writes, int totalSlots, long now) {
+    StringBuilder sig = new StringBuilder();
+    StringBuilder pretty = new StringBuilder();
+    for (Endpoint ep : writes) {
+      String ip = ep.getAddress().getHostString();
+      int slots = Math.max(slotsOwned.getOrDefault(ip, 1), 1);
+      boolean boosted = isRoutingBoostActive(ip, now);
+      int weight = effectiveWeight(ip, now);
+      int pct = (int) Math.round(100.0 * weight / totalSlots);
+      sig.append(ip).append('=').append(weight).append(',');
+      if (pretty.length() > 0) pretty.append(", ");
+      pretty.append(ip).append('(').append(slots).append(" slots");
+      if (boosted) pretty.append("+boost");
+      pretty.append(", ").append(pct).append("%)");
+    }
+    String signature = sig.toString();
+    if (signature.equals(lastLoggedWeightSignature)) {
+      return;
+    }
+    lastLoggedWeightSignature = signature;
+    logger.info("Broker weights changed (writeEndpoints=" + writes.size()
+        + ", totalSlots=" + totalSlots
+        + ", trackedConnections=" + slotsOwned.size()
+        + "): " + pretty);
+  }
+
+  /**
+   * The provided endpoint had just succeeded, so register the endpoint as a
+   * write endpoint if it is not already in the set of write endpoints and the
+   * set of write endpoints is not full.
+   * <p>
    * The endpoint's failure count is reset to 0 since it had just succeeded.
-   * 
-   * If the set of write endpoints is full, nothing is done.
-   * 
+   * <p>
+   * <b>v3 (legacy) brokers</b>: the writeEndpoints set is grown until it
+   * reaches {@code numWriteEndpoints} (round-robin fan-out width).
+   * <p>
+   * <b>v4 brokers</b>: once {@code v4Active} flips, {@link #writeEndpoints} is a
+   * pure projection of {@link #slotsOwned} (the source of truth), rebuilt by
+   * {@link #reconcileWriteEndpoints()}. Per-producer connection limits are
+   * enforced authoritatively by the broker's eviction strategy
+   * ({@code EvictionConfig.maxConnectionsPerProducer}), so the client does not
+   * apply its own cap. This method then only ensures locality discovery and
+   * clears failure counts for the succeeding endpoint.
+   *
    * @param endpoint
    * @param topic
    */
   protected void maybeRegisterWriteEndpoint(Endpoint endpoint, String topic) {
     failureCounts.remove(endpoint);
     List<Endpoint> currentWrites = this.writeEndpoints;
-    if (currentWrites.size() < numWriteEndpoints && !currentWrites.contains(endpoint)) {
+    if (!v4Active && currentWrites.size() < numWriteEndpoints
+        && !currentWrites.contains(endpoint)) {
       logger.info("Registering write endpoint: " + endpoint + " for topic: " + topic);
       List<Endpoint> newWrites = new ArrayList<>(currentWrites);
       newWrites.add(endpoint);
       this.writeEndpoints = Collections.unmodifiableList(newWrites);
+      rebuildWeightedMap();
     }
     List<Endpoint> currentLocals = this.localityEndpoints;
     if (!currentLocals.contains(endpoint)) {
@@ -416,8 +711,6 @@ public class MemqCommonClient implements Closeable {
 
       List<Endpoint> newLocals = new ArrayList<>(this.localityEndpoints);
       newLocals.remove(deadEndpoint);
-      List<Endpoint> newWrites = new ArrayList<>(this.writeEndpoints);
-      newWrites.remove(deadEndpoint);
 
       if (failures >= 2) {
         logger.warn("Dead endpoint " + deadEndpoint + " has failed 2 times, removing from future consideration");
@@ -426,9 +719,25 @@ public class MemqCommonClient implements Closeable {
         logger.warn("Dead endpoint " + deadEndpoint + " has failed " + failures + " times, deprioritizing it");
         newLocals.add(deadEndpoint); // move to end
       }
-
       this.localityEndpoints = Collections.unmodifiableList(newLocals);
-      this.writeEndpoints = Collections.unmodifiableList(newWrites);
+
+      if (v4Active) {
+        // slotsOwned is the source of truth: drop the dead broker from it (and
+        // clear its routing boost), then re-derive writeEndpoints. Removing it
+        // from writeEndpoints alone would be undone by the next reconcile, which
+        // rebuilds writeEndpoints from slotsOwned.
+        String ip = deadEndpoint.getAddress().getHostString();
+        synchronized (this) {
+          slotsOwned.remove(ip);
+          routingBoostUntilMs.remove(ip);
+          reconcileWriteEndpoints();
+        }
+      } else {
+        List<Endpoint> newWrites = new ArrayList<>(this.writeEndpoints);
+        newWrites.remove(deadEndpoint);
+        this.writeEndpoints = Collections.unmodifiableList(newWrites);
+        rebuildWeightedMap();
+      }
       validateEndpoints();
   }
 
@@ -458,7 +767,8 @@ public class MemqCommonClient implements Closeable {
     Gson gson = new Gson();
     List<String> lines = Files.readAllLines(new File(serversetFile).toPath());
     return lines.stream().map(l -> gson.fromJson(l, JsonObject.class)).filter(g -> g.size() > 0)
-        .map(g -> new Endpoint(InetSocketAddress.createUnresolved(g.get("ip").getAsString(), 9092),
+        .map(g -> new Endpoint(
+            InetSocketAddress.createUnresolved(g.get("ip").getAsString(), DEFAULT_BROKER_PORT),
             g.get("az").getAsString()))
         .collect(Collectors.toList());
   }
@@ -468,6 +778,339 @@ public class MemqCommonClient implements Closeable {
       String[] parts = e.split(":");
       return new Endpoint(InetSocketAddress.createUnresolved(parts[0], Short.parseShort(parts[1])));
     }).collect(Collectors.toList());
+  }
+
+  /**
+   * Process a v4 WriteResponsePacket. There are two paths:
+   * <p>
+   * 1. Eviction path ({@code writeResp.hasEviction()}): the broker is shedding the
+   *    producer to {@code targetBrokerIp}. We:
+   *    <ul>
+   *      <li>apply the eviction normally (bump target, update source remaining),</li>
+   *      <li>arm a post-eviction routing boost on the target so the producer
+   *          over-routes there long enough for the broker-side EMA to acquire
+   *          the transferred slot,</li>
+   *      <li>register the target as an active write endpoint <b>immediately</b> so
+   *          the next dispatch can route to it (no waiting for an existing endpoint
+   *          to die or a reconnect to surface the new broker), and</li>
+   *      <li>rebuild the weighted endpoint map with the updated slot data.</li>
+   *    </ul>
+   * <p>
+   * 2. Non-eviction path: the broker reports the producer's current slot
+   *    ownership (numSlotsOwned). Once {@code v4Active}, the responding broker
+   *    is one we wrote to, so we track it in {@code slotsOwned} (seeding at a
+   *    floor of 1 when it reports 0) and
+   *    {@link #reconcileWriteEndpoints() reconcile}. Before {@code v4Active}
+   *    flips, only already-known brokers are refreshed so the weighted set is
+   *    not derived from an empty slot map.
+   * <p>
+   * The per-producer connection cap is enforced authoritatively by the broker's
+   * eviction strategy ({@code EvictionConfig.maxConnectionsPerProducer}): the
+   * broker refuses to evict to a target that would push the producer above the
+   * cap in routine mode, so the client never needs to apply its own cap and
+   * the connection set converges to a steady size via the broker's decisions.
+   */
+  public synchronized void handleWriteResponse(WriteResponsePacket writeResp,
+                                               InetSocketAddress sourceAddress) {
+    if (writeResp == null) {
+      return;
+    }
+
+    String sourceIp = sourceAddress != null ? sourceAddress.getHostString() : null;
+    int remaining = writeResp.getNumSlotsOwned();
+    short serverVersion = writeResp.getServerProtocolVersion();
+
+    // Diagnostics: log the first few responses verbatim so it's immediately
+    // visible whether the broker is actually stamping v4 capability or
+    // returning a pre-feature packet. This is the canonical answer to
+    // "why isn't v4 active?"
+    long n = writeResponseCount.incrementAndGet();
+    if (n <= LOG_FIRST_N_RESPONSES) {
+      logger.info("WriteResponse #" + n + " received: source=" + sourceAddress
+          + " serverProtocolVersion=" + serverVersion
+          + " hasEviction=" + writeResp.hasEviction()
+          + " targetBrokerIp=" + writeResp.getTargetBrokerIp()
+          + " numSlotsToEvict=" + writeResp.getNumSlotsToEvict()
+          + " numSlotsOwned=" + remaining
+          + " producerId=" + producerId
+          + " v4Active(before)=" + v4Active);
+    }
+
+    maybeActivateV4(writeResp, sourceAddress, serverVersion, remaining, n);
+
+    if (writeResp.hasEviction()) {
+      applyEviction(writeResp, sourceAddress, sourceIp, remaining);
+      return;
+    }
+
+    // Non-eviction response.
+    if (sourceIp == null) {
+      return;
+    }
+    applyNonEvictionSlotUpdate(sourceIp, remaining);
+  }
+
+  /**
+   * EXPLICIT v4 detection: the broker self-declares its protocol version on
+   * every WriteResponsePacket it produces. We never infer v4 from slot counts
+   * (those are 0 until the producer accumulates enough traffic). Once flipped,
+   * {@code v4Active} is sticky for the lifetime of the client. If we have seen
+   * enough responses without a v4 declaration, fire a one-shot "stuck on v3"
+   * warning so it can be triaged.
+   */
+  private void maybeActivateV4(WriteResponsePacket writeResp, InetSocketAddress sourceAddress,
+                               short serverVersion, int remaining, long n) {
+    if (serverVersion >= RequestType.V4) {
+      if (!v4Active) {
+        logger.info("v4 broker protocol detected; weighted endpoint selection now active."
+            + " firstSignalSource=" + sourceAddress
+            + " serverProtocolVersion=" + serverVersion
+            + " firstSlotsOwned=" + remaining
+            + " firstHasEviction=" + writeResp.hasEviction()
+            + " currentWriteEndpoints=" + writeEndpoints);
+      }
+      v4Active = true;
+    } else if (!v4Active && !stuckOnV3Warned && n >= LOG_FIRST_N_RESPONSES) {
+      // We've seen N responses with no v4 capability declaration. Either
+      // we're talking to a v3 broker fleet, or a v4 broker is on a code
+      // path that returns an unstamped WriteResponsePacket. One-shot
+      // warning so it can be triaged.
+      stuckOnV3Warned = true;
+      logger.warn("Producer is on legacy v3 routing path after " + n
+          + " write responses (broker did not declare serverProtocolVersion>=4)."
+          + " If you expect v4 weighted routing, verify: (a) brokers are"
+          + " running the v4 build that stamps responses via WriteResponseBuilder,"
+          + " (b) no proxy is stripping the trailing v4 fields, (c) producer is"
+          + " sending v4 requests (this client's producerId=" + producerId + ")."
+          + " Last response: source=" + sourceAddress
+          + " serverProtocolVersion=" + serverVersion
+          + " hasEviction=" + writeResp.hasEviction()
+          + " numSlotsOwned=" + remaining);
+    }
+  }
+
+  /**
+   * Eviction path of {@link #handleWriteResponse}: the broker is shedding this
+   * producer to {@code targetBrokerIp}. Apply the transfer to the
+   * source-of-truth slot map, arm the post-eviction routing boost on the target
+   * (and clear it on the source), reconcile the derived write endpoints, and
+   * log.
+   */
+  private void applyEviction(WriteResponsePacket writeResp, InetSocketAddress sourceAddress,
+                             String sourceIp, int remaining) {
+    String targetIp = writeResp.getTargetBrokerIp();
+    int slotsToEvict = writeResp.getNumSlotsToEvict();
+
+    // Apply the eviction to the source-of-truth slot map.
+    slotsOwned.merge(targetIp, slotsToEvict, Integer::sum);
+    if (sourceIp != null) {
+      if (remaining > 0) {
+        slotsOwned.put(sourceIp, remaining);
+      } else {
+        slotsOwned.remove(sourceIp);
+      }
+    }
+
+    // Post-eviction routing boost.
+    // Arm the +1 routing-weight boost on the target so the producer
+    // over-routes there long enough for the target's broker-side EMA
+    // to decisively cross the next ceil(EMA/slotSize) boundary and
+    // acquire the slot for real (instead of the producer's optimistic
+    // increment getting silently overwritten by the target broker's
+    // stale numSlotsOwned on the next non-eviction response).
+    // Symmetric with the broker-side post-eviction acquisition cooldown.
+    // Clear any boost on the source -- it just gave a slot away, so we
+    // must not keep over-routing to it.
+    if (postEvictionRoutingBoostMs > 0 && targetIp != null) {
+      routingBoostUntilMs.put(targetIp,
+          System.currentTimeMillis() + postEvictionRoutingBoostMs);
+    }
+    if (sourceIp != null) {
+      routingBoostUntilMs.remove(sourceIp);
+    }
+
+    // Single reconciliation: derive writeEndpoints from slotsOwned (the source
+    // of truth) and rebuild the weighted map. The dropped/drained source falls
+    // out of writeEndpoints automatically; the target is added immediately.
+    reconcileWriteEndpoints();
+
+    logger.info("Eviction received: source=" + sourceAddress + " target=" + targetIp
+        + " slotsToEvict=" + slotsToEvict + " remaining=" + remaining
+        + " slotsOwned=" + slotsOwned);
+  }
+
+  /**
+   * Non-eviction path of {@link #handleWriteResponse}: the broker reports this
+   * producer's current slot ownership. Before {@code v4Active}, only
+   * already-known brokers are refreshed so the weighted set is never grown --
+   * nor {@code writeEndpoints} derived -- from a still-empty slot map. Once
+   * {@code v4Active}, {@code slotsOwned} is the source of truth: the responding
+   * broker is tracked (seeded at a floor of 1 when it reports 0) and reconciled
+   * so it participates in weighted routing. The broker's eviction strategy is
+   * authoritative on connection-cap enforcement, so the client adds any broker
+   * it actually wrote to.
+   */
+  private void applyNonEvictionSlotUpdate(String sourceIp, int remaining) {
+    if (!v4Active) {
+      if ((slotsOwned.containsKey(sourceIp) || writeEndpointsContains(sourceIp))
+          && remaining > 0) {
+        slotsOwned.put(sourceIp, remaining);
+        rebuildWeightedMap();
+      }
+      return;
+    }
+
+    boolean isKnown = slotsOwned.containsKey(sourceIp);
+    boolean added = false;
+    if (remaining > 0) {
+      added = slotsOwned.put(sourceIp, remaining) == null;
+    } else if (!isKnown) {
+      slotsOwned.put(sourceIp, 1);
+      added = true;
+    }
+    if (added) {
+      reconcileWriteEndpoints();
+    } else {
+      rebuildWeightedMap();
+    }
+  }
+
+  /**
+   * Reconcile the derived routing state from {@link #slotsOwned}, the single
+   * source of truth in v4 mode.
+   * <p>
+   * {@link #writeEndpoints} is rebuilt to be exactly the set of brokers tracked
+   * in {@code slotsOwned} (so a broker dropped from {@code slotsOwned} -- whether
+   * by an eviction draining its slots or by a connection failure -- automatically
+   * falls out of the write set, and an eviction target is added immediately).
+   * Each tracked broker is also ensured present in {@link #localityEndpoints} so
+   * future failovers and reconnects can still see it. Finally the weighted map
+   * is rebuilt. Synthesized endpoints (for an IP not previously known) reuse the
+   * cluster port of an existing endpoint and the producer's configured locality.
+   */
+  private void reconcileWriteEndpoints() {
+    List<Endpoint> currentLocals = this.localityEndpoints;
+    List<Endpoint> newLocals = null;
+    List<Endpoint> writes = new ArrayList<>(slotsOwned.size());
+    for (String ip : slotsOwned.keySet()) {
+      Endpoint ep = findOrCreateEndpoint(ip);
+      writes.add(ep);
+      if (!containsByIp(currentLocals, ip)
+          && (newLocals == null || !containsByIp(newLocals, ip))) {
+        if (newLocals == null) {
+          newLocals = new ArrayList<>(currentLocals);
+        }
+        newLocals.add(ep);
+      }
+    }
+    if (newLocals != null) {
+      this.localityEndpoints = Collections.unmodifiableList(newLocals);
+    }
+    this.writeEndpoints = Collections.unmodifiableList(writes);
+    rebuildWeightedMap();
+  }
+
+  private boolean writeEndpointsContains(String ip) {
+    return containsByIp(this.writeEndpoints, ip);
+  }
+
+  private static boolean containsByIp(List<Endpoint> list, String ip) {
+    for (Endpoint e : list) {
+      if (e.getAddress().getHostString().equals(ip)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Look up an Endpoint by IP across known endpoint sets, or synthesize a new
+   * one. The port is inferred from existing endpoints (MemQ brokers in a
+   * cluster share the same port). The locality is set to the producer's
+   * configured locality so the synthesized endpoint participates in
+   * locality-aware filtering on future reconnects.
+   */
+  private Endpoint findOrCreateEndpoint(String ip) {
+    for (Endpoint e : this.localityEndpoints) {
+      if (e.getAddress().getHostString().equals(ip)) {
+        return e;
+      }
+    }
+    for (Endpoint e : this.writeEndpoints) {
+      if (e.getAddress().getHostString().equals(ip)) {
+        return e;
+      }
+    }
+    int port = inferDefaultPort();
+    return new Endpoint(InetSocketAddress.createUnresolved(ip, port), this.locality);
+  }
+
+  private int inferDefaultPort() {
+    List<Endpoint> locals = this.localityEndpoints;
+    if (locals != null && !locals.isEmpty()) {
+      return locals.get(0).getAddress().getPort();
+    }
+    List<Endpoint> writes = this.writeEndpoints;
+    if (writes != null && !writes.isEmpty()) {
+      return writes.get(0).getAddress().getPort();
+    }
+    return DEFAULT_BROKER_PORT;
+  }
+
+  public String getProducerId() {
+    return producerId;
+  }
+
+  /**
+   * Snapshot of {@code slotsOwned} sent on every v4+ write request so the
+   * broker can register this producer's connection set and its per-broker slot
+   * distribution.
+   * <p>
+   * The map's key set is the producer's connection set; the values are the
+   * producer's slot ownership snapshot per broker. The broker uses these counts
+   * to choose consolidation targets where the producer already has substantial
+   * slot share (anti-ping-pong) and to break ties in regular target selection.
+   *
+   * @return a snapshot map of broker IP to slot count owned there.
+   */
+  public Map<String, Integer> getCurrentConnectionSlots() {
+    if (slotsOwned.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    return new LinkedHashMap<>(slotsOwned);
+  }
+
+  public ConcurrentHashMap<String, Integer> getSlotsOwned() {
+    return slotsOwned;
+  }
+
+  /**
+   * Number of live TCP channels this client holds to brokers (physical
+   * connection count). Counts only active pooled channels. May briefly exceed
+   * the owned-endpoint count during bootstrap or right after a broker drop,
+   * since a channel can be open to a broker where no slots are yet owned.
+   */
+  public int getActiveChannelCount() {
+    return networkClient.getActiveChannelCount();
+  }
+
+  /**
+   * Number of broker endpoints on which this producer currently owns at least
+   * one slot -- the connection set reported to brokers and the quantity the
+   * broker-side eviction caps via {@code maxConnectionsPerProducer}.
+   */
+  public int getOwnedEndpointCount() {
+    return slotsOwned.size();
+  }
+
+  /**
+   * Whether the client has observed any v4-only signal from a broker (eviction
+   * directive or non-zero slot ownership). Once true, the legacy
+   * {@code numWriteEndpoints} fan-out gates are no-ops and routing is governed
+   * by the weighted endpoint map.
+   */
+  public boolean isV4Active() {
+    return v4Active;
   }
 
   public boolean isClosed() {

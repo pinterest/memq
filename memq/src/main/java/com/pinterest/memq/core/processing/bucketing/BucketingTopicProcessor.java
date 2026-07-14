@@ -36,6 +36,7 @@ import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.ScheduledReporter;
 import com.codahale.metrics.SlidingTimeWindowArrayReservoir;
 import com.codahale.metrics.Timer;
+import com.google.common.annotations.VisibleForTesting;
 import com.pinterest.memq.client.commons.MemqMessageHeader;
 import com.pinterest.memq.client.commons2.DataNotFoundException;
 import com.pinterest.memq.commons.protocol.BatchData;
@@ -49,8 +50,10 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
 import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.commons.storage.StorageHandler;
+import com.pinterest.memq.core.eviction.EvictionManager;
 import com.pinterest.memq.core.processing.Ackable;
 import com.pinterest.memq.core.processing.TopicProcessor;
+import com.pinterest.memq.core.slot.SlotManager;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
@@ -77,6 +80,7 @@ public class BucketingTopicProcessor extends TopicProcessor {
   private Counter invalidHeaderNegativeCounter;
   private Counter invalidHeaderExceptionCounter;
   private Counter emptyDataCounter;
+
 
   public BucketingTopicProcessor(MetricRegistry registry,
                                  TopicConfig topicConfig,
@@ -114,12 +118,22 @@ public class BucketingTopicProcessor extends TopicProcessor {
   @Override
   public long write(RequestPacket basePacket,
                     WriteRequestPacket writePacket,
-                    ChannelHandlerContext ctx) {
+                    ChannelHandlerContext ctx,
+                    String producerId) {
     if (writePacket.isDisableAcks()) {
-      // send an OK to producer even if ack is disabled
+      // send an OK to producer even if ack is disabled. v4 producers still
+      // need slot ownership / eviction info on every response so weighted
+      // routing and evictions work; without this they would only see empty
+      // packets here and v4Active would never flip on the producer.
+      WriteResponsePacket writeResponse = WriteResponseBuilder.build(
+          producerId,
+          basePacket.getProtocolVersion(),
+          ResponseCodes.OK,
+          batchManager.getEvictionManager(),
+          batchManager.getSlotManager());
       ctx.writeAndFlush(new ResponsePacket(basePacket.getProtocolVersion(),
           basePacket.getClientRequestId(), basePacket.getRequestType(), ResponseCodes.OK,
-          new WriteResponsePacket()));
+          writeResponse));
       // context no longer needed during the write, set it to null so acks won't be sent
       ctx = null;
     }
@@ -137,19 +151,24 @@ public class BucketingTopicProcessor extends TopicProcessor {
     long serverRequestId = serverRequestIdGenerator.getAndIncrement();
     writeCounter.inc();
     if (writePacket.getDataLength() == MemqMessageHeader.getHeaderLength()) {
-      // empty data, immediately respond without writing anything
       emptyDataCounter.inc();
       if (ctx != null) {
+        WriteResponsePacket emptyResponse = WriteResponseBuilder.build(
+            producerId,
+            basePacket.getProtocolVersion(),
+            ResponseCodes.OK,
+            batchManager.getEvictionManager(),
+            batchManager.getSlotManager());
         ctx.writeAndFlush(
             new ResponsePacket(basePacket.getProtocolVersion(), basePacket.getClientRequestId(),
-                basePacket.getRequestType(), ResponseCodes.OK, new WriteResponsePacket()));
+                basePacket.getRequestType(), ResponseCodes.OK, emptyResponse));
       }
       return serverRequestId;
     }
 
     Timer.Context totalWriteLatencyTimer = totalWriteLatency.time();
     batchManager.write(writePacket, serverRequestId, basePacket.getClientRequestId(),
-        basePacket.getProtocolVersion(), ctx);
+        basePacket.getProtocolVersion(), ctx, producerId);
     totalWriteLatencyTimer.stop();
     return serverRequestId;
   }
@@ -278,8 +297,21 @@ public class BucketingTopicProcessor extends TopicProcessor {
     }
   }
 
+  public void setEvictionManager(EvictionManager evictionManager) {
+    batchManager.setEvictionManager(evictionManager);
+  }
+
+  public void setSlotManager(SlotManager slotManager) {
+    batchManager.setSlotManager(slotManager);
+  }
+
   @Override
   public void registerChannel(Channel channel) {
     channelGroup.add(channel);
+  }
+
+  @VisibleForTesting
+  BatchManager getBatchManager() {
+    return batchManager;
   }
 }

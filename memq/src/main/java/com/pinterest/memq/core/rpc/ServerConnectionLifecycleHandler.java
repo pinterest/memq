@@ -43,7 +43,7 @@ public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler
    * @param remoteAddress     the {@link SocketAddress} to which it should connect
    * @param localAddress      the {@link SocketAddress} which is used as source on connect
    * @param promise           the {@link ChannelPromise} to notify once the operation completes
-   * @throws Exception
+   * @throws Exception if the connect operation fails
    */
   @Override
   public void connect(ChannelHandlerContext ctx, SocketAddress remoteAddress,
@@ -55,7 +55,7 @@ public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler
   /**
    * Disconnects from the remote address. Logs the channel id and remote address.
    * @param ctx       the {@link ChannelHandlerContext} for which the disconnect operation is made
-   * @throws Exception
+   * @throws Exception if the handler fails
    */
   @Override
   public void channelActive(ChannelHandlerContext ctx) throws Exception {
@@ -66,7 +66,7 @@ public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler
   /**
    * Disconnects from the remote address. Logs the channel id and remote address.
    * @param ctx       the {@link ChannelHandlerContext} for which the disconnect operation is made
-   * @throws Exception
+   * @throws Exception if the handler fails
    */
   @Override
   public void channelInactive(ChannelHandlerContext ctx) throws Exception {
@@ -79,7 +79,7 @@ public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler
    * Logs the exception caught in the inbound pipeline with channel id and closes the channel.
    * @param ctx       the {@link ChannelHandlerContext} for which the exception is caught
    * @param cause     the {@link Throwable} that was caught
-   * @throws Exception
+   * @throws Exception if the handler fails
    */
   @Override
   public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
@@ -92,7 +92,7 @@ public final class ServerConnectionLifecycleHandler extends ChannelDuplexHandler
    * If the event is an instance of {@link IdleStateEvent}, it logs the disconnection event and closes the channel.
    * @param ctx     the {@link ChannelHandlerContext} for which the user event is triggered
    * @param evt     the user event that was triggered
-   * @throws Exception
+   * @throws Exception if the handler fails
    */
   @Override
   public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {

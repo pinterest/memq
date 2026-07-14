@@ -29,6 +29,7 @@ import com.pinterest.memq.commons.protocol.RequestType;
 import com.pinterest.memq.commons.protocol.ResponseCodes;
 import com.pinterest.memq.commons.protocol.ResponsePacket;
 import com.pinterest.memq.commons.protocol.WriteRequestPacket;
+import com.pinterest.memq.commons.protocol.WriteResponsePacket;
 import com.pinterest.memq.core.utils.MemqUtils;
 import com.pinterest.memq.core.utils.MiscUtils;
 
@@ -44,6 +45,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.util.Map;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -75,6 +78,9 @@ import java.util.zip.CRC32;
  */
 public class Request {
   private static final Logger logger = LoggerFactory.getLogger(Request.class);
+  // One-shot diagnostic flag (process-wide) for unexpected response packet
+  // shapes that prevent v4 routing from activating on the client.
+  private static volatile boolean nonWriteResponseLogged = false;
 
   private final ExecutorService dispatcher;
   private final ScheduledExecutorService scheduler;
@@ -101,6 +107,8 @@ public class Request {
   private final ByteBuf requestPacketHeaderByteBuf;
   private final ByteBuf writeRequestPacketHeaderByteBuf;
   private final ByteBuf payloadByteBuf;
+  private final String snapshotProducerId;
+  private final Map<String, Integer> snapshotConnectionSlots;
   private OutputStream outputStream;
   private byte[] messageIdHash;
   private int messageCount;
@@ -148,10 +156,26 @@ public class Request {
     int bufferCapacity = getByteBufCapacity(maxRequestSize, compression);
     largeByteBuf = MemqPooledByteBufAllocator.buffer(bufferCapacity, bufferCapacity, maxBlockMs);
     requestPacketHeaderByteBuf = largeByteBuf.retainedSlice(0, RequestPacket.getHeaderSize());
-    writeRequestPacketHeaderByteBuf = largeByteBuf.retainedSlice(RequestPacket.getHeaderSize(), WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, topic));
-    payloadByteBuf = largeByteBuf.retainedSlice(RequestPacket.getHeaderSize() + WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, topic), bufferCapacity - requestPacketHeaderByteBuf.readableBytes() - writeRequestPacketHeaderByteBuf.readableBytes());
-    requestPacketHeaderByteBuf.resetWriterIndex();
+    int writeHeaderSize;
+    if (RequestType.PROTOCOL_VERSION >= 4) {
+      snapshotProducerId = client.getProducerId();
+      snapshotConnectionSlots = client.getCurrentConnectionSlots();
+      writeHeaderSize = WriteRequestPacket.getHeaderSize(
+          RequestType.PROTOCOL_VERSION, topic, snapshotProducerId,
+          snapshotConnectionSlots);
+    } else {
+      snapshotProducerId = null;
+      snapshotConnectionSlots = null;
+      writeHeaderSize = WriteRequestPacket.getHeaderSize(RequestType.PROTOCOL_VERSION, topic);
+    }
+    writeRequestPacketHeaderByteBuf = largeByteBuf.retainedSlice(
+        RequestPacket.getHeaderSize(), writeHeaderSize);
+    payloadByteBuf = largeByteBuf.retainedSlice(
+        RequestPacket.getHeaderSize() + writeHeaderSize,
+        bufferCapacity - requestPacketHeaderByteBuf.readableBytes()
+            - writeRequestPacketHeaderByteBuf.readableBytes());
     writeRequestPacketHeaderByteBuf.resetWriterIndex();
+    requestPacketHeaderByteBuf.resetWriterIndex();
     payloadByteBuf.resetWriterIndex();
     try {
       initializeOutputStream();
@@ -315,14 +339,21 @@ public class Request {
 
     WriteRequestPacket writeRequestPacket = new WriteRequestPacket(disableAcks,
             topic.getBytes(), true, checksum, payload.duplicate());
-    writeRequestPacket.writeHeader(writeRequestPacketHeaderByteBuf, RequestType.PROTOCOL_VERSION);
+    if (RequestType.PROTOCOL_VERSION >= 4) {
+      writeRequestPacket.setProducerId(snapshotProducerId);
+      writeRequestPacket.setCurrentConnectionSlots(snapshotConnectionSlots);
+    }
+
+    ByteBuf headerBuf = writeRequestPacketHeaderByteBuf;
+    writeRequestPacket.writeHeader(headerBuf, RequestType.PROTOCOL_VERSION);
+
     RequestPacket requestPacket = new RequestPacket(RequestType.PROTOCOL_VERSION, clientRequestId, RequestType.WRITE,
             writeRequestPacket);
     requestPacket.writeHeader(requestPacketHeaderByteBuf, RequestType.PROTOCOL_VERSION);
 
     CompositeByteBuf finalCompositeByteBuf = PooledByteBufAllocator.DEFAULT.compositeBuffer();
     finalCompositeByteBuf.addComponent(true, requestPacketHeaderByteBuf);
-    finalCompositeByteBuf.addComponent(true, writeRequestPacketHeaderByteBuf);
+    finalCompositeByteBuf.addComponent(true, headerBuf);
     finalCompositeByteBuf.addComponent(true, payloadByteBuf);
     requestPacket.setPreAllocOutBuf(finalCompositeByteBuf);
     return requestPacket;
@@ -506,6 +537,29 @@ public class Request {
           int ackLatency = (int) (System.currentTimeMillis() - writeTimestamp);
           ackTime.stop();
           logger.debug("Request acked in:" + ackLatency + " " + clientRequestId);
+          if (responsePacket.getPacket() instanceof WriteResponsePacket) {
+            WriteResponsePacket writeResp = (WriteResponsePacket) responsePacket.getPacket();
+            client.handleWriteResponse(writeResp, responsePacket.getSourceAddress());
+          } else if (responsePacket.getPacket() == null && !nonWriteResponseLogged) {
+            // One-shot diagnostic: an OK response with no inner packet means
+            // v4 fields (slot ownership, eviction directives) cannot be
+            // delivered. v4Active will never flip on the client. This usually
+            // means the broker took a code path that returned `null` instead
+            // of a WriteResponsePacket.
+            nonWriteResponseLogged = true;
+            logger.warn("OK response with null inner packet — v4 fields cannot"
+                + " be delivered. clientRequestId=" + clientRequestId
+                + " source=" + responsePacket.getSourceAddress());
+          } else if (responsePacket.getPacket() != null
+              && !(responsePacket.getPacket() instanceof WriteResponsePacket)
+              && !nonWriteResponseLogged) {
+            nonWriteResponseLogged = true;
+            logger.warn("OK response with unexpected packet type "
+                + responsePacket.getPacket().getClass().getSimpleName()
+                + " — handleWriteResponse will be skipped, v4Active cannot flip."
+                + " clientRequestId=" + clientRequestId
+                + " source=" + responsePacket.getSourceAddress());
+          }
           resolve(new MemqWriteResult(clientRequestId, writeLatency, ackLatency, payloadSizeBytes));
           break;
         case ResponseCodes.REDIRECT:
@@ -514,7 +568,31 @@ public class Request {
             return;
           }
           try {
-            client.reconnect(topic, false);
+            // Surgical path: drop just the redirecting broker from all
+            // client-side routing state and retry against the survivors.
+            // This preserves the v4 weighted-routing state for the rest of
+            // the broker set instead of nuking it via a full metadata
+            // refetch + endpoint reset, which is what the legacy reconnect
+            // path does.
+            //
+            // Falls back to the heavy reconnect when:
+            //   - the response source address is unknown (defensive), or
+            //   - surgical removal would empty localityEndpoints
+            //     (validateEndpoints throws), in which case we need a fresh
+            //     metadata fetch to discover any new brokers.
+            InetSocketAddress src = responsePacket.getSourceAddress();
+            if (src != null) {
+              try {
+                client.removeBroker(src);
+              } catch (Exception removeErr) {
+                logger.warn("Surgical broker removal failed for source="
+                    + src + " topic=" + topic
+                    + "; falling back to full reconnect", removeErr);
+                client.reconnect(topic, false);
+              }
+            } else {
+              client.reconnect(topic, false);
+            }
           } catch (Exception e) {
             resolve(e);
             return;

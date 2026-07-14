@@ -258,6 +258,34 @@ public class NetworkClient implements Closeable {
     lastConnectFuture = null;
   }
 
+  /**
+   * Drop a single pooled connection by remote address. Removes the entry
+   * from {@link #channelPool} synchronously (so no future request can be
+   * routed to it) and asynchronously closes the underlying Netty channel.
+   * <p>
+   * Used by the producer's surgical broker-removal path
+   * ({@code MemqCommonClient.removeBroker}) when a broker has issued a
+   * {@code REDIRECT} for a topic it no longer serves: the broker is gone
+   * from the endpoint sets, and this releases the dead pool entry without
+   * the all-channel-await semantics of {@link #reset()}.
+   * <p>
+   * No-op if {@code addr} is {@code null} or has no pooled channel.
+   */
+  public void closeChannel(InetSocketAddress addr) {
+    if (addr == null) {
+      return;
+    }
+    ChannelFuture cf = channelPool.remove(addr);
+    if (cf == null || cf.channel() == null) {
+      return;
+    }
+    cf.channel().close().addListener((ChannelFutureListener) f -> {
+      if (!f.isSuccess()) {
+        logger.warn("Failed to close channel to {}", addr, f.cause());
+      }
+    });
+  }
+
   @VisibleForTesting
   protected Map<InetSocketAddress, ChannelFuture> getChannelPool() {
     return channelPool;
@@ -308,6 +336,22 @@ public class NetworkClient implements Closeable {
 
   public int getInflightRequestCount() {
     return responseHandler.getInflightRequestCount();
+  }
+
+  /**
+   * Number of currently-open (active) pooled channels, i.e. live TCP
+   * connections this client holds to brokers. Stale pool entries whose channel
+   * has gone inactive (broker died, not yet re-acquired) are excluded, so this
+   * reflects physical connections rather than the raw pool size.
+   */
+  public int getActiveChannelCount() {
+    int count = 0;
+    for (ChannelFuture cf : channelPool.values()) {
+      if (cf.channel() != null && cf.channel().isActive()) {
+        count++;
+      }
+    }
+    return count;
   }
 
   @VisibleForTesting

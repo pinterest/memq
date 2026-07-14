@@ -50,6 +50,14 @@ public class TopicConfig implements Comparable<TopicConfig> {
 
   private boolean enableServerHeaderValidation = false;
 
+  /**
+   * Per-topic opt-in for the eviction-based balancing mechanism. Only takes
+   * effect when the broker-wide {@code EvictionConfig.enabled} is also true;
+   * i.e. balancing is active for this topic iff
+   * {@code EvictionConfig.enabled && enableBalancing}. Disabled by default.
+   */
+  private boolean enableBalancing = false;
+
   private int clusteringMultiplier = 3;
 
   @SerializedName(value = "storageHandlerName", alternate = "outputHandler")
@@ -78,6 +86,7 @@ public class TopicConfig implements Comparable<TopicConfig> {
     this.batchSizeBytes = config.batchSizeBytes;
     this.enableBucketing2Processor = config.enableBucketing2Processor;
     this.enableServerHeaderValidation = config.enableServerHeaderValidation;
+    this.enableBalancing = config.enableBalancing;
     this.clusteringMultiplier = config.clusteringMultiplier;
   }
 
@@ -269,6 +278,14 @@ public class TopicConfig implements Comparable<TopicConfig> {
     this.enableServerHeaderValidation = enableServerHeaderValidation;
   }
 
+  public boolean isEnableBalancing() {
+    return enableBalancing;
+  }
+
+  public void setEnableBalancing(boolean enableBalancing) {
+    this.enableBalancing = enableBalancing;
+  }
+
   public int getClusteringMultiplier() {
     return clusteringMultiplier;
   }
@@ -323,6 +340,9 @@ public class TopicConfig implements Comparable<TopicConfig> {
       return true;
     }
     if (enableServerHeaderValidation != that.enableServerHeaderValidation) {
+      return true;
+    }
+    if (enableBalancing != that.enableBalancing) {
       return true;
     }
     if (Double.compare(that.inputTrafficMB, inputTrafficMB) != 0) {

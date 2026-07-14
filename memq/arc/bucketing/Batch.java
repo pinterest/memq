@@ -63,7 +63,7 @@ public class Batch {
       validateChecksumAndRejectMessage(checksumBuffer, writePacket.getChecksum());
     }
     Message message = Message.newInstance(buf, packetHeader.getClientRequestId(), serverRequestId, ctx,
-        packetHeader.getProtocolVersion());
+        packetHeader.getProtocolVersion(), null);
     if (ctx != null) {
       message.setPipelineReference(ctx);
     }

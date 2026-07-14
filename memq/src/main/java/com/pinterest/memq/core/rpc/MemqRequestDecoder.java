@@ -119,6 +119,20 @@ public class MemqRequestDecoder extends ChannelInboundHandlerAdapter {
   }
 
   @Override
+  public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+    // Reclaim slot/connection accounting for v4+ producers that wrote on this
+    // connection as soon as it closes, instead of leaving it for the
+    // SlotManager idle-timeout sweep. Best-effort: a failure here must not
+    // prevent the rest of the pipeline from observing the disconnect.
+    try {
+      packetSwitchHandler.releaseChannelProducers(ctx);
+    } catch (Exception e) {
+      logger.log(Level.WARNING, "Failed to release producer state on disconnect", e);
+    }
+    super.channelInactive(ctx);
+  }
+
+  @Override
   public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
     cause.printStackTrace();
     ctx.close();

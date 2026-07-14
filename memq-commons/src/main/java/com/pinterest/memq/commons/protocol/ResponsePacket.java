@@ -16,6 +16,7 @@
 package com.pinterest.memq.commons.protocol;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 
 import io.netty.buffer.ByteBuf;
 
@@ -24,6 +25,7 @@ public class ResponsePacket extends TransportPacket {
   protected short responseCode;
   protected String errorMessage;
   protected Packet packet;
+  private transient InetSocketAddress sourceAddress;
 
   public ResponsePacket() {
   }
@@ -120,6 +122,14 @@ public class ResponsePacket extends TransportPacket {
 
   public void setErrorMessage(String errorMessage) {
     this.errorMessage = errorMessage;
+  }
+
+  public InetSocketAddress getSourceAddress() {
+    return sourceAddress;
+  }
+
+  public void setSourceAddress(InetSocketAddress sourceAddress) {
+    this.sourceAddress = sourceAddress;
   }
 
   @Override

@@ -62,7 +62,8 @@ public abstract class TopicProcessor {
 
   public abstract long write(RequestPacket basePacket,
                              WriteRequestPacket writePacket,
-                             ChannelHandlerContext ctx);
+                             ChannelHandlerContext ctx,
+                             String producerId);
 
   public abstract void stopNow();
 

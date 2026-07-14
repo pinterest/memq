@@ -18,8 +18,10 @@ package com.pinterest.memq.core;
 import java.net.UnknownHostException;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
@@ -35,7 +37,14 @@ import com.pinterest.memq.commons.mon.OpenTSDBClient;
 import com.pinterest.memq.commons.mon.OpenTSDBReporter;
 import com.pinterest.memq.core.clustering.MemqGovernor;
 import com.pinterest.memq.core.config.EnvironmentProvider;
+import com.pinterest.memq.core.config.EvictionConfig;
+import com.pinterest.memq.core.config.GossipConfig;
 import com.pinterest.memq.core.config.MemqConfig;
+import com.pinterest.memq.core.config.SlotAccountingConfig;
+import com.pinterest.memq.core.eviction.EvictionManager;
+import com.pinterest.memq.core.eviction.EvictionStrategy;
+import com.pinterest.memq.core.gossip.GossipServer;
+import com.pinterest.memq.core.slot.SlotManager;
 import com.pinterest.memq.core.mon.MemqMgrHealthCheck;
 import com.pinterest.memq.core.mon.MonitorEndpoint;
 import com.pinterest.memq.core.rpc.MemqNettyServer;
@@ -74,21 +83,43 @@ public class MemqMain extends Application<MemqConfig> {
 
     environment.healthChecks().register("base", new MemqMgrHealthCheck(memqManager));
 
+    SlotManager slotManager = initializeSlotManager(configuration, memqManager, metricsRegistryMap,
+        client);
+
     MemqGovernor memqGovernor = initializeGovernor(configuration, memqManager);
     MemqNettyServer nettyServer = initializeNettyServer(configuration, memqManager, memqGovernor,
         metricsRegistryMap, client);
+
+    GossipServer gossipServer = initializeGossipServer(configuration, memqGovernor,
+        metricsRegistryMap, client, slotManager);
+
+    EvictionManager evictionManager = initializeEvictionManager(configuration, memqManager,
+        memqGovernor, slotManager, gossipServer);
     logger.info("Memq started");
 
-    initializeShutdownHooks(memqManager, memqGovernor, nettyServer);
+    initializeShutdownHooks(memqManager, memqGovernor, nettyServer, gossipServer, slotManager,
+        evictionManager);
     initializeAdditionalModules(configuration, environment, memqManager, memqGovernor);
   }
 
   private void initializeShutdownHooks(MemqManager memqManager,
                                        MemqGovernor memqGovernor,
-                                       MemqNettyServer nettyServer) {
+                                       MemqNettyServer nettyServer,
+                                       GossipServer gossipServer,
+                                       SlotManager slotManager,
+                                       EvictionManager evictionManager) {
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
       public void run() {
+        if (evictionManager != null) {
+          evictionManager.stop();
+        }
+        if (slotManager != null) {
+          slotManager.stop();
+        }
+        if (gossipServer != null) {
+          gossipServer.stop();
+        }
         nettyServer.stop();
         memqGovernor.stop();
         try {
@@ -98,6 +129,60 @@ public class MemqMain extends Application<MemqConfig> {
         }
       }
     });
+  }
+
+  private EvictionManager initializeEvictionManager(MemqConfig configuration,
+                                                      MemqManager memqManager,
+                                                      MemqGovernor memqGovernor,
+                                                      SlotManager slotManager,
+                                                      GossipServer gossipServer) throws Exception {
+    EvictionConfig evictionConfig = configuration.getEvictionConfig();
+    if (evictionConfig == null || !evictionConfig.isEnabled()) {
+      return null;
+    }
+    if (slotManager == null || gossipServer == null) {
+      logger.warning("Eviction enabled but SlotManager or GossipServer is not available; "
+          + "disabling eviction");
+      return null;
+    }
+
+    EnvironmentProvider provider = Class.forName(configuration.getEnvironmentProvider())
+        .asSubclass(EnvironmentProvider.class).newInstance();
+
+    EvictionStrategy strategy = Class.forName(evictionConfig.getStrategyClass())
+        .asSubclass(EvictionStrategy.class)
+        .getConstructor(String.class, EvictionConfig.class)
+        .newInstance(provider.getIP(), evictionConfig);
+    // Topic-to-broker IPs view rebuilt every tick from the governor's live
+    // metadata. Used by the strategy to reject eviction targets that don't
+    // serve the producer's topic (the broker would just REDIRECT, forcing
+    // an expensive client-side metadata refresh and reconnect).
+    java.util.function.Supplier<Map<String, Set<String>>> topicToBrokerIps = () -> {
+      Map<String, com.pinterest.memq.commons.protocol.TopicMetadata> md =
+          memqGovernor.getTopicMetadataMap();
+      Map<String, Set<String>> out = new HashMap<>(md.size());
+      for (Map.Entry<String, com.pinterest.memq.commons.protocol.TopicMetadata> e : md.entrySet()) {
+        Set<String> ips = new HashSet<>();
+        for (com.pinterest.memq.commons.protocol.Broker b : e.getValue().getWriteBrokers()) {
+          ips.add(b.getBrokerIP());
+        }
+        out.put(e.getKey(), ips);
+      }
+      return out;
+    };
+    // Per-topic balancing opt-in, read live each tick from the manager's topic
+    // map so toggling TopicConfig.enableBalancing takes effect without a
+    // restart. Combined with the broker-wide EvictionConfig.enabled gate above,
+    // balancing is active for a topic iff (enabled && enableBalancing).
+    java.util.function.Supplier<Set<String>> balancingEnabledTopics =
+        memqManager::getBalancingEnabledTopics;
+    EvictionManager evictionManager = new EvictionManager(strategy, slotManager,
+        gossipServer::getPeerStates, topicToBrokerIps, balancingEnabledTopics, evictionConfig);
+    memqManager.setEvictionManager(evictionManager);
+    evictionManager.start();
+
+    logger.info("Eviction manager started (interval=" + evictionConfig.getIntervalSeconds() + "s)");
+    return evictionManager;
   }
 
   private void enableJVMMetrics(Map<String, MetricRegistry> metricsRegistryMap) {
@@ -135,8 +220,142 @@ public class MemqMain extends Application<MemqConfig> {
     return server;
   }
 
+  private GossipServer initializeGossipServer(MemqConfig configuration,
+                                                MemqGovernor memqGovernor,
+                                                Map<String, MetricRegistry> metricsRegistryMap,
+                                                OpenTSDBClient client,
+                                                SlotManager slotManager) throws Exception {
+    GossipConfig gossipConfig = configuration.getGossipConfig();
+    if (gossipConfig != null && gossipConfig.isEnabled()) {
+      EnvironmentProvider provider = Class.forName(configuration.getEnvironmentProvider())
+          .asSubclass(EnvironmentProvider.class).newInstance();
+      MetricRegistry gossipRegistry = new MetricRegistry();
+      metricsRegistryMap.put("gossip", gossipRegistry);
+      GossipServer gossipServer = new GossipServer(provider.getIP(), provider.getRack(),
+          gossipConfig, memqGovernor, gossipRegistry, slotManager);
+      gossipServer.start();
+
+      if (client != null) {
+        String localHostname = MiscUtils.getHostname();
+        Map<String, Object> tags = rackTags(provider.getRack());
+        for (String metricName : gossipRegistry.getNames()) {
+          ScheduledReporter reporter = OpenTSDBReporter.createReporterWithTags("gossip",
+              gossipRegistry, metricName, (String name, Metric metric) -> true, TimeUnit.SECONDS,
+              TimeUnit.SECONDS, client, localHostname, tags);
+          reporter.start(configuration.getOpenTsdbConfig().getFrequencyInSeconds(),
+              TimeUnit.SECONDS);
+        }
+      }
+
+      logger.info("Gossip server started on port " + gossipConfig.getPort());
+      return gossipServer;
+    }
+    return null;
+  }
+
+  private SlotManager initializeSlotManager(MemqConfig configuration,
+                                              MemqManager memqManager,
+                                              Map<String, MetricRegistry> metricsRegistryMap,
+                                              OpenTSDBClient client) throws Exception {
+    SlotAccountingConfig slotConfig = configuration.getSlotAccountingConfig();
+    if (slotConfig == null || !slotConfig.isEnabled()) {
+      return null;
+    }
+
+    int maxTrafficMbps = configuration.getNettyServerConfig().getMaxBrokerInputTrafficMbPerSec();
+    if (maxTrafficMbps <= 0) {
+      logger.warning("Slot accounting enabled but maxBrokerInputTrafficMbPerSec is not set;"
+          + " disabling slot accounting");
+      return null;
+    }
+
+    double effectiveCapacity = maxTrafficMbps * (1 - slotConfig.getSlotOverhead());
+    int totalSlots = (int) Math.ceil(effectiveCapacity / slotConfig.getSlotSizeMbps());
+
+    MetricRegistry slotRegistry = new MetricRegistry();
+
+    // Pass slotRegistry so SlotManager can register per-(pid, topic)
+    // producer.ema / producer.slots gauges (with pid + topic encoded as
+    // OpenTSDB tags via the OpenTSDBReporter '|' tag-delimiter convention).
+    SlotManager slotManager = new SlotManager(slotConfig, totalSlots, slotRegistry);
+    memqManager.setSlotManager(slotManager);
+    slotManager.start();
+    metricsRegistryMap.put("slot", slotRegistry);
+    slotRegistry.gauge("total", () -> (Gauge<Integer>) slotManager::getTotalSlots);
+    slotRegistry.gauge("occupied", () -> (Gauge<Integer>) slotManager::getSlotOccupancy);
+    slotRegistry.gauge("free", () -> (Gauge<Integer>) slotManager::getFreeSlots);
+    // Routing-slot ownership summed across producers. Distinct from "occupied"
+    // (true capacity): "owned" - "occupied" is the sub-slot fragmentation from
+    // many small producers each rounding up to a full routing slot.
+    slotRegistry.gauge("owned",
+        () -> (Gauge<Integer>) slotManager::getTotalSlotOwnershipAcrossProducers);
+    slotRegistry.gauge("frozen",
+        () -> (Gauge<Integer>) () -> slotManager.isFrozen() ? 1 : 0);
+    slotRegistry.gauge("drainLatched",
+        () -> (Gauge<Integer>) () -> slotManager.isDrainLatched() ? 1 : 0);
+    slotRegistry.gauge("producers", () -> (Gauge<Integer>) slotManager::getProducerCount);
+
+    // Per-broker aggregate slot metrics (no topic / pid dimension). Single
+    // reporter, prefix "slot" -> emits memq.slot.<name> for each gauge in
+    // the registry (total, occupied, free, frozen, producers, plus any
+    // future ones).
+    //
+    // Note: initializeMetricsTransmitter ran before this method, so the
+    // shared metricsRegistryMap-iteration path did not see "slot" and
+    // therefore did not create a reporter for it. We must create one here.
+    if (client != null) {
+      String localHostname = MiscUtils.getHostname();
+      // Tag every slot-registry metric (aggregate total/occupied/free/frozen/
+      // drainLatched/producers gauges and the per-(pid, topic) producer.ema /
+      // producer.slots gauges) with the broker's rack / AZ.
+      ScheduledReporter reporter = OpenTSDBReporter.createReporterWithTags("slot", slotRegistry,
+          "slot", (String name, Metric metric) -> true, TimeUnit.SECONDS, TimeUnit.SECONDS,
+          client, localHostname, rackTags(resolveRack(configuration)));
+      reporter.start(configuration.getOpenTsdbConfig().getFrequencyInSeconds(), TimeUnit.SECONDS);
+    }
+
+    logger.info("Slot accounting started: totalSlots=" + totalSlots
+        + " slotSizeMbps=" + slotConfig.getSlotSizeMbps()
+        + " effectiveCapacityMbps=" + effectiveCapacity);
+    return slotManager;
+  }
+
   public void initializeAdditionalModules(MemqConfig config, Environment environment, MemqManager memqManager, MemqGovernor memqGovernor) throws Exception {
 
+  }
+
+  /**
+   * Resolve this broker's rack / availability zone from the configured
+   * {@link EnvironmentProvider}, for stamping broker-level metrics with a
+   * {@code rack} tag. Returns {@code null} when no provider is configured or
+   * it cannot be instantiated, in which case callers simply omit the tag.
+   */
+  private String resolveRack(MemqConfig configuration) {
+    String providerClass = configuration.getEnvironmentProvider();
+    if (providerClass == null || providerClass.isEmpty()) {
+      return null;
+    }
+    try {
+      EnvironmentProvider provider = Class.forName(providerClass)
+          .asSubclass(EnvironmentProvider.class).newInstance();
+      return provider.getRack();
+    } catch (Exception e) {
+      logger.warning("Could not resolve broker rack for metric tagging: " + e);
+      return null;
+    }
+  }
+
+  /**
+   * Build the static OpenTSDB tag map used to stamp broker-level metric
+   * reporters with the broker's rack / AZ. Empty when the rack is unknown,
+   * which makes {@code createReporterWithTags} behave exactly like the
+   * untagged reporter.
+   */
+  private static Map<String, Object> rackTags(String rack) {
+    if (rack == null || rack.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    return Collections.singletonMap("rack", rack);
   }
 
   private OpenTSDBClient initializeMetricsTransmitter(MemqConfig configuration,

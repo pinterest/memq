@@ -16,6 +16,7 @@
 package com.pinterest.memq.core.clustering;
 
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -300,6 +301,27 @@ public class MemqGovernor {
 
   public static List<String> convertTopicAssignmentsSetToList(Set<TopicAssignment> topicAssignments) {
     return topicAssignments.stream().map(TopicConfig::getTopic).collect(Collectors.toList());
+  }
+
+  public Set<Broker> getAllBrokersInRack(String rack) {
+    if (client == null) {
+      return Collections.emptySet();
+    }
+    try {
+      List<String> children = client.getChildren().forPath(ZNODE_BROKERS);
+      Set<Broker> brokers = new HashSet<>();
+      for (String child : children) {
+        byte[] data = client.getData().forPath(ZNODE_BROKERS_BASE + child);
+        Broker broker = GSON.fromJson(new String(data), Broker.class);
+        if (rack == null || rack.equals(broker.getLocality())) {
+          brokers.add(broker);
+        }
+      }
+      return brokers;
+    } catch (Exception e) {
+      logger.log(Level.WARNING, "Failed to get brokers in rack " + rack + " from ZK", e);
+      return Collections.emptySet();
+    }
   }
 
   public void stop() {

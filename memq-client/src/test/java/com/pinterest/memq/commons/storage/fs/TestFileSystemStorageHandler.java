@@ -111,7 +111,7 @@ public class TestFileSystemStorageHandler {
         Compression.NONE, null, false);
     ByteBuf buffer = PooledByteBufAllocator.DEFAULT.buffer();
     buffer.writeBytes(msg);
-    List<Message> messages = ImmutableList.of(Message.newInstance(buffer, 1, 1, null, (short) 3));
+    List<Message> messages = ImmutableList.of(Message.newInstance(buffer, 1, 1, null, (short) 3, null));
 
     handler.writeOutput(msg.length, 0, messages);
     Properties properties = new Properties();

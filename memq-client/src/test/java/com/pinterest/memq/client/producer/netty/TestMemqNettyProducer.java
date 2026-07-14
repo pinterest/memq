@@ -164,6 +164,17 @@ public class TestMemqNettyProducer {
     buf.readBytes(tpn);
     assertEquals(topicName, new String(tpn));
     int checksum = buf.readInt();
+    if (RequestType.PROTOCOL_VERSION >= RequestType.V4) {
+      short producerIdLen = buf.readShort();
+      if (producerIdLen > 0) buf.skipBytes(producerIdLen);
+      short connCount = buf.readShort();
+      for (int i = 0; i < connCount; i++) {
+        short connLen = buf.readShort();
+        if (connLen > 0) buf.skipBytes(connLen);
+        // each connection entry carries a per-target int slot count
+        buf.readInt();
+      }
+    }
     int payloadLength = buf.readInt();
     assertEquals(totalBytesWritten + MemqMessageHeader.getHeaderLength(), payloadLength);
 

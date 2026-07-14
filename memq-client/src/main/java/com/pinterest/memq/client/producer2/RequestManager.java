@@ -41,6 +41,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * This class manages Request creation upon write requests.
  */
 public class RequestManager implements Closeable {
+  // Instance-bound gauges: their suppliers close over this manager's semaphores.
+  // Rebound at construction via remove-then-register so a recreated instance on a
+  // shared MetricRegistry wins (gauge() is get-or-create). Not removed on close()
+  // to avoid deleting a gauge a live replacement already registered.
+  private static final String GAUGE_REQUESTS_INFLIGHT = "requests.inflight";
+  private static final String GAUGE_REQUESTS_MEMORY_INFLIGHT = "requests.memory.inflight";
+
   private final ScheduledExecutorService scheduler;
   private final ExecutorService dispatcher;
   private final MemqCommonClient client;
@@ -112,8 +119,10 @@ public class RequestManager implements Closeable {
 
   private void initializeMetrics() {
     requestCounter = metricRegistry.counter("requests.created");
-    metricRegistry.gauge("requests.inflight", () -> () -> maxInflightRequests - requestCountPermits.availablePermits());
-    metricRegistry.gauge("requests.memory.inflight", () -> () -> maxInflightRequestsMemoryBytes - inflightMemoryPermits.availablePermits());
+    metricRegistry.remove(GAUGE_REQUESTS_INFLIGHT);
+    metricRegistry.gauge(GAUGE_REQUESTS_INFLIGHT, () -> () -> maxInflightRequests - requestCountPermits.availablePermits());
+    metricRegistry.remove(GAUGE_REQUESTS_MEMORY_INFLIGHT);
+    metricRegistry.gauge(GAUGE_REQUESTS_MEMORY_INFLIGHT, () -> () -> maxInflightRequestsMemoryBytes - inflightMemoryPermits.availablePermits());
   }
 
   public Future<MemqWriteResult> write(RawRecord record) throws IOException, MemoryAllocationException {
@@ -248,6 +257,8 @@ public class RequestManager implements Closeable {
   @Override
   public void close() throws IOException {
     flush();
+    // Instance-bound gauges are intentionally NOT removed here; they are rebound
+    // at construction via remove-then-register. See initializeMetrics().
     scheduler.shutdown();
     dispatcher.shutdown();
   }

@@ -28,6 +28,7 @@ public class Message {
   private volatile long serverRequestId = -1L;
   private volatile ChannelHandlerContext pipelineReference;
   private volatile short clientProtocolVersion;
+  private volatile String producerId;
   private final Recycler.Handle<Message> handle;
 
   private static final Recycler<Message> RECYCLER = new Recycler<Message>() {
@@ -45,13 +46,15 @@ public class Message {
                                     long clientRequestId,
                                     long serverRequestId,
                                     ChannelHandlerContext pipelineReference,
-                                    short clientProtocolVersion){
+                                    short clientProtocolVersion,
+                                    String producerId){
     Message message = RECYCLER.get();
     message.buf = buf;
     message.clientRequestId = clientRequestId;
     message.serverRequestId = serverRequestId;
     message.pipelineReference = pipelineReference;
     message.clientProtocolVersion = clientProtocolVersion;
+    message.producerId = producerId;
     return message;
   }
 
@@ -61,6 +64,7 @@ public class Message {
     serverRequestId = 0;
     pipelineReference = null;
     clientProtocolVersion = 0;
+    producerId = null;
     handle.recycle(this);
   }
 
@@ -149,6 +153,7 @@ public class Message {
     buf.clear();
     pipelineReference = null;
     clientProtocolVersion = 0;
+    producerId = null;
   }
 
   public ChannelHandlerContext getPipelineReference() {
@@ -165,5 +170,13 @@ public class Message {
 
   public void setClientProtocolVersion(short clientProtocolVersion) {
     this.clientProtocolVersion = clientProtocolVersion;
+  }
+
+  public String getProducerId() {
+    return producerId;
+  }
+
+  public void setProducerId(String producerId) {
+    this.producerId = producerId;
   }
 }

@@ -26,7 +26,7 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
     /**
      * Set the interval for metrics reporting.
      * If the interval is less than or equal to 0, metrics reporting is disabled.
-     * @param intervalSec
+     * @param intervalSec the reporting interval in seconds
      */
     public void setMetricsReportingIntervalSec(int intervalSec) {
         metricsReportingIntervalSec = intervalSec;
@@ -45,7 +45,7 @@ public class BrokerTrafficShapingHandler extends GlobalTrafficShapingHandler {
      * If the interval is less than or equal to 0, metrics reporting is disabled.
      * Overriding channel methods to send metrics can cause performance issues.
      * So we choose to send metrics in a separate thread periodically.
-     * @param executorService
+     * @param executorService the executor to schedule periodic reporting on
      */
     public void startPeriodicMetricsReporting(ScheduledExecutorService executorService) {
         if (metricsReportingIntervalSec <= 0) {
