@@ -1,0 +1,30 @@
+[package]
+name = "memq-rust-client"
+version = "0.1.0"
+edition = "2021"
+description = "MemQ client library: protocol parsing and storage format handling"
+
+[dependencies]
+crc32fast = "1"
+flate2 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+zstd = "0.13"
+
+# S3 presigned URL generation and fetch (rustls for TLS)
+aws-config = { version = "1", features = ["rustls"] }
+aws-sdk-s3 = { version = "1", features = ["rustls"] }
+aws-smithy-http = "0"
+
+# Kafka consumer for notification topic (pure Rust, vendored)
+kafka = { path = "../target/kafka-rust" }
+
+# HTTP client for presigned URL GET requests
+reqwest = { version = "0.12", features = ["blocking"] }
+
+# Tokio for AWS SDK async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+
+[dev-dependencies]
+base64 = "0.22"
