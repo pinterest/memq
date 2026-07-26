@@ -26,6 +26,21 @@ public class NettyServerConfig {
   private int maxBrokerInputTrafficMbPerSec = -1; // -1 means no traffic limit by default
   private int brokerInputTrafficShapingCheckIntervalMs = 1000; // 1 second by default
   private int brokerInputTrafficShapingMetricsReportIntervalSec = 60; // 1 minute by default
+
+  // Broker-wide backpressure on in-flight (dispatched-but-not-yet-uploaded) batch
+  // memory. All topics on the broker share one budget because direct memory is a
+  // broker-wide resource; bounding it prevents downstream (S3 / notification)
+  // slowness from letting the batch pipeline exhaust direct memory and OOM.
+  //
+  // <= 0 means "auto": 80% of the JVM's max direct memory (Netty's
+  // PlatformDependent.maxDirectMemory()). Applied at broker startup.
+  private long maxInflightBatchBytes = 0;
+
+  // Max time (ms) a write waits for in-flight batch memory before being rejected
+  // with SERVICE_UNAVAILABLE. Writes run on the Netty event loop, so this defaults
+  // to 0 (non-blocking, reject immediately) to avoid stalling other connections.
+  private int maxBackpressureBlockMs = 0;
+
   // SSL
   private SSLConfig sslConfig;
 
@@ -76,6 +91,22 @@ public class NettyServerConfig {
 
   public void setNumEventLoopThreads(int numEventLoopThreads) {
     this.numEventLoopThreads = numEventLoopThreads;
+  }
+
+  public long getMaxInflightBatchBytes() {
+    return maxInflightBatchBytes;
+  }
+
+  public void setMaxInflightBatchBytes(long maxInflightBatchBytes) {
+    this.maxInflightBatchBytes = maxInflightBatchBytes;
+  }
+
+  public int getMaxBackpressureBlockMs() {
+    return maxBackpressureBlockMs;
+  }
+
+  public void setMaxBackpressureBlockMs(int maxBackpressureBlockMs) {
+    this.maxBackpressureBlockMs = maxBackpressureBlockMs;
   }
 
   public SSLConfig getSslConfig() {

@@ -19,6 +19,7 @@ import java.io.File;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -86,7 +87,10 @@ public class BucketingTopicProcessor extends TopicProcessor {
                                  TopicConfig topicConfig,
                                  StorageHandler storageHandler,
                                  ScheduledExecutorService timerService,
-                                 ScheduledReporter reporter) {
+                                 ScheduledReporter reporter,
+                                 Semaphore inflightMemoryPermits,
+                                 int maxInflightMemoryMb,
+                                 int maxBlockMs) {
     this.sizeDispatchThreshold = topicConfig.getBatchSizeBytes();
     this.enableHeaderValidation = topicConfig.isEnableServerHeaderValidation();
     this.reporter = reporter;
@@ -95,7 +99,8 @@ public class BucketingTopicProcessor extends TopicProcessor {
     this.channelGroup = new DefaultChannelGroup(topicName, GlobalEventExecutor.INSTANCE);
     this.batchManager = new BatchManager(sizeDispatchThreshold, topicConfig.getMaxDispatchCount(),
         Duration.ofMillis(topicConfig.getBatchMilliSeconds()), timerService, storageHandler,
-        topicConfig.getOutputParallelism(), registry);
+        topicConfig.getOutputParallelism(), inflightMemoryPermits, maxInflightMemoryMb, maxBlockMs,
+        registry);
     initializeMetrics(registry);
   }
 
