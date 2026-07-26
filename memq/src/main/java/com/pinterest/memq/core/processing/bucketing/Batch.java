@@ -65,10 +65,10 @@ public class Batch {
   private final AtomicInteger messageIdx = new AtomicInteger();
   private final AtomicInteger messagesCount = new AtomicInteger();
   private final AtomicBoolean available = new AtomicBoolean(true);
-  // Backpressure permits reserved for this batch when it was opened; released
-  // exactly once (guarded by permitsReleased) when the batch finishes.
+  // Broker in-flight memory (in MB) reserved for this batch when it was opened;
+  // released exactly once (guarded by permitsReleased) when the batch finishes.
   private final AtomicBoolean permitsReleased = new AtomicBoolean(false);
-  private volatile int reservedMemoryBytes;
+  private volatile int reservedMemoryMb;
   private final MetricRegistry registry;
   private final BatchManager manager;
   private boolean dispatching = false;
@@ -137,12 +137,12 @@ public class Batch {
   }
 
   /**
-   * The amount of in-flight memory (bytes) this batch reserved from
+   * The amount of in-flight memory (MB) this batch reserved from
    * {@link BatchManager} when it was opened. Set by the manager right after the
    * batch is (re)opened and used to release the exact same amount on completion.
    */
-  void setReservedMemoryBytes(int reservedMemoryBytes) {
-    this.reservedMemoryBytes = reservedMemoryBytes;
+  void setReservedMemoryMb(int reservedMemoryMb) {
+    this.reservedMemoryMb = reservedMemoryMb;
   }
 
   /**
@@ -152,7 +152,7 @@ public class Batch {
    */
   private void releasePermits() {
     if (permitsReleased.compareAndSet(false, true)) {
-      manager.releaseBatchPermits(reservedMemoryBytes);
+      manager.releaseBatchPermits(reservedMemoryMb);
     }
   }
 

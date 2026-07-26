@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
@@ -49,107 +50,114 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.embedded.EmbeddedChannel;
 
 /**
- * Tests the backpressure caps ported from the producer's {@code RequestManager}
- * into {@link BatchManager}: the count and memory semaphores must reject writes
- * with {@link ServiceUnavailableException} when in-flight batches saturate the
- * caps, and must release the permits (and the message {@link ByteBuf}s) exactly
- * once when the batch finishes.
+ * Tests the broker-wide in-flight memory backpressure in {@link BatchManager}. A
+ * single shared {@link Semaphore} (MB permits, owned by MemqManager in production)
+ * bounds the direct memory held by dispatched-but-not-yet-uploaded batches across
+ * all topics. When it saturates, writes are rejected with
+ * {@link ServiceUnavailableException}, and the reserved MB (plus the message
+ * {@link ByteBuf}s) must be released exactly once when the batch finishes.
  */
 public class TestBatchManagerBackpressure {
 
   private static final long MB = 1024 * 1024;
 
   @Test
-  public void testCountBackpressureRejectsAndReleases() throws Exception {
+  public void testMemoryBackpressureRejectsAndReleases() throws Exception {
     MetricRegistry registry = new MetricRegistry();
     CountDownLatch release = new CountDownLatch(1);
     BlockingStorageHandler handler = new BlockingStorageHandler(release);
     ScheduledExecutorService scheduler =
         Executors.newScheduledThreadPool(1, new DaemonThreadFactory());
 
-    // maxDispatchCount=1 => each message becomes its own batch and is dispatched
-    // immediately; the blocking handler keeps those batches (and their permits)
-    // in flight. maxInflightBatches=2 with a large memory cap so count binds.
-    BatchManager bm = new BatchManager(10 * MB, 1, Duration.ofMinutes(10), scheduler, handler,
-        4, 2, 512 * MB, 0, registry);
+    // batch size 1MB => each batch reserves 1 MB permit. Shared budget = 2 MB, so
+    // exactly two batches may be in flight; the third write is rejected.
+    // maxDispatchCount=1 => each message becomes its own batch, dispatched
+    // immediately and held in flight by the blocking handler.
+    int budgetMb = 2;
+    Semaphore memPermits = new Semaphore(budgetMb);
+    BatchManager bm = new BatchManager(1 * MB, 1, Duration.ofMinutes(10), scheduler, handler,
+        4, memPermits, budgetMb, 0, registry);
 
     ByteBuf b1 = payload("one");
     ByteBuf b2 = payload("two");
     ByteBuf b3 = payload("three");
+    ByteBuf b4 = payload("four");
     try {
       write(bm, b1);
       write(bm, b2);
       waitFor(() -> handler.inFlight.get() == 2, 5000);
+      assertEquals("both MB permits should be reserved", 0, memPermits.availablePermits());
 
-      // both permits are held by the two blocked uploads -> third write rejected
+      // budget exhausted -> third write rejected
       try {
         write(bm, b3);
-        fail("expected ServiceUnavailableException when batch count cap is hit");
+        fail("expected ServiceUnavailableException when the memory budget is exhausted");
       } catch (ServiceUnavailableException expected) {
         // expected
       }
-      assertEquals(1, registry.counter("batching.backpressure.count.rejected").getCount());
+      assertEquals(1, registry.counter("batching.backpressure.memory.rejected").getCount());
       // a rejected write must not retain the caller's buffer
       assertEquals("rejected write must not retain the caller buffer", 1, b3.refCnt());
-      assertEquals(2, inflightBatches(registry));
 
       // let the blocked uploads finish -> permits and message buffers released
       release.countDown();
       waitFor(() -> handler.uploads.get() == 2, 5000);
-      waitFor(() -> inflightBatches(registry) == 0, 5000);
+      waitFor(() -> memPermits.availablePermits() == budgetMb, 5000);
 
       // the retained slices were released, leaving only the caller's reference
       assertEquals(1, b1.refCnt());
       assertEquals(1, b2.refCnt());
 
       // capacity is available again
-      ByteBuf b4 = payload("four");
       write(bm, b4);
       waitFor(() -> handler.uploads.get() == 3, 5000);
-      waitFor(() -> inflightBatches(registry) == 0, 5000);
+      waitFor(() -> memPermits.availablePermits() == budgetMb, 5000);
       assertEquals(1, b4.refCnt());
-      b4.release();
     } finally {
       b1.release();
       b2.release();
       b3.release();
+      b4.release();
       bm.stop();
       scheduler.shutdownNow();
     }
   }
 
   @Test
-  public void testMemoryBackpressureRejects() throws Exception {
+  public void testReservationClampedToBudgetSoSingleBatchAlwaysFits() throws Exception {
     MetricRegistry registry = new MetricRegistry();
     CountDownLatch release = new CountDownLatch(1);
     BlockingStorageHandler handler = new BlockingStorageHandler(release);
     ScheduledExecutorService scheduler =
         Executors.newScheduledThreadPool(1, new DaemonThreadFactory());
 
-    // per-batch reservation == sizeDispatchThreshold (1MB), memory cap == 1MB so
-    // only ONE batch fits regardless of the (large) count cap => memory binds.
-    BatchManager bm = new BatchManager(1 * MB, 1, Duration.ofMinutes(10), scheduler, handler,
-        4, 100, 1 * MB, 0, registry);
+    // batch size (10MB) is larger than the whole budget (1MB). The reservation
+    // must clamp to the budget so a single batch can still be admitted (topic is
+    // never permanently unwritable), and the next batch is rejected.
+    int budgetMb = 1;
+    Semaphore memPermits = new Semaphore(budgetMb);
+    BatchManager bm = new BatchManager(10 * MB, 1, Duration.ofMinutes(10), scheduler, handler,
+        4, memPermits, budgetMb, 0, registry);
 
     ByteBuf b1 = payload("one");
     ByteBuf b2 = payload("two");
     try {
       write(bm, b1);
       waitFor(() -> handler.inFlight.get() == 1, 5000);
+      assertEquals(0, memPermits.availablePermits());
 
       try {
         write(bm, b2);
-        fail("expected ServiceUnavailableException when batch memory cap is hit");
+        fail("expected ServiceUnavailableException when the memory budget is exhausted");
       } catch (ServiceUnavailableException expected) {
         // expected
       }
       assertEquals(1, registry.counter("batching.backpressure.memory.rejected").getCount());
-      assertEquals(0, registry.counter("batching.backpressure.count.rejected").getCount());
       assertEquals(1, b2.refCnt());
 
       release.countDown();
       waitFor(() -> handler.uploads.get() == 1, 5000);
-      waitFor(() -> inflightBatchBytes(registry) == 0, 5000);
+      waitFor(() -> memPermits.availablePermits() == budgetMb, 5000);
       assertEquals(1, b1.refCnt());
     } finally {
       b1.release();
@@ -177,30 +185,24 @@ public class TestBatchManagerBackpressure {
     ScheduledExecutorService scheduler =
         Executors.newScheduledThreadPool(1, new DaemonThreadFactory());
 
+    int budgetMb = 4;
+    Semaphore memPermits = new Semaphore(budgetMb);
     BatchManager bm = new BatchManager(1 * MB, 100, Duration.ofMillis(150), scheduler, handler,
-        2, 1, 1 * MB, 0, registry);
+        2, memPermits, budgetMb, 0, registry);
     try {
       // open a batch without writing anything to it
       Batch batch = bm.getAvailablePayload();
       assertNotNull(batch);
-      assertEquals("opening a batch must consume one permit", 1, inflightBatches(registry));
+      assertEquals("opening a batch must reserve its MB", budgetMb - 1, memPermits.availablePermits());
 
-      // the empty batch is time-dispatched and must release its permit even
+      // the empty batch is time-dispatched and must release its reservation even
       // though it uploads nothing (DispatchTask empty path)
-      waitFor(() -> inflightBatches(registry) == 0, 5000);
+      waitFor(() -> memPermits.availablePermits() == budgetMb, 5000);
       assertEquals("empty batch must not be uploaded", 0, uploads.get());
     } finally {
       bm.stop();
       scheduler.shutdownNow();
     }
-  }
-
-  private static int inflightBatches(MetricRegistry registry) {
-    return (Integer) registry.getGauges().get("batching.batches.inflight").getValue();
-  }
-
-  private static int inflightBatchBytes(MetricRegistry registry) {
-    return (Integer) registry.getGauges().get("batching.batches.memory.inflight").getValue();
   }
 
   private static void write(BatchManager bm, ByteBuf buf) {

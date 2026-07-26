@@ -57,42 +57,32 @@ public class BatchManager {
   private volatile SlotManager slotManager;
 
   private static final int PAYLOAD_CACHE_SIZE_LIMIT = 10;
+  private static final long BYTES_PER_MB = 1024L * 1024L;
 
-  // Backpressure: bound the number of concurrently in-flight batches and the
-  // direct memory they reserve, mirroring the producer's RequestManager. A
-  // batch reserves permits when it is opened (getAvailablePayload) and releases
-  // them exactly once when its DispatchTask finishes and the message ByteBufs
-  // have been released. This prevents downstream (S3 / notification) slowness
-  // from letting dispatched-but-not-yet-uploaded batches accumulate in the
-  // dispatcher queue and exhaust direct memory.
-  private final int maxInflightBatches;
-  private final int maxInflightBatchBytes;
+  // Broker-wide backpressure: a batch reserves in-flight memory when it is opened
+  // (getAvailablePayload) and releases it exactly once when its DispatchTask
+  // finishes and the message ByteBufs have been released. The semaphore is shared
+  // across every topic on the broker (owned by MemqManager) because direct memory
+  // is a broker-wide resource; bounding it prevents downstream (S3 / notification)
+  // slowness from letting dispatched-but-not-yet-uploaded batches accumulate and
+  // exhaust direct memory. Permits are counted in MB (see BYTES_PER_MB) so the
+  // budget can exceed the Integer.MAX_VALUE byte ceiling of a Semaphore.
+  private final Semaphore inflightMemoryPermits;
+  private final int maxInflightMemoryMb;
   private final int maxBlockMs;
-  private final Semaphore batchCountPermits;    // limits number of in-flight batches
-  private final Semaphore inflightMemoryPermits; // limits memory used by in-flight batches
 
   private Histogram payloadRetries;
   private Timer payloadWriteTime;
   private Timer payloadAcquireTime;
   private Timer payloadValidationTime;
   private Counter payloadCreation;
-  private Counter batchCountRejected;
   private Counter batchMemoryRejected;
 
   public BatchManager(long sizeDispatchThreshold, int countDispatchThreshold,
                       Duration timeDispatchThreshold,
                       ScheduledExecutorService scheduler, StorageHandler handler,
-                      int outputParallelism, MetricRegistry registry) {
-    this(sizeDispatchThreshold, countDispatchThreshold, timeDispatchThreshold, scheduler, handler,
-        outputParallelism, Math.max(4 * outputParallelism, 8),
-        Math.max(4L * outputParallelism, 8L) * sizeDispatchThreshold, 0, registry);
-  }
-
-  public BatchManager(long sizeDispatchThreshold, int countDispatchThreshold,
-                      Duration timeDispatchThreshold,
-                      ScheduledExecutorService scheduler, StorageHandler handler,
-                      int outputParallelism, int maxInflightBatches, long maxInflightBatchBytes,
-                      int maxBlockMs, MetricRegistry registry) {
+                      int outputParallelism, Semaphore inflightMemoryPermits,
+                      int maxInflightMemoryMb, int maxBlockMs, MetricRegistry registry) {
     this.sizeDispatchThreshold = sizeDispatchThreshold;
     this.countDispatchThreshold = countDispatchThreshold;
     this.timeDispatchThreshold = timeDispatchThreshold;
@@ -102,21 +92,15 @@ public class BatchManager {
     this.registry = registry;
     this.recycledBatches = new ArrayBlockingQueue<>(PAYLOAD_CACHE_SIZE_LIMIT);
 
-    this.maxInflightBatches = Math.max(1, maxInflightBatches);
-    this.batchCountPermits = new Semaphore(this.maxInflightBatches);
-    // Semaphore permits are ints, so clamp the byte budget. Also guarantee it is
-    // large enough to hold at least one max-size batch, otherwise every acquire
-    // would fail and the topic would be permanently unwritable.
-    long clampedBytes = Math.min(maxInflightBatchBytes, Integer.MAX_VALUE);
-    clampedBytes = Math.max(clampedBytes, Math.min(sizeDispatchThreshold, Integer.MAX_VALUE));
-    this.maxInflightBatchBytes = (int) clampedBytes;
-    this.inflightMemoryPermits = new Semaphore(this.maxInflightBatchBytes);
+    this.inflightMemoryPermits = inflightMemoryPermits;
+    this.maxInflightMemoryMb = Math.max(1, maxInflightMemoryMb);
     this.maxBlockMs = Math.max(0, maxBlockMs);
 
     initializeMetrics(registry);
   }
 
-  public boolean reconfigure(long sizeDispatchThreshold, int countDispatchThreshold, Duration timeDispatchThreshold) {
+  public boolean reconfigure(long sizeDispatchThreshold, int countDispatchThreshold,
+                             Duration timeDispatchThreshold) {
     if (sizeDispatchThreshold != this.sizeDispatchThreshold) {
       this.sizeDispatchThreshold = sizeDispatchThreshold;
     }
@@ -131,6 +115,16 @@ public class BatchManager {
     return true;
   }
 
+  /**
+   * Memory a newly opened batch reserves, in MB permits: the (ceil) batch size,
+   * clamped to at least 1MB and at most the whole budget so a single batch can
+   * always eventually be admitted and the topic is never permanently unwritable.
+   */
+  private int reservationMb() {
+    long mb = (sizeDispatchThreshold + BYTES_PER_MB - 1) / BYTES_PER_MB;
+    return (int) Math.max(1, Math.min(mb, maxInflightMemoryMb));
+  }
+
   protected void initializeMetrics(MetricRegistry registry) {
     this.payloadRetries = registry.histogram("batching.payload.retries");
     registry.gauge("batching.payload.cache.size", () ->
@@ -140,14 +134,11 @@ public class BatchManager {
     this.payloadWriteTime = MiscUtils.oneMinuteWindowTimer(registry,"batching.payload.write");
     this.payloadAcquireTime = MiscUtils.oneMinuteWindowTimer(registry, "batching.payload.acquire");
     this.payloadValidationTime = MiscUtils.oneMinuteWindowTimer(registry, "batching.payload.validate");
-    this.batchCountRejected = registry.counter("batching.backpressure.count.rejected");
+    // The broker-wide in-flight memory gauges live on the broker-level (_misc)
+    // registry in MemqManager since the budget is shared across topics; this
+    // per-topic counter attributes which topic's writes were rejected when the
+    // shared budget was exhausted.
     this.batchMemoryRejected = registry.counter("batching.backpressure.memory.rejected");
-    registry.gauge("batching.batches.inflight", () ->
-        (Gauge<Integer>) () -> maxInflightBatches - batchCountPermits.availablePermits()
-    );
-    registry.gauge("batching.batches.memory.inflight", () ->
-        (Gauge<Integer>) () -> maxInflightBatchBytes - inflightMemoryPermits.availablePermits()
-    );
   }
 
   public void write(WriteRequestPacket writePacket,
@@ -193,10 +184,10 @@ public class BatchManager {
       if (currentBatch == null || !currentBatch.isAvailable()) {
         synchronized (this) {
           if (currentBatch == null || !currentBatch.isAvailable()) {
-            // Reserve backpressure permits for the batch we are about to open.
-            // The reservation is the (clamped) max size a batch can hold and is
-            // stored on the batch so its DispatchTask releases the exact amount.
-            int reservation = (int) Math.min(sizeDispatchThreshold, maxInflightBatchBytes);
+            // Reserve broker-wide in-flight memory for the batch we are about to
+            // open. The reservation (in MB) is stored on the batch so its
+            // DispatchTask releases the exact amount.
+            int reservation = reservationMb();
             acquireBatchPermits(reservation);
             try {
               Batch batch = recycledBatches.poll();
@@ -214,7 +205,7 @@ public class BatchManager {
                 payloadCreation.inc();
               }
               batch.reset(sizeDispatchThreshold, countDispatchThreshold, timeDispatchThreshold); // reset thresholds in case configs are updated
-              batch.setReservedMemoryBytes(reservation);
+              batch.setReservedMemoryMb(reservation);
               currentBatch = batch;
             } catch (Throwable t) {
               // opening the batch failed after acquiring; release to avoid a leak
@@ -232,63 +223,37 @@ public class BatchManager {
   }
 
   /**
-   * Reserve one in-flight batch (count permit) and {@code reservation} bytes of
-   * in-flight memory, mirroring {@code RequestManager.getAvailableRequest}. The
-   * count permit is acquired without blocking; the memory permit waits up to
-   * {@code maxBlockMs} (0 = non-blocking). On exhaustion the write is rejected
-   * with {@link ServiceUnavailableException}, which the broker maps to
-   * SERVICE_UNAVAILABLE so producers back off instead of the batch pipeline
-   * silently growing until direct memory is exhausted.
+   * Reserve {@code reservationMb} MB from the shared broker in-flight memory
+   * budget. Waits up to {@code maxBlockMs} (0 = non-blocking). On exhaustion the
+   * write is rejected with {@link ServiceUnavailableException}, which the broker
+   * maps to SERVICE_UNAVAILABLE so producers back off instead of the batch
+   * pipeline silently growing until direct memory is exhausted.
    */
-  private void acquireBatchPermits(int reservation) {
-    boolean countPermitAcquired = false;
-    boolean memoryPermitAcquired = false;
+  private void acquireBatchPermits(int reservationMb) {
+    boolean acquired;
     try {
-      countPermitAcquired = batchCountPermits.tryAcquire(0, TimeUnit.MILLISECONDS);
-      memoryPermitAcquired = inflightMemoryPermits.tryAcquire(reservation, maxBlockMs,
-          TimeUnit.MILLISECONDS);
+      acquired = inflightMemoryPermits.tryAcquire(reservationMb, maxBlockMs, TimeUnit.MILLISECONDS);
     } catch (InterruptedException ie) {
-      maybeReleaseBatchPermits(memoryPermitAcquired, countPermitAcquired, reservation);
       Thread.currentThread().interrupt();
-      throw new ServiceUnavailableException("Interrupted while acquiring batch permits");
+      throw new ServiceUnavailableException("Interrupted while acquiring batch memory permits");
     }
-    if (!countPermitAcquired) {
-      maybeReleaseBatchPermits(memoryPermitAcquired, countPermitAcquired, reservation);
-      batchCountRejected.inc();
-      throw new ServiceUnavailableException(String.format(
-          "Could not acquire batch count semaphore. Current: %s, Max: %s",
-          maxInflightBatches - batchCountPermits.availablePermits(), maxInflightBatches));
-    }
-    if (!memoryPermitAcquired) {
-      maybeReleaseBatchPermits(memoryPermitAcquired, countPermitAcquired, reservation);
+    if (!acquired) {
       batchMemoryRejected.inc();
       throw new ServiceUnavailableException(String.format(
-          "Could not acquire batch memory semaphore in %sms. Current: %s bytes, Max: %s bytes",
-          maxBlockMs, maxInflightBatchBytes - inflightMemoryPermits.availablePermits(),
-          maxInflightBatchBytes));
-    }
-  }
-
-  private void maybeReleaseBatchPermits(boolean memoryPermitAcquired,
-                                        boolean countPermitAcquired,
-                                        int reservation) {
-    if (countPermitAcquired) {
-      batchCountPermits.release();
-    }
-    if (memoryPermitAcquired) {
-      inflightMemoryPermits.release(reservation);
+          "Could not acquire %sMB from broker in-flight memory budget in %sms. In-flight: %sMB, Max: %sMB",
+          reservationMb, maxBlockMs, maxInflightMemoryMb - inflightMemoryPermits.availablePermits(),
+          maxInflightMemoryMb));
     }
   }
 
   /**
-   * Release the permits reserved by a batch. Called exactly once per batch
-   * lifecycle from the batch's DispatchTask after the message buffers have been
-   * released. {@code reservation} must be the same value that was acquired for
-   * that batch (stored on the batch as its reserved memory).
+   * Release the memory a batch reserved. Called exactly once per batch lifecycle
+   * from the batch's DispatchTask after the message buffers have been released.
+   * {@code reservationMb} must equal the amount acquired for that batch (stored on
+   * the batch as its reserved memory).
    */
-  void releaseBatchPermits(int reservation) {
-    batchCountPermits.release();
-    inflightMemoryPermits.release(reservation);
+  void releaseBatchPermits(int reservationMb) {
+    inflightMemoryPermits.release(reservationMb);
   }
 
   public void recycle(Batch p, boolean isTimeBased) {

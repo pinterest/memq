@@ -30,6 +30,7 @@ import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -177,7 +178,7 @@ public class TestBucketingTopicProcessor {
     ScheduledExecutorService timerService = Executors.newScheduledThreadPool(1,
         new DaemonThreadFactory());
     BucketingTopicProcessor processor = new BucketingTopicProcessor(registry, topicConfig,
-        outputHandler, timerService, null);
+        outputHandler, timerService, null, new Semaphore(Integer.MAX_VALUE), Integer.MAX_VALUE, 0);
     int bytesWritten = 0;
     try {
       for (int i = 0; i < 20; i++) {
@@ -247,7 +248,7 @@ public class TestBucketingTopicProcessor {
     ScheduledExecutorService timerService = Executors.newScheduledThreadPool(1,
         new DaemonThreadFactory());
     BucketingTopicProcessor processor = new BucketingTopicProcessor(registry, topicConfig,
-        outputHandler, timerService, null);
+        outputHandler, timerService, null, new Semaphore(Integer.MAX_VALUE), Integer.MAX_VALUE, 0);
     int bytesWritten = 0;
     try {
       for (int i = 0; i < 20; i++) {
@@ -323,7 +324,7 @@ public class TestBucketingTopicProcessor {
     ScheduledExecutorService timerService = Executors.newScheduledThreadPool(1,
         new DaemonThreadFactory());
     BucketingTopicProcessor processor = new BucketingTopicProcessor(registry, topicConfig,
-        outputHandler, timerService, null);
+        outputHandler, timerService, null, new Semaphore(Integer.MAX_VALUE), Integer.MAX_VALUE, 0);
     int bytesWritten = 0;
     try {
       for (int i = 0; i < 20; i++) {
@@ -388,7 +389,7 @@ public class TestBucketingTopicProcessor {
     ScheduledExecutorService timerService = Executors.newScheduledThreadPool(1,
         new DaemonThreadFactory());
     BucketingTopicProcessor processor = new BucketingTopicProcessor(registry, topicConfig,
-        outputHandler, timerService, null);
+        outputHandler, timerService, null, new Semaphore(Integer.MAX_VALUE), Integer.MAX_VALUE, 0);
     int bytesWritten = 0;
     try {
       for (int i = 0; i < 20; i++) {
@@ -465,7 +466,7 @@ public class TestBucketingTopicProcessor {
     ScheduledExecutorService timerService = Executors.newScheduledThreadPool(1,
         new DaemonThreadFactory());
     BucketingTopicProcessor processor = new BucketingTopicProcessor(registry, topicConfig,
-        outputHandler, timerService, null);
+        outputHandler, timerService, null, new Semaphore(Integer.MAX_VALUE), Integer.MAX_VALUE, 0);
 
     com.pinterest.memq.core.config.SlotAccountingConfig slotConfig =
         new com.pinterest.memq.core.config.SlotAccountingConfig();

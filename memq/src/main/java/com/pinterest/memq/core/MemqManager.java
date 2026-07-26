@@ -29,6 +29,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
@@ -38,6 +39,7 @@ import javax.ws.rs.BadRequestException;
 import javax.ws.rs.InternalServerErrorException;
 import javax.ws.rs.NotFoundException;
 
+import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.ScheduledReporter;
 import com.google.gson.Gson;
@@ -48,6 +50,7 @@ import com.pinterest.memq.commons.protocol.TopicConfig;
 import com.pinterest.memq.commons.storage.StorageHandler;
 import com.pinterest.memq.commons.storage.StorageHandlerTable;
 import com.pinterest.memq.core.config.MemqConfig;
+import com.pinterest.memq.core.config.NettyServerConfig;
 import com.pinterest.memq.core.eviction.EvictionManager;
 import com.pinterest.memq.core.processing.TopicProcessor;
 import com.pinterest.memq.core.processing.TopicProcessorState;
@@ -57,6 +60,7 @@ import com.pinterest.memq.core.utils.DaemonThreadFactory;
 import com.pinterest.memq.core.utils.MiscUtils;
 
 import io.dropwizard.lifecycle.Managed;
+import io.netty.util.internal.PlatformDependent;
 
 public class MemqManager implements Managed {
 
@@ -74,6 +78,17 @@ public class MemqManager implements Managed {
   private SlotManager slotManager;
   private EvictionManager evictionManager;
 
+  private static final long BYTES_PER_MB = 1024L * 1024L;
+  private static final double AUTO_DIRECT_MEMORY_FRACTION = 0.8;
+
+  // Broker-wide backpressure budget shared by every topic's BatchManager. Direct
+  // memory is a broker-wide resource, so a single shared semaphore (in MB permits,
+  // since Semaphore permits are ints and the budget can exceed 2GB) bounds the
+  // total in-flight batch memory across all topics. Sized once at startup.
+  private static volatile Semaphore inflightMemoryPermits;
+  private static volatile int maxInflightMemoryMb;
+  private static volatile int backpressureMaxBlockMs;
+
   public MemqManager(OpenTSDBClient client,
                      MemqConfig configuration,
                      Map<String, MetricRegistry> metricsRegistryMap) throws UnknownHostException {
@@ -85,6 +100,38 @@ public class MemqManager implements Managed {
         DaemonThreadFactory.INSTANCE);
     this.disabled = new AtomicBoolean();
     this.client = client;
+    initializeInflightMemoryBackpressure();
+  }
+
+  /**
+   * Size the broker-wide in-flight batch memory budget from
+   * {@link NettyServerConfig#getMaxInflightBatchBytes()} (or 80% of the JVM's max
+   * direct memory when unset) and register broker-level gauges. The budget is held
+   * in MB permits so it can exceed the {@link Integer#MAX_VALUE} byte ceiling of a
+   * {@link Semaphore}.
+   */
+  private void initializeInflightMemoryBackpressure() {
+    NettyServerConfig nettyServerConfig = configuration.getNettyServerConfig();
+    long configuredBytes = nettyServerConfig != null ? nettyServerConfig.getMaxInflightBatchBytes() : 0;
+    long maxDirectMemory = PlatformDependent.maxDirectMemory();
+    long budgetBytes = configuredBytes > 0 ? configuredBytes
+        : (long) (maxDirectMemory * AUTO_DIRECT_MEMORY_FRACTION);
+    // at least 1MB so a topic is never permanently unwritable
+    int budgetMb = (int) Math.max(1, Math.min(budgetBytes / BYTES_PER_MB, Integer.MAX_VALUE));
+    maxInflightMemoryMb = budgetMb;
+    inflightMemoryPermits = new Semaphore(budgetMb);
+    backpressureMaxBlockMs = nettyServerConfig != null
+        ? Math.max(0, nettyServerConfig.getMaxBackpressureBlockMs()) : 0;
+
+    MetricRegistry misc = metricsRegistryMap != null ? metricsRegistryMap.get("_misc") : null;
+    if (misc != null) {
+      misc.gauge("backpressure.memory.max.mb", () -> (Gauge<Integer>) () -> maxInflightMemoryMb);
+      misc.gauge("backpressure.memory.inflight.mb",
+          () -> (Gauge<Integer>) () -> maxInflightMemoryMb - inflightMemoryPermits.availablePermits());
+    }
+    logger.info("Initialized broker in-flight batch memory backpressure: budget=" + budgetMb
+        + "MB, maxDirectMemory=" + (maxDirectMemory / BYTES_PER_MB) + "MB, source="
+        + (configuredBytes > 0 ? "config" : "auto(80%)") + ", maxBlockMs=" + backpressureMaxBlockMs);
   }
 
   public void init() throws Exception {
@@ -148,7 +195,8 @@ public class MemqManager implements Managed {
     if (topicConfig.getRingBufferSize() == 0) {
       topicConfig.setRingBufferSize(configuration.getDefaultRingBufferSize());
     }
-    BucketingTopicProcessor tp = new BucketingTopicProcessor(registry, topicConfig, storageHandler, timerService, reporter);
+    BucketingTopicProcessor tp = new BucketingTopicProcessor(registry, topicConfig, storageHandler,
+        timerService, reporter, inflightMemoryPermits, maxInflightMemoryMb, backpressureMaxBlockMs);
     if (evictionManager != null) {
       tp.setEvictionManager(evictionManager);
     }
