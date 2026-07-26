@@ -42,6 +42,43 @@ public class TopicConfig implements Comparable<TopicConfig> {
 
   private int maxDispatchCount = 100;
 
+  /**
+   * Backpressure cap on the number of concurrently in-flight batches (batches
+   * that have been opened and not yet fully uploaded/released) on the broker.
+   * This is the broker-side analog of the producer's {@code maxInflightRequests}
+   * and, together with {@link #maxInflightBatchBytes}, bounds the direct memory
+   * the ingest-to-upload pipeline can hold so downstream (S3/notification)
+   * slowness cannot exhaust direct memory.
+   * <p>
+   * A value {@code <= 0} means "auto": {@code max(4 * outputParallelism, 8)},
+   * which leaves headroom above the {@code outputParallelism} concurrent uploads
+   * plus the accumulating batch so normal traffic is never throttled.
+   * <p>
+   * Applied at BatchManager construction; changing it requires a restart.
+   */
+  private int maxInflightBatches = 0;
+
+  /**
+   * Backpressure cap on the total direct memory (in bytes) reserved by
+   * in-flight batches on the broker. Broker-side analog of the producer's
+   * {@code maxInflightRequestsMemoryBytes}. Each opened batch reserves up to
+   * {@code batchSizeBytes} until it is uploaded and released.
+   * <p>
+   * A value {@code <= 0} means "auto": {@code maxInflightBatches * batchSizeBytes}.
+   * <p>
+   * Applied at BatchManager construction; changing it requires a restart.
+   */
+  private long maxInflightBatchBytes = 0;
+
+  /**
+   * Maximum time (ms) a write will wait to acquire an in-flight batch permit
+   * before the batch backpressure caps reject it with SERVICE_UNAVAILABLE.
+   * Broker-side analog of the producer's {@code maxBlockMs}. Because writes are
+   * processed on the Netty event loop, this defaults to {@code 0} (non-blocking,
+   * reject immediately) to avoid stalling other connections on the same loop.
+   */
+  private int maxBlockMs = 0;
+
   private String topic;
 
   private int tickFrequencyMillis = 1000;
@@ -78,6 +115,9 @@ public class TopicConfig implements Comparable<TopicConfig> {
     this.bufferSize = config.bufferSize;
     this.outputParallelism = config.outputParallelism;
     this.maxDispatchCount = config.maxDispatchCount;
+    this.maxInflightBatches = config.maxInflightBatches;
+    this.maxInflightBatchBytes = config.maxInflightBatchBytes;
+    this.maxBlockMs = config.maxBlockMs;
     this.tickFrequencyMillis = config.tickFrequencyMillis;
     this.batchMilliSeconds = config.batchMilliSeconds;
     this.storageHandlerConfig = config.storageHandlerConfig;
@@ -194,6 +234,45 @@ public class TopicConfig implements Comparable<TopicConfig> {
 
   public void setMaxDispatchCount(int maxDispatchCount) {
     this.maxDispatchCount = maxDispatchCount;
+  }
+
+  /**
+   * @return the configured in-flight batch count cap, or the self-scaling
+   *         default {@code max(4 * outputParallelism, 8)} when unset ({@code <= 0}).
+   */
+  public int getMaxInflightBatches() {
+    if (maxInflightBatches > 0) {
+      return maxInflightBatches;
+    }
+    return Math.max(4 * outputParallelism, 8);
+  }
+
+  public void setMaxInflightBatches(int maxInflightBatches) {
+    this.maxInflightBatches = maxInflightBatches;
+  }
+
+  /**
+   * @return the configured in-flight batch memory cap in bytes, or the
+   *         self-scaling default {@code getMaxInflightBatches() * batchSizeBytes}
+   *         when unset ({@code <= 0}).
+   */
+  public long getMaxInflightBatchBytes() {
+    if (maxInflightBatchBytes > 0) {
+      return maxInflightBatchBytes;
+    }
+    return (long) getMaxInflightBatches() * getBatchSizeBytes();
+  }
+
+  public void setMaxInflightBatchBytes(long maxInflightBatchBytes) {
+    this.maxInflightBatchBytes = maxInflightBatchBytes;
+  }
+
+  public int getMaxBlockMs() {
+    return maxBlockMs;
+  }
+
+  public void setMaxBlockMs(int maxBlockMs) {
+    this.maxBlockMs = maxBlockMs;
   }
 
   /**

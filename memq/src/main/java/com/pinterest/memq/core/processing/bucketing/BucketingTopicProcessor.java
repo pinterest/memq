@@ -95,7 +95,8 @@ public class BucketingTopicProcessor extends TopicProcessor {
     this.channelGroup = new DefaultChannelGroup(topicName, GlobalEventExecutor.INSTANCE);
     this.batchManager = new BatchManager(sizeDispatchThreshold, topicConfig.getMaxDispatchCount(),
         Duration.ofMillis(topicConfig.getBatchMilliSeconds()), timerService, storageHandler,
-        topicConfig.getOutputParallelism(), registry);
+        topicConfig.getOutputParallelism(), topicConfig.getMaxInflightBatches(),
+        topicConfig.getMaxInflightBatchBytes(), topicConfig.getMaxBlockMs(), registry);
     initializeMetrics(registry);
   }
 

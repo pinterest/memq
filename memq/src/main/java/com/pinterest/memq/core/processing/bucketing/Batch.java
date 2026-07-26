@@ -65,6 +65,10 @@ public class Batch {
   private final AtomicInteger messageIdx = new AtomicInteger();
   private final AtomicInteger messagesCount = new AtomicInteger();
   private final AtomicBoolean available = new AtomicBoolean(true);
+  // Backpressure permits reserved for this batch when it was opened; released
+  // exactly once (guarded by permitsReleased) when the batch finishes.
+  private final AtomicBoolean permitsReleased = new AtomicBoolean(false);
+  private volatile int reservedMemoryBytes;
   private final MetricRegistry registry;
   private final BatchManager manager;
   private boolean dispatching = false;
@@ -115,6 +119,7 @@ public class Batch {
     }
     messagesCount.set(0);
     available.set(true);
+    permitsReleased.set(false);
     this.sizeDispatchThreshold = sizeDispatchThreshold;
     if (this.countDispatchThreshold != countDispatchThreshold) {
       // reset messages[] size to new countDispatchThreshold
@@ -129,6 +134,26 @@ public class Batch {
 
   protected void clear() {
     activeWrites.set(0);
+  }
+
+  /**
+   * The amount of in-flight memory (bytes) this batch reserved from
+   * {@link BatchManager} when it was opened. Set by the manager right after the
+   * batch is (re)opened and used to release the exact same amount on completion.
+   */
+  void setReservedMemoryBytes(int reservedMemoryBytes) {
+    this.reservedMemoryBytes = reservedMemoryBytes;
+  }
+
+  /**
+   * Release the backpressure permits reserved for this batch back to the
+   * manager. Guarded so it runs at most once per batch lifecycle even if the
+   * batch is dispatched more than once (e.g. via forceDispatch).
+   */
+  private void releasePermits() {
+    if (permitsReleased.compareAndSet(false, true)) {
+      manager.releaseBatchPermits(reservedMemoryBytes);
+    }
   }
 
   protected void scheduleTimeBasedDispatch() {
@@ -270,6 +295,9 @@ public class Batch {
       final List<Message> messageList = Arrays.asList(messages).subList(0, messagesCount.get());
       if (messageList.isEmpty()) {
         clear();
+        // an empty batch (e.g. time-based dispatch of an idle batch) still
+        // reserved permits when it was opened, so release them here
+        releasePermits();
         return;
       }
 
@@ -292,6 +320,9 @@ public class Batch {
         clearMessageBuffers(messageList);
         ackMessages(messageList, responseCode);
         clear();
+        // release permits after the ByteBufs are freed but before recycling, so
+        // the batch cannot be reopened for reuse while its permits are still held
+        releasePermits();
         manager.recycle(Batch.this, isTimeBased);
       }
     }
