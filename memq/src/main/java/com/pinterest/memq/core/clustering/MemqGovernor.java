@@ -24,6 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -32,7 +33,7 @@ import org.apache.curator.RetryPolicy;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.framework.recipes.leader.LeaderSelector;
-import org.apache.curator.framework.recipes.leader.LeaderSelectorListener;
+import org.apache.curator.framework.recipes.leader.LeaderSelectorListenerAdapter;
 import org.apache.curator.framework.state.ConnectionState;
 import org.apache.curator.framework.state.ConnectionStateListener;
 import org.apache.curator.retry.ExponentialBackoffRetry;
@@ -59,6 +60,9 @@ public class MemqGovernor {
   public static final String ZNODE_TOPICS = "/topics";
   public static final String METRIC_BROKER_ZNODE_MISSING = "broker.znode.missing";
   public static final String METRIC_BROKER_REREGISTERED = "broker.znode.reregistered";
+  public static final String METRIC_LEADERSHIP_ACQUIRED = "governor.leadership.acquired";
+  public static final String METRIC_LEADERSHIP_RELINQUISHED = "governor.leadership.relinquished";
+  private static final long LEADERSHIP_PARK_INTERVAL_MS = 5000;
   private static final Gson GSON = new Gson();
   private static final Logger logger = Logger.getLogger(MemqGovernor.class.getCanonicalName());
   private MemqConfig config;
@@ -163,23 +167,8 @@ public class MemqGovernor {
 
     initializeZNodesAndWatchers(client);
 
-    leaderSelector = new LeaderSelector(client, ZNODE_GOVERNOR, new LeaderSelectorListener() {
-
-      @Override
-      public void stateChanged(CuratorFramework client, ConnectionState newState) {
-        logger.info("Connection state changed:" + newState);
-      }
-
-      @Override
-      public void takeLeadership(CuratorFramework client) throws Exception {
-        logger.info("Elected leader for cluster");
-        // start leader process
-        client.setData().forPath(ZNODE_GOVERNOR, provider.getIP().getBytes());
-        while (!closed) {
-          Thread.sleep(5000);
-        }
-      }
-    });
+    leaderSelector = new LeaderSelector(client, ZNODE_GOVERNOR,
+        new GovernorLeadershipListener(provider.getIP(), () -> closed, metricRegistry));
 
     if (clusteringConfig.isEnableBalancer()) {
       Balancer balancer = new Balancer(config, this, client, leaderSelector);
@@ -361,6 +350,70 @@ public class MemqGovernor {
 
   public CuratorFramework getCuratorFramework() {
     return client;
+  }
+
+  /**
+   * Holds cluster leadership for as long as this broker is both running and able to prove
+   * to ZooKeeper that it still owns the {@code /governor} lock.
+   *
+   * <p>
+   * Extending {@link LeaderSelectorListenerAdapter} is load bearing, not stylistic. Curator
+   * cannot take leadership away on its own: {@code LeaderSelector.hasLeadership()} stays
+   * true until {@link #takeLeadership(CuratorFramework)} returns, and the underlying
+   * {@code InterProcessMutex} has no idea that ZooKeeper deleted its ephemeral lock znode
+   * when the session expired. The only path back out is {@code stateChanged} throwing
+   * {@link org.apache.curator.framework.recipes.leader.CancelLeadershipException}, which
+   * Curator catches and turns into an interrupt of the leadership thread. The adapter
+   * supplies exactly that behavior for every state the connection state error policy
+   * considers an error. A listener that merely logs the state change leaves a deposed
+   * governor believing it is still the leader for the rest of the process's life, which
+   * produces two live governors while ZooKeeper only ever reflects the newest one.
+   * </p>
+   *
+   * <p>
+   * Under the default {@code StandardConnectionStateErrorPolicy} this steps down on
+   * SUSPENDED as well as LOST. That is deliberate: stepping down as soon as the ensemble
+   * becomes unreachable is strictly earlier than waiting to be told the session expired, so
+   * it shrinks the window in which a successor could already be balancing. Leadership is
+   * cheap to reacquire because the selector is started with {@code autoRequeue()}.
+   * </p>
+   */
+  static final class GovernorLeadershipListener extends LeaderSelectorListenerAdapter {
+
+    private final String governorIp;
+    private final BooleanSupplier stopped;
+    private final MetricRegistry metricRegistry;
+
+    GovernorLeadershipListener(String governorIp,
+                               BooleanSupplier stopped,
+                               MetricRegistry metricRegistry) {
+      this.governorIp = governorIp;
+      this.stopped = stopped;
+      this.metricRegistry = metricRegistry;
+    }
+
+    @Override
+    public void takeLeadership(CuratorFramework client) throws Exception {
+      logger.info("Elected leader for cluster:" + governorIp);
+      metricRegistry.counter(METRIC_LEADERSHIP_ACQUIRED).inc();
+      try {
+        // start leader process
+        client.setData().forPath(ZNODE_GOVERNOR, governorIp.getBytes());
+        // Returning from here relinquishes leadership, so park until the broker shuts down
+        // or Curator interrupts us because the connection to ZooKeeper degraded.
+        while (!stopped.getAsBoolean() && !Thread.currentThread().isInterrupted()) {
+          Thread.sleep(LEADERSHIP_PARK_INTERVAL_MS);
+        }
+      } finally {
+        metricRegistry.counter(METRIC_LEADERSHIP_RELINQUISHED).inc();
+        if (stopped.getAsBoolean()) {
+          logger.info("Relinquished cluster leadership during shutdown:" + governorIp);
+        } else {
+          logger.warning(
+              "Relinquished cluster leadership, ZooKeeper connection degraded:" + governorIp);
+        }
+      }
+    }
   }
 
 }

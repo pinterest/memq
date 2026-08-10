@@ -121,11 +121,7 @@ public class Balancer implements Runnable {
     Set<Broker> writeBrokers = brokers.stream().filter(
         v -> v.getBrokerType() == BrokerType.WRITE || v.getBrokerType() == BrokerType.READ_WRITE)
         .collect(Collectors.toSet());
-    Set<Broker> newBrokers = writeBalanceStrategy.balance(topics, writeBrokers);
-    // update brokers
-    for (Broker broker : newBrokers) {
-      client.setData().forPath(MemqGovernor.ZNODE_BROKERS_BASE + broker.getBrokerIP(), GSON.toJson(broker).getBytes());
-    }
+    publishAssignments(writeBalanceStrategy.balance(topics, writeBrokers));
   }
 
   private void balanceAndUpdateReadBrokers(Set<Broker> brokers,
@@ -134,8 +130,26 @@ public class Balancer implements Runnable {
         .filter(
             v -> v.getBrokerType() == BrokerType.READ || v.getBrokerType() == BrokerType.READ_WRITE)
         .collect(Collectors.toSet());
-    Set<Broker> newBrokers = readBalanceStrategy.balance(topics, writeBrokers);
-    // update brokers
+    publishAssignments(readBalanceStrategy.balance(topics, writeBrokers));
+  }
+
+  /**
+   * Writes computed assignments back to the broker znodes, but only while this broker is
+   * still the governor.
+   *
+   * <p>
+   * Leadership is rechecked here rather than relying solely on the check at the top of
+   * {@link #run()} because everything in between (reading every broker and topic znode,
+   * then running the balance strategy) talks to ZooKeeper and can take long enough for the
+   * session to expire and a successor to be elected. Publishing a plan computed while we
+   * were still leader would let a deposed governor fight the new one over assignments.
+   * </p>
+   */
+  void publishAssignments(Set<Broker> newBrokers) throws Exception {
+    if (!leaderSelector.hasLeadership()) {
+      logger.warning("Lost cluster leadership while balancing, discarding computed assignments");
+      return;
+    }
     for (Broker broker : newBrokers) {
       client.setData().forPath(MemqGovernor.ZNODE_BROKERS_BASE + broker.getBrokerIP(), GSON.toJson(broker).getBytes());
     }
