@@ -61,6 +61,7 @@ public class MemqGovernor {
   public static final String METRIC_BROKER_ZNODE_MISSING = "broker.znode.missing";
   public static final String METRIC_BROKER_REREGISTERED = "broker.znode.reregistered";
   public static final String METRIC_LEADERSHIP_ACQUIRED = "governor.leadership.acquired";
+  public static final String METRIC_LEADERSHIP_SET = "governor.leadership.set";
   public static final String METRIC_LEADERSHIP_RELINQUISHED = "governor.leadership.relinquished";
   private static final long LEADERSHIP_PARK_INTERVAL_MS = 5000;
   private static final Gson GSON = new Gson();
@@ -399,18 +400,33 @@ public class MemqGovernor {
       try {
         // start leader process
         client.setData().forPath(ZNODE_GOVERNOR, governorIp.getBytes());
+        // Distinct from acquiring leadership: this confirms we published our identity as
+        // the governor, which is what the rest of the cluster reads.
+        metricRegistry.counter(METRIC_LEADERSHIP_SET).inc();
         // Returning from here relinquishes leadership, so park until the broker shuts down
         // or Curator interrupts us because the connection to ZooKeeper degraded.
         while (!stopped.getAsBoolean() && !Thread.currentThread().isInterrupted()) {
           Thread.sleep(LEADERSHIP_PARK_INTERVAL_MS);
         }
+      } catch (InterruptedException e) {
+        // Expected step-down path: Curator interrupts the leadership thread (via the
+        // adapter's CancelLeadershipException) when the connection degrades. Restore the
+        // flag and fall through to relinquish.
+        Thread.currentThread().interrupt();
+      } catch (Exception e) {
+        // setData (or another operation) failed for a reason we can't assume; log the
+        // actual cause instead of attributing it to a degraded connection.
+        logger.log(Level.WARNING, "Relinquished cluster leadership due to error:" + governorIp, e);
+        throw e;
       } finally {
         metricRegistry.counter(METRIC_LEADERSHIP_RELINQUISHED).inc();
         if (stopped.getAsBoolean()) {
           logger.info("Relinquished cluster leadership during shutdown:" + governorIp);
+        } else if (Thread.currentThread().isInterrupted()) {
+          logger.warning("Relinquished cluster leadership, Curator revoked it because the "
+              + "ZooKeeper connection degraded:" + governorIp);
         } else {
-          logger.warning(
-              "Relinquished cluster leadership, ZooKeeper connection degraded:" + governorIp);
+          logger.warning("Relinquished cluster leadership:" + governorIp);
         }
       }
     }
