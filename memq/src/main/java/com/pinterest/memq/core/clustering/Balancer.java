@@ -15,14 +15,19 @@
  */
 package com.pinterest.memq.core.clustering;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 import org.apache.curator.framework.CuratorFramework;
+import org.apache.curator.framework.api.transaction.CuratorOp;
 import org.apache.curator.framework.recipes.leader.LeaderSelector;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.data.Stat;
 
 import com.google.gson.Gson;
 import com.pinterest.memq.commons.protocol.Broker;
@@ -78,6 +83,13 @@ public class Balancer implements Runnable {
         // run topic provisioning and balancing
         logger.info("Running topic balancer");
         try {
+          // Capture the leadership epoch before computing anything. The /governor znode is
+          // rewritten on every leadership term (see MemqGovernor.takeLeadership), so its
+          // version is a fencing token. The plan is committed against this token so a
+          // governor that lost and (via autoRequeue) regained leadership cannot publish a
+          // plan computed under a stale term.
+          int fencingVersion = readGovernorEpoch();
+
           // get current cluster capacity
           Set<Broker> brokers = new HashSet<>();
           for (String id : client.getChildren().forPath(MemqGovernor.ZNODE_BROKERS)) {
@@ -100,8 +112,7 @@ public class Balancer implements Runnable {
             TopicConfig topic = GSON.fromJson(topicConfig, TopicConfig.class);
             topics.add(topic);
           }
-          balanceAndUpdateWriteBrokers(brokers, topics);
-//          balanceAndUpdateReadBrokers(brokers, topics);
+          balanceAndUpdateWriteBrokers(brokers, topics, fencingVersion);
           logger.info("Updated brokers with topic assignments:" + brokers);
         } catch (Exception e) {
           logger.log(Level.SEVERE, "Exception during balancing", e);
@@ -117,41 +128,80 @@ public class Balancer implements Runnable {
   }
 
   private void balanceAndUpdateWriteBrokers(Set<Broker> brokers,
-                                            Set<TopicConfig> topics) throws Exception {
+                                            Set<TopicConfig> topics,
+                                            int fencingVersion) throws Exception {
     Set<Broker> writeBrokers = brokers.stream().filter(
         v -> v.getBrokerType() == BrokerType.WRITE || v.getBrokerType() == BrokerType.READ_WRITE)
         .collect(Collectors.toSet());
-    publishAssignments(writeBalanceStrategy.balance(topics, writeBrokers));
+    publishAssignments(writeBalanceStrategy.balance(topics, writeBrokers), fencingVersion);
   }
 
   private void balanceAndUpdateReadBrokers(Set<Broker> brokers,
-                                           Set<TopicConfig> topics) throws Exception {
+                                           Set<TopicConfig> topics,
+                                           int fencingVersion) throws Exception {
     Set<Broker> writeBrokers = brokers.stream()
         .filter(
             v -> v.getBrokerType() == BrokerType.READ || v.getBrokerType() == BrokerType.READ_WRITE)
         .collect(Collectors.toSet());
-    publishAssignments(readBalanceStrategy.balance(topics, writeBrokers));
+    publishAssignments(readBalanceStrategy.balance(topics, writeBrokers), fencingVersion);
   }
 
   /**
-   * Writes computed assignments back to the broker znodes, but only while this broker is
-   * still the governor.
+   * Reads the current leadership epoch, i.e. the version of the {@link MemqGovernor#ZNODE_GOVERNOR}
+   * znode. That znode is rewritten every time a broker takes leadership, so its version
+   * increments monotonically across terms and can be used as a fencing token.
+   *
+   * @return the current version, or {@code -1} if the governor znode does not exist
+   */
+  private int readGovernorEpoch() throws Exception {
+    Stat stat = client.checkExists().forPath(MemqGovernor.ZNODE_GOVERNOR);
+    return stat != null ? stat.getVersion() : -1;
+  }
+
+  /**
+   * Atomically writes computed assignments back to the broker znodes, fenced to the
+   * leadership term the plan was computed under.
    *
    * <p>
-   * Leadership is rechecked here rather than relying solely on the check at the top of
-   * {@link #run()} because everything in between (reading every broker and topic znode,
-   * then running the balance strategy) talks to ZooKeeper and can take long enough for the
-   * session to expire and a successor to be elected. Publishing a plan computed while we
-   * were still leader would let a deposed governor fight the new one over assignments.
+   * A plain {@code hasLeadership()} recheck is only a point-in-time guard: it cannot ensure
+   * leadership was held continuously from plan computation through every write. With
+   * {@code autoRequeue()} a governor can lose its session, have a successor take over, then
+   * reacquire leadership and publish a plan built under the now-defunct term, fighting the
+   * new governor over assignments.
+   * </p>
+   *
+   * <p>
+   * To fence this, the writes are issued as a single ZooKeeper transaction guarded by a
+   * version check on {@link MemqGovernor#ZNODE_GOVERNOR} ({@code fencingVersion}, captured
+   * before computing the plan). Because that znode is rewritten on every leadership term,
+   * any intervening term change bumps its version and ZooKeeper rejects the whole
+   * transaction atomically, so a stale plan is never partially applied.
    * </p>
    */
-  void publishAssignments(Set<Broker> newBrokers) throws Exception {
+  void publishAssignments(Set<Broker> newBrokers, int fencingVersion) throws Exception {
     if (!leaderSelector.hasLeadership()) {
       logger.warning("Lost cluster leadership while balancing, discarding computed assignments");
       return;
     }
+    if (fencingVersion < 0) {
+      logger.warning("Governor epoch znode missing, discarding computed assignments");
+      return;
+    }
+    if (newBrokers.isEmpty()) {
+      return;
+    }
+    List<CuratorOp> ops = new ArrayList<>();
+    ops.add(client.transactionOp().check().withVersion(fencingVersion)
+        .forPath(MemqGovernor.ZNODE_GOVERNOR));
     for (Broker broker : newBrokers) {
-      client.setData().forPath(MemqGovernor.ZNODE_BROKERS_BASE + broker.getBrokerIP(), GSON.toJson(broker).getBytes());
+      ops.add(client.transactionOp().setData().forPath(
+          MemqGovernor.ZNODE_BROKERS_BASE + broker.getBrokerIP(), GSON.toJson(broker).getBytes()));
+    }
+    try {
+      client.transaction().forOperations(ops);
+    } catch (KeeperException.BadVersionException e) {
+      logger.warning("Governor epoch changed (leadership term ended) during balancing; "
+          + "discarding stale assignments computed under the previous term");
     }
   }
 

@@ -15,13 +15,8 @@
  */
 package com.pinterest.memq.core.clustering;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
@@ -29,67 +24,115 @@ import java.util.HashSet;
 import java.util.Set;
 
 import org.apache.curator.framework.CuratorFramework;
-import org.apache.curator.framework.api.SetDataBuilder;
+import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.framework.recipes.leader.LeaderSelector;
+import org.apache.curator.retry.ExponentialBackoffRetry;
+import org.apache.curator.test.TestingServer;
+import org.apache.zookeeper.CreateMode;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
+import com.google.gson.Gson;
 import com.pinterest.memq.commons.protocol.Broker;
 import com.pinterest.memq.commons.protocol.Broker.BrokerType;
+import com.pinterest.memq.commons.protocol.TopicAssignment;
 import com.pinterest.memq.core.config.ClusteringConfig;
 import com.pinterest.memq.core.config.MemqConfig;
 
 public class TestBalancer {
 
-  /**
-   * A governor that lost its ZK session mid-balance must not publish the plan it computed
-   * while it still believed it was the leader, otherwise it fights the new governor over
-   * topic assignments.
-   */
-  @Test
-  public void testAssignmentsAreNotPublishedAfterLosingLeadership() throws Exception {
-    CuratorFramework client = mock(CuratorFramework.class);
-    LeaderSelector leaderSelector = mock(LeaderSelector.class);
-    when(leaderSelector.hasLeadership()).thenReturn(false);
+  private static final Gson GSON = new Gson();
+  private static final String BROKER_IP = "10.0.0.7";
+  private static final String BROKER_PATH = MemqGovernor.ZNODE_BROKERS_BASE + BROKER_IP;
 
-    Balancer balancer = new Balancer(newConfig(), mock(MemqGovernor.class), client, leaderSelector);
-    balancer.publishAssignments(brokers("10.0.0.1", "10.0.0.2"));
+  private TestingServer testingServer;
+  private CuratorFramework client;
+  private LeaderSelector leaderSelector;
+  private Balancer balancer;
 
-    verify(client, never()).setData();
-  }
+  @Before
+  public void setup() throws Exception {
+    testingServer = new TestingServer();
+    client = CuratorFrameworkFactory.newClient(testingServer.getConnectString(),
+        new ExponentialBackoffRetry(500, 3));
+    client.start();
+    client.blockUntilConnected();
 
-  @Test
-  public void testAssignmentsArePublishedWhileLeader() throws Exception {
-    CuratorFramework client = mock(CuratorFramework.class);
-    SetDataBuilder setDataBuilder = mock(SetDataBuilder.class);
-    when(client.setData()).thenReturn(setDataBuilder);
-    when(setDataBuilder.forPath(anyString(), any(byte[].class))).thenReturn(null);
-    LeaderSelector leaderSelector = mock(LeaderSelector.class);
-    when(leaderSelector.hasLeadership()).thenReturn(true);
+    // /governor is the fencing anchor; its version is the leadership epoch.
+    client.create().withMode(CreateMode.PERSISTENT).forPath(MemqGovernor.ZNODE_GOVERNOR,
+        "governorA".getBytes());
+    client.create().withMode(CreateMode.PERSISTENT).forPath(MemqGovernor.ZNODE_BROKERS);
+    client.create().withMode(CreateMode.PERSISTENT).forPath(BROKER_PATH,
+        GSON.toJson(broker("rack-old")).getBytes());
 
-    Balancer balancer = new Balancer(newConfig(), mock(MemqGovernor.class), client, leaderSelector);
-    balancer.publishAssignments(brokers("10.0.0.1", "10.0.0.2"));
-
-    verify(setDataBuilder).forPath(eq(MemqGovernor.ZNODE_BROKERS_BASE + "10.0.0.1"),
-        any(byte[].class));
-    verify(setDataBuilder).forPath(eq(MemqGovernor.ZNODE_BROKERS_BASE + "10.0.0.2"),
-        any(byte[].class));
-    verify(setDataBuilder, times(2)).forPath(anyString(), any(byte[].class));
-  }
-
-  private static MemqConfig newConfig() {
-    MemqConfig config = new MemqConfig();
     ClusteringConfig clusteringConfig = new ClusteringConfig();
     clusteringConfig.setEnableExpiration(false);
-    config.setClusteringConfig(clusteringConfig);
-    return config;
+    MemqConfig config = mock(MemqConfig.class);
+    when(config.getClusteringConfig()).thenReturn(clusteringConfig);
+
+    leaderSelector = mock(LeaderSelector.class);
+    when(leaderSelector.hasLeadership()).thenReturn(true);
+
+    balancer = new Balancer(config, mock(MemqGovernor.class), client, leaderSelector);
   }
 
-  private static Set<Broker> brokers(String... ips) {
-    Set<Broker> brokers = new HashSet<>();
-    for (String ip : ips) {
-      brokers.add(new Broker(ip, (short) 9092, "test-instance", "test-rack", BrokerType.WRITE,
-          Collections.emptySet()));
+  @After
+  public void tearDown() throws Exception {
+    if (client != null) {
+      client.close();
     }
-    return brokers;
+    if (testingServer != null) {
+      testingServer.close();
+    }
+  }
+
+  private static Broker broker(String locality) {
+    return new Broker(BROKER_IP, (short) 9092, "test-instance", locality, BrokerType.WRITE,
+        new HashSet<TopicAssignment>());
+  }
+
+  private String currentBrokerLocality() throws Exception {
+    return GSON.fromJson(new String(client.getData().forPath(BROKER_PATH)), Broker.class)
+        .getLocality();
+  }
+
+  private int governorEpoch() throws Exception {
+    return client.checkExists().forPath(MemqGovernor.ZNODE_GOVERNOR).getVersion();
+  }
+
+  /**
+   * Happy path: the epoch is unchanged between plan computation and publish, so the
+   * assignments are written.
+   */
+  @Test
+  public void testPublishSucceedsWhenEpochUnchanged() throws Exception {
+    int fencingVersion = governorEpoch();
+    Set<Broker> plan = Collections.singleton(broker("rack-new"));
+
+    balancer.publishAssignments(plan, fencingVersion);
+
+    assertEquals("assignments should be published when still in the same leadership term",
+        "rack-new", currentBrokerLocality());
+  }
+
+  /**
+   * Stale-term path: a new leadership term rewrites /governor (bumping its version) after
+   * the plan was computed. The fenced transaction must be rejected atomically so the stale
+   * plan is never applied, even though hasLeadership() still reports true (mimicking a
+   * governor that lost and, via autoRequeue, regained leadership).
+   */
+  @Test
+  public void testPublishRejectedWhenEpochAdvanced() throws Exception {
+    int staleVersion = governorEpoch();
+
+    // A successor governor (or ourselves after re-acquiring) starts a new term.
+    client.setData().forPath(MemqGovernor.ZNODE_GOVERNOR, "governorB".getBytes());
+
+    Set<Broker> stalePlan = Collections.singleton(broker("rack-new"));
+    balancer.publishAssignments(stalePlan, staleVersion);
+
+    assertEquals("stale-term assignments must be discarded, leaving the znode untouched",
+        "rack-old", currentBrokerLocality());
   }
 }
