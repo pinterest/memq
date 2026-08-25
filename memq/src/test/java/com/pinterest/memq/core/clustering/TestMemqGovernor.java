@@ -41,6 +41,7 @@ import org.apache.curator.framework.state.StandardConnectionStateErrorPolicy;
 import org.apache.curator.test.KillSession;
 import org.apache.curator.test.TestingServer;
 import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.Stat;
 import org.junit.Test;
 
 import com.codahale.metrics.MetricRegistry;
@@ -163,6 +164,45 @@ public class TestMemqGovernor {
   }
 
   /**
+   * The leadership epoch must be pinned to the version this governor itself wrote when it
+   * took leadership, and must stay pinned even when {@code /governor} is advanced by another
+   * writer. This is what lets the balancer fence a plan to its own term: reading the live
+   * version instead could capture a successor's epoch and defeat the fence.
+   */
+  @Test
+  public void testLeadershipEpochPinnedToOwnTerm() throws Exception {
+    try (TestingServer testingServer = new TestingServer()) {
+      Map<String, MetricRegistry> registry = new HashMap<>();
+      MemqGovernor governor = newGovernor(testingServer.getConnectString(), "10.0.0.1", registry,
+          true);
+      try {
+        governor.init();
+        assertTrue("governor should acquire leadership and pin its epoch",
+            waitFor(() -> governor.getLeadershipEpoch() >= 0, 30_000));
+
+        CuratorFramework client = governor.getCuratorFramework();
+        int pinned = governor.getLeadershipEpoch();
+        int liveVersion = client.checkExists().forPath(MemqGovernor.ZNODE_GOVERNOR).getVersion();
+        assertEquals("epoch must be pinned to the version this governor wrote", liveVersion,
+            pinned);
+
+        // A successor-style write advances /governor beyond our pinned epoch.
+        client.setData().forPath(MemqGovernor.ZNODE_GOVERNOR, "successor".getBytes());
+        int advanced = client.checkExists().forPath(MemqGovernor.ZNODE_GOVERNOR).getVersion();
+        assertTrue("live /governor version should have advanced", advanced > pinned);
+        assertEquals("pinned epoch must not follow a foreign write to /governor", pinned,
+            governor.getLeadershipEpoch());
+      } finally {
+        governor.stop();
+      }
+
+      // Relinquishing leadership (here via shutdown) must invalidate the term epoch.
+      assertTrue("epoch must be cleared once leadership is relinquished",
+          waitFor(() -> governor.getLeadershipEpoch() == -1, 10_000));
+    }
+  }
+
+  /**
    * The connection states Curator's error policy flags must abort leadership. This is the
    * contract that {@code LeaderSelector} relies on to interrupt the leadership thread, and
    * it is the piece that a hand written {@code LeaderSelectorListener} silently drops.
@@ -173,7 +213,8 @@ public class TestMemqGovernor {
     when(client.getConnectionStateErrorPolicy())
         .thenReturn(new StandardConnectionStateErrorPolicy());
     GovernorLeadershipListener listener = new GovernorLeadershipListener("10.0.0.1", () -> false,
-        new MetricRegistry());
+        new MetricRegistry(), epoch -> {
+        });
 
     for (ConnectionState state : new ConnectionState[] { ConnectionState.SUSPENDED,
         ConnectionState.LOST }) {
@@ -200,11 +241,12 @@ public class TestMemqGovernor {
     CuratorFramework client = mock(CuratorFramework.class);
     SetDataBuilder setDataBuilder = mock(SetDataBuilder.class);
     when(client.setData()).thenReturn(setDataBuilder);
-    when(setDataBuilder.forPath(anyString(), any(byte[].class))).thenReturn(null);
+    when(setDataBuilder.forPath(anyString(), any(byte[].class))).thenReturn(new Stat());
 
     MetricRegistry registry = new MetricRegistry();
     GovernorLeadershipListener listener = new GovernorLeadershipListener("10.0.0.1", () -> false,
-        registry);
+        registry, epoch -> {
+        });
 
     AtomicReference<Throwable> failure = new AtomicReference<>();
     Thread leadershipThread = new Thread(() -> {

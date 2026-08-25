@@ -49,6 +49,7 @@ public class TestBalancer {
   private TestingServer testingServer;
   private CuratorFramework client;
   private LeaderSelector leaderSelector;
+  private MemqGovernor governor;
   private Balancer balancer;
 
   @Before
@@ -74,7 +75,8 @@ public class TestBalancer {
     leaderSelector = mock(LeaderSelector.class);
     when(leaderSelector.hasLeadership()).thenReturn(true);
 
-    balancer = new Balancer(config, mock(MemqGovernor.class), client, leaderSelector);
+    governor = mock(MemqGovernor.class);
+    balancer = new Balancer(config, governor, client, leaderSelector);
   }
 
   @After
@@ -133,6 +135,30 @@ public class TestBalancer {
     balancer.publishAssignments(stalePlan, staleVersion);
 
     assertEquals("stale-term assignments must be discarded, leaving the znode untouched",
+        "rack-old", currentBrokerLocality());
+  }
+
+  /**
+   * Reproduces the residual race the pinned epoch closes: a successor has already advanced
+   * /governor before this balancer publishes, so a live read would capture the successor's
+   * (higher) version and the fence would trivially pass. Because the balancer instead uses
+   * the governor's pinned own-term epoch (which stays behind the successor's write), the
+   * fenced transaction is rejected and the successor's assignments are left untouched.
+   */
+  @Test
+  public void testBalancerUsesGovernorPinnedEpochNotLiveVersion() throws Exception {
+    // Our own leadership term wrote /governor at this version.
+    int ourTermEpoch = governorEpoch();
+    when(governor.getLeadershipEpoch()).thenReturn(ourTermEpoch);
+
+    // A successor takes over and advances /governor beyond our pinned epoch.
+    client.setData().forPath(MemqGovernor.ZNODE_GOVERNOR, "governorB".getBytes());
+
+    // The balancer fences with the governor's pinned epoch, not the live (advanced) version.
+    Set<Broker> stalePlan = Collections.singleton(broker("rack-new"));
+    balancer.publishAssignments(stalePlan, governor.getLeadershipEpoch());
+
+    assertEquals("using the pinned own-term epoch must reject the stale publish",
         "rack-old", currentBrokerLocality());
   }
 }

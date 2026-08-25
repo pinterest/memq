@@ -25,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.function.IntConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -39,6 +40,7 @@ import org.apache.curator.framework.state.ConnectionStateListener;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.data.Stat;
 
 import com.codahale.metrics.MetricRegistry;
 import com.google.gson.Gson;
@@ -79,6 +81,11 @@ public class MemqGovernor {
   // SUSPENDED -> RECONNECTED keeps the same session, so the ephemeral broker
   // znode survives and must not be rewritten.
   private volatile boolean sessionLost = false;
+  // The /governor znode version written when THIS broker most recently took leadership.
+  // It is pinned to our own term and never reflects a successor's write, so the balancer
+  // can fence a computed plan to the exact term it was built under even if our local
+  // hasLeadership() lags reality. -1 means we do not currently hold a leadership term.
+  private volatile int leadershipEpoch = -1;
   private MetricRegistry metricRegistry;
   private final ExecutorService reRegistrationExecutor = Executors.newSingleThreadExecutor(r -> {
     Thread t = new Thread(r, "BrokerReRegistration");
@@ -168,8 +175,8 @@ public class MemqGovernor {
 
     initializeZNodesAndWatchers(client);
 
-    leaderSelector = new LeaderSelector(client, ZNODE_GOVERNOR,
-        new GovernorLeadershipListener(provider.getIP(), () -> closed, metricRegistry));
+    leaderSelector = new LeaderSelector(client, ZNODE_GOVERNOR, new GovernorLeadershipListener(
+        provider.getIP(), () -> closed, metricRegistry, this::setLeadershipEpoch));
 
     if (clusteringConfig.isEnableBalancer()) {
       Balancer balancer = new Balancer(config, this, client, leaderSelector);
@@ -349,6 +356,20 @@ public class MemqGovernor {
     return leaderSelector.hasLeadership();
   }
 
+  private void setLeadershipEpoch(int epoch) {
+    this.leadershipEpoch = epoch;
+  }
+
+  /**
+   * Returns the fencing token for this broker's current leadership term: the version of the
+   * {@link #ZNODE_GOVERNOR} znode that this broker wrote when it took leadership, or
+   * {@code -1} if it does not currently hold a term. The value is pinned to our own term, so
+   * it never reflects a write from a successor governor.
+   */
+  int getLeadershipEpoch() {
+    return leadershipEpoch;
+  }
+
   public CuratorFramework getCuratorFramework() {
     return client;
   }
@@ -384,13 +405,16 @@ public class MemqGovernor {
     private final String governorIp;
     private final BooleanSupplier stopped;
     private final MetricRegistry metricRegistry;
+    private final IntConsumer epochSink;
 
     GovernorLeadershipListener(String governorIp,
                                BooleanSupplier stopped,
-                               MetricRegistry metricRegistry) {
+                               MetricRegistry metricRegistry,
+                               IntConsumer epochSink) {
       this.governorIp = governorIp;
       this.stopped = stopped;
       this.metricRegistry = metricRegistry;
+      this.epochSink = epochSink;
     }
 
     @Override
@@ -399,7 +423,11 @@ public class MemqGovernor {
       metricRegistry.counter(METRIC_LEADERSHIP_ACQUIRED).inc();
       try {
         // start leader process
-        client.setData().forPath(ZNODE_GOVERNOR, governorIp.getBytes());
+        Stat stat = client.setData().forPath(ZNODE_GOVERNOR, governorIp.getBytes());
+        // Pin the fencing epoch to the version WE just wrote. This is our term's token; it
+        // never reflects a successor's write, so a plan the balancer computes under this
+        // term can be fenced precisely even if our local hasLeadership() lags a step behind.
+        epochSink.accept(stat.getVersion());
         // Distinct from acquiring leadership: this confirms we published our identity as
         // the governor, which is what the rest of the cluster reads.
         metricRegistry.counter(METRIC_LEADERSHIP_SET).inc();
@@ -419,6 +447,9 @@ public class MemqGovernor {
         logger.log(Level.WARNING, "Relinquished cluster leadership due to error:" + governorIp, e);
         throw e;
       } finally {
+        // Invalidate our term epoch first, so the balancer stops publishing the instant we
+        // step down no matter how leadership ended.
+        epochSink.accept(-1);
         metricRegistry.counter(METRIC_LEADERSHIP_RELINQUISHED).inc();
         if (stopped.getAsBoolean()) {
           logger.info("Relinquished cluster leadership during shutdown:" + governorIp);

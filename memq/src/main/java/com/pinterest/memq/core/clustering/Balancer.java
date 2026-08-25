@@ -27,7 +27,6 @@ import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.api.transaction.CuratorOp;
 import org.apache.curator.framework.recipes.leader.LeaderSelector;
 import org.apache.zookeeper.KeeperException;
-import org.apache.zookeeper.data.Stat;
 
 import com.google.gson.Gson;
 import com.pinterest.memq.commons.protocol.Broker;
@@ -83,12 +82,14 @@ public class Balancer implements Runnable {
         // run topic provisioning and balancing
         logger.info("Running topic balancer");
         try {
-          // Capture the leadership epoch before computing anything. The /governor znode is
-          // rewritten on every leadership term (see MemqGovernor.takeLeadership), so its
-          // version is a fencing token. The plan is committed against this token so a
-          // governor that lost and (via autoRequeue) regained leadership cannot publish a
-          // plan computed under a stale term.
-          int fencingVersion = readGovernorEpoch();
+          // Capture the leadership epoch before computing anything. This is the /governor
+          // version THIS broker wrote when it took leadership (pinned to our own term for
+          // the life of the term, never a successor's version). Committing the plan against
+          // this token means a plan computed under a stale term is rejected, even if our
+          // local hasLeadership() briefly lags after we lose the session. Reading the live
+          // /governor version here instead would be unsafe: if a successor had already taken
+          // over and bumped it, we would capture the successor's epoch and defeat the fence.
+          int fencingVersion = governor.getLeadershipEpoch();
 
           // get current cluster capacity
           Set<Broker> brokers = new HashSet<>();
@@ -147,18 +148,6 @@ public class Balancer implements Runnable {
   }
 
   /**
-   * Reads the current leadership epoch, i.e. the version of the {@link MemqGovernor#ZNODE_GOVERNOR}
-   * znode. That znode is rewritten every time a broker takes leadership, so its version
-   * increments monotonically across terms and can be used as a fencing token.
-   *
-   * @return the current version, or {@code -1} if the governor znode does not exist
-   */
-  private int readGovernorEpoch() throws Exception {
-    Stat stat = client.checkExists().forPath(MemqGovernor.ZNODE_GOVERNOR);
-    return stat != null ? stat.getVersion() : -1;
-  }
-
-  /**
    * Atomically writes computed assignments back to the broker znodes, fenced to the
    * leadership term the plan was computed under.
    *
@@ -172,10 +161,12 @@ public class Balancer implements Runnable {
    *
    * <p>
    * To fence this, the writes are issued as a single ZooKeeper transaction guarded by a
-   * version check on {@link MemqGovernor#ZNODE_GOVERNOR} ({@code fencingVersion}, captured
-   * before computing the plan). Because that znode is rewritten on every leadership term,
-   * any intervening term change bumps its version and ZooKeeper rejects the whole
-   * transaction atomically, so a stale plan is never partially applied.
+   * version check on {@link MemqGovernor#ZNODE_GOVERNOR} ({@code fencingVersion}). That
+   * token is {@link MemqGovernor#getLeadershipEpoch() the version this broker wrote when it
+   * took leadership}, captured before computing the plan. Because {@code /governor} is
+   * rewritten on every leadership term, any intervening term change bumps its version and
+   * ZooKeeper rejects the whole transaction atomically, so a stale plan is never partially
+   * applied.
    * </p>
    */
   void publishAssignments(Set<Broker> newBrokers, int fencingVersion) throws Exception {
