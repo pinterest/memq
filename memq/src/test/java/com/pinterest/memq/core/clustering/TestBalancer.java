@@ -161,4 +161,26 @@ public class TestBalancer {
     assertEquals("using the pinned own-term epoch must reject the stale publish",
         "rack-old", currentBrokerLocality());
   }
+
+  /**
+   * Reproduces the "balancer captures -1" scenario: Curator has flipped hasLeadership() to
+   * true, but takeLeadership() has not yet written /governor, so the governor's pinned epoch
+   * is still its initial/cleared value of -1. If a -1 fencing token were submitted to
+   * ZooKeeper it would mean "match any version" and defeat the fence entirely. The guard must
+   * instead discard the publish outright so no assignments are written, even though
+   * hasLeadership() reports true.
+   */
+  @Test
+  public void testPublishRejectedWhenEpochNotYetPinned() throws Exception {
+    when(governor.getLeadershipEpoch()).thenReturn(-1);
+    int liveVersionBefore = governorEpoch();
+
+    Set<Broker> plan = Collections.singleton(broker("rack-new"));
+    balancer.publishAssignments(plan, governor.getLeadershipEpoch());
+
+    assertEquals("an unpinned (-1) epoch must discard the publish, leaving the znode untouched",
+        "rack-old", currentBrokerLocality());
+    assertEquals("no fenced transaction should run, so /governor must be unchanged",
+        liveVersionBefore, governorEpoch());
+  }
 }
