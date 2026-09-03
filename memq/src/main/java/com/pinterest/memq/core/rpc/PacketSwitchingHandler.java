@@ -116,13 +116,23 @@ public class PacketSwitchingHandler {
       List<String> requestedTopics = mdRequest.getTopics();
       List<TopicMetadata> results;
       if (requestedTopics.isEmpty()) {
-        results = new ArrayList<>(governor.getTopicMetadataMap().values());
+        results = new ArrayList<>();
+        for (TopicMetadata md : governor.getTopicMetadataMap().values()) {
+          if (isAuthorizedForMetadata(md.getTopicName(), principal, clientAddress)) {
+            results.add(md);
+          }
+        }
       } else {
         results = new ArrayList<>(requestedTopics.size());
         for (String t : requestedTopics) {
           TopicMetadata md = governor.getTopicMetadataMap().get(t);
           if (md == null) {
             throw new NotFoundException("Topic not found:" + t);
+          }
+          if (!isAuthorizedForMetadata(t, principal, clientAddress)) {
+            throw new NotAuthorizedException(
+                "TOPIC_METADATA access to resource:" + t + " not allowed for principal:"
+                    + principal);
           }
           results.add(md);
         }
@@ -168,6 +178,23 @@ public class PacketSwitchingHandler {
             + " access to resource:" + resource + " not allowed for principal:" + principal);
       }
     }
+  }
+
+  /**
+   * TOPIC_METADATA has no single {@code resource} the way WRITE/READ do -- a
+   * request can name several topics, or none (meaning "all"). This applies
+   * the same {@link Authorizer} used for WRITE/READ per topic, treated as a
+   * READ, so metadata visibility can't exceed read visibility. Absent
+   * authorizer means authz is not enabled for this broker, matching
+   * {@link #authorize}'s existing behavior.
+   */
+  private boolean isAuthorizedForMetadata(String topicName,
+                                          Principal principal,
+                                          String clientAddress) throws Exception {
+    if (authorizer == null) {
+      return true;
+    }
+    return authorizer.authorize(principal, clientAddress, topicName, RequestType.READ);
   }
 
   protected void executeWriteRequest(ChannelHandlerContext ctx,
